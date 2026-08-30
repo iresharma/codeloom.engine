@@ -1,90 +1,86 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
-from typing import Any
 
-from protocol.commands import parse_command
-from protocol.events import Event
+from protocol.codec import ProtocolError, decode_command, encode
 from runtime.session import EngineSession
 
 
 class EngineServer:
-    def __init__(self, session: EngineSession, socket_path: Path) -> None:
-        self.session = session
-        self.socket_path = socket_path
-        self._server: asyncio.AbstractServer | None = None
-        self._clients: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+    def __init__(self, session: EngineSession, socket_path: Path):
+        self._session = session
+        self._socket_path = socket_path
+        self._stopped = asyncio.Event()
 
     async def serve(self) -> None:
-        if self.socket_path.exists():
-            self.socket_path.unlink()
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
-        fanout = self.session.subscribe()
-        asyncio.create_task(self._fanout(fanout), name="engine-fanout")
-        self._server = await asyncio.start_unix_server(self._on_client, path=str(self.socket_path))
-        async with self._server:
-            await self._server.serve_forever()
-       
+        self._socket_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._socket_path.exists():
+            self._socket_path.unlink()
 
-    async def close(self) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-        if self.socket_path.exists():
-            self.socket_path.unlink()
+        server = await asyncio.start_unix_server(
+            self._on_client, path=str(self._socket_path)
+        )
+        try:
+            async with server:
+                await self._stopped.wait()
+        finally:
+            if self._socket_path.exists():
+                self._socket_path.unlink()
 
-    async def _fanout(self, queue: asyncio.Queue[Event]) -> None:
+    def stop(self) -> None:
+        self._stopped.set()
+
+    async def _on_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        queue = self._session.subscribe()
+        read_task = asyncio.create_task(self._read_commands(reader))
+        write_task = asyncio.create_task(self._write_events(writer, queue))
+        try:
+            done, pending = await asyncio.wait(
+                {read_task, write_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None and not isinstance(
+                    exc, (ConnectionError, BrokenPipeError)
+                ):
+                    raise exc
+        finally:
+            self._session.unsubscribe(queue)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def _read_commands(self, reader: asyncio.StreamReader) -> None:
+        while True:
+            line = await reader.readline()
+            if not line:
+                break
+            try:
+                command = decode_command(line)
+            except ProtocolError as exc:
+                self._session.emit_error(str(exc))
+                continue
+            await self._session.handle(command)
+
+    async def _write_events(
+        self,
+        writer: asyncio.StreamWriter,
+        queue: asyncio.Queue,
+    ) -> None:
         while True:
             event = await queue.get()
-            line = json.dumps(event.to_json(), ensure_ascii=False) + "\n"
-            stale = []
-            for _, writer in self._clients:
-                try:
-                    writer.write(line.encode("utf-8"))
-                    await writer.drain()
-                except Exception:
-                    stale.append(writer)
-            self._clients = [(reader, writer) for reader, writer in self._clients if writer not in stale]
-
-    async def _on_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        self._clients.append((reader, writer))
-        hello = {
-            "ok": True,
-            "event": "session_ready",
-            "snapshot": self.session.snapshot().to_json(),
-        }
-        writer.write((json.dumps(hello) + "\n").encode("utf-8"))
-        await writer.drain()
-        try:
-            while True:
-                raw = await reader.readline()
-                if not raw:
-                    break
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                reply = await self._handle_line(line)
-                writer.write((json.dumps(reply) + "\n").encode("utf-8"))
-                await writer.drain()
-        finally:
-            self._clients = [(item_reader, item_writer) for item_reader, item_writer in self._clients if item_writer is not writer]
-            writer.close()
-            await writer.wait_closed()
-
-    async def _handle_line(self, line: str) -> dict[str, Any]:
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError as exc:
-            return {"ok": False, "error": f"invalid json: {exc}"}
-        request_id = data.get("id")
-        try:
-            command = parse_command(data)
-            payload = await self.session.handle(command)
-            reply: dict[str, Any] = {"ok": True, **(payload or {})}
-        except Exception as exc:
-            reply = {"ok": False, "error": str(exc)}
-        if request_id is not None:
-            reply["id"] = request_id
-        return reply
+            writer.write(encode(event))
+            await writer.drain()

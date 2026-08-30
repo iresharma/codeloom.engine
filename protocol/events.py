@@ -1,256 +1,102 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Union
 
-from protocol.codec import from_dict, to_dict
-from protocol.snapshot import (
-    AgentRow,
-    ChatMessage,
-    FileTreeNode,
-    GitState,
-    PendingPrompt,
-    Stats,
-)
+from protocol.snapshot import EngineSnapshot, SessionSummary
 
 
 @dataclass
 class ChatMessageAdded:
-    message: ChatMessage
-    event: str = field(default="chat_message_added", init=False)
+    id: str
+    role: str
+    text: str
+    ts: str
 
     def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
+        return {
+            "type": "ChatMessageAdded",
+            "id": self.id,
+            "role": self.role,
+            "text": self.text,
+            "ts": self.ts,
+        }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> ChatMessageAdded:
-        payload = dict(data)
-        if isinstance(payload.get("message"), dict):
-            payload["message"] = ChatMessage.from_json(payload["message"])
-        return from_dict(cls, payload)
+        return cls(
+            id=data["id"],
+            role=data["role"],
+            text=data["text"],
+            ts=data["ts"],
+        )
 
 
 @dataclass
-class UserPromptRequested:
-    prompt: PendingPrompt
-    event: str = field(default="user_prompt_requested", init=False)
+class SnapshotReady:
+    snapshot: EngineSnapshot
 
     def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
+        return {"type": "SnapshotReady", "snapshot": self.snapshot.to_json()}
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> UserPromptRequested:
-        payload = dict(data)
-        if isinstance(payload.get("prompt"), dict):
-            payload["prompt"] = PendingPrompt.from_json(payload["prompt"])
-        return from_dict(cls, payload)
+    def from_json(cls, data: dict[str, Any]) -> SnapshotReady:
+        snap = data["snapshot"]
+        if isinstance(snap, EngineSnapshot):
+            return cls(snapshot=snap)
+        return cls(snapshot=EngineSnapshot.from_json(snap))
 
 
 @dataclass
-class FileTreeUpdated:
-    tree: list[FileTreeNode]
-    event: str = field(default="file_tree_updated", init=False)
+class SessionList:
+    sessions: list[SessionSummary]
 
     def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
+        return {
+            "type": "SessionList",
+            "sessions": [item.to_json() for item in self.sessions],
+        }
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> FileTreeUpdated:
-        payload = dict(data)
-        raw_tree = payload.get("tree") or []
-        payload["tree"] = [
-            node if isinstance(node, FileTreeNode) else FileTreeNode.from_json(node)
-            for node in raw_tree
-        ]
-        return from_dict(cls, payload)
-
-
-@dataclass
-class FileContent:
-    path: str
-    content: str
-    event: str = field(default="file_content", init=False)
-
-    def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> FileContent:
-        return from_dict(cls, data)
-
-
-@dataclass
-class FileChanged:
-    path: str
-    diff: str
-    content: str | None = None
-    event: str = field(default="file_changed", init=False)
-
-    def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> FileChanged:
-        return from_dict(cls, data)
-
-
-@dataclass
-class AgentStarted:
-    agent: AgentRow
-    event: str = field(default="agent_started", init=False)
-
-    def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> AgentStarted:
-        payload = dict(data)
-        if isinstance(payload.get("agent"), dict):
-            payload["agent"] = AgentRow.from_json(payload["agent"])
-        return from_dict(cls, payload)
-
-
-@dataclass
-class AgentUpdated:
-    agent: AgentRow
-    event: str = field(default="agent_updated", init=False)
-
-    def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> AgentUpdated:
-        payload = dict(data)
-        if isinstance(payload.get("agent"), dict):
-            payload["agent"] = AgentRow.from_json(payload["agent"])
-        return from_dict(cls, payload)
-
-
-@dataclass
-class AgentFinished:
-    agent: AgentRow
-    final_text: str = ""
-    event: str = field(default="agent_finished", init=False)
-
-    def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> AgentFinished:
-        payload = dict(data)
-        if isinstance(payload.get("agent"), dict):
-            payload["agent"] = AgentRow.from_json(payload["agent"])
-        return from_dict(cls, payload)
-
-
-@dataclass
-class GitStateUpdated:
-    git: GitState
-    event: str = field(default="git_state_updated", init=False)
-
-    def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> GitStateUpdated:
-        payload = dict(data)
-        if isinstance(payload.get("git"), dict):
-            payload["git"] = GitState.from_json(payload["git"])
-        return from_dict(cls, payload)
-
-
-@dataclass
-class StatsUpdated:
-    stats: Stats
-    event: str = field(default="stats_updated", init=False)
-
-    def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> StatsUpdated:
-        payload = dict(data)
-        if isinstance(payload.get("stats"), dict):
-            payload["stats"] = Stats.from_json(payload["stats"])
-        return from_dict(cls, payload)
-
-
-@dataclass
-class ContextFileUpdated:
-    path: str
-    content: str
-    event: str = field(default="context_file_updated", init=False)
-
-    def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> ContextFileUpdated:
-        return from_dict(cls, data)
+    def from_json(cls, data: dict[str, Any]) -> SessionList:
+        return cls(
+            sessions=[
+                item if isinstance(item, SessionSummary) else SessionSummary.from_json(item)
+                for item in data.get("sessions", [])
+            ]
+        )
 
 
 @dataclass
 class ErrorOccurred:
     message: str
-    agent_id: str | None = None
-    event: str = field(default="error_occurred", init=False)
 
     def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
+        return {"type": "ErrorOccurred", "message": self.message}
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> ErrorOccurred:
-        return from_dict(cls, data)
+        return cls(message=data["message"])
 
 
 @dataclass
 class SessionEnded:
-    reason: str = "shutdown"
-    event: str = field(default="session_ended", init=False)
+    reason: str
 
     def to_json(self) -> dict[str, Any]:
-        return to_dict(self)
+        return {"type": "SessionEnded", "reason": self.reason}
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> SessionEnded:
-        return from_dict(cls, data)
+        return cls(reason=data["reason"])
 
 
-Event = Union[
-    ChatMessageAdded,
-    UserPromptRequested,
-    FileTreeUpdated,
-    FileContent,
-    FileChanged,
-    AgentStarted,
-    AgentUpdated,
-    AgentFinished,
-    GitStateUpdated,
-    StatsUpdated,
-    ContextFileUpdated,
-    ErrorOccurred,
-    SessionEnded,
-]
+Event = Union[ChatMessageAdded, SnapshotReady, SessionList, ErrorOccurred, SessionEnded]
 
-_EVENTS: dict[str, type] = {
-    "chat_message_added": ChatMessageAdded,
-    "user_prompt_requested": UserPromptRequested,
-    "file_tree_updated": FileTreeUpdated,
-    "file_content": FileContent,
-    "file_changed": FileChanged,
-    "agent_started": AgentStarted,
-    "agent_updated": AgentUpdated,
-    "agent_finished": AgentFinished,
-    "git_state_updated": GitStateUpdated,
-    "stats_updated": StatsUpdated,
-    "context_file_updated": ContextFileUpdated,
-    "error_occurred": ErrorOccurred,
-    "session_ended": SessionEnded,
+EVENTS: dict[str, type[Event]] = {
+    "ChatMessageAdded": ChatMessageAdded,
+    "SnapshotReady": SnapshotReady,
+    "SessionList": SessionList,
+    "ErrorOccurred": ErrorOccurred,
+    "SessionEnded": SessionEnded,
 }
-
-
-def parse_event(data: dict[str, Any]) -> Event:
-    name = data.get("event") or data.get("type")
-    if name not in _EVENTS:
-        raise ValueError(f"unknown event: {name!r}")
-    return _EVENTS[name].from_json(data)

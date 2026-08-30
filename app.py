@@ -2,38 +2,45 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
 from pathlib import Path
 
-from llm.provider import build_provider
 from runtime.server import EngineServer
 from runtime.session import EngineSession
 
 
-def default_socket(workspace: Path) -> Path:
-    return workspace.resolve() / ".engine" / "engine.sock"
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Engine JSON-IPC server")
+    parser.add_argument(
+        "workspace",
+        nargs="?",
+        default=".",
+        help="project root (default: current directory)",
+    )
+    return parser.parse_args()
 
 
-async def run(workspace: Path, socket_path: Path) -> None:
-    session = EngineSession(workspace, build_provider())
+async def main() -> None:
+    args = parse_args()
+    workspace = Path(args.workspace).expanduser().resolve()
+    engine_dir = workspace / ".engine"
+    engine_dir.mkdir(parents=True, exist_ok=True)
+
+    session = EngineSession(workspace, db_path=engine_dir / "session.db")
     await session.start()
-    server = EngineServer(session, socket_path)
-    print(f"engine listening on {socket_path}")
-    try:
-        await server.serve()
-    finally:
-        await session.shutdown()
-        await server.close()
+    server = EngineServer(session, socket_path=engine_dir / "engine.sock")
 
+    def _stop() -> None:
+        session.close_session()
+        server.stop()
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Start the agentic coder engine server.")
-    parser.add_argument("workspace", nargs="?", default=".", help="Project root the engine will operate on")
-    parser.add_argument("--socket", default=None, help="Unix socket path (default: <workspace>/.engine/engine.sock)")
-    args = parser.parse_args()
-    workspace = Path(args.workspace).resolve()
-    socket_path = Path(args.socket).resolve() if args.socket else default_socket(workspace)
-    asyncio.run(run(workspace, socket_path))
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _stop)
+
+    print(f"listening on {engine_dir / 'engine.sock'}", flush=True)
+    await server.serve()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
