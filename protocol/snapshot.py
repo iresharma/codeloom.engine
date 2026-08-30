@@ -145,6 +145,8 @@ class EngineSnapshot:
     open_files: list[str]
     file_tree: list[FileTreeNode]
     git: GitState
+    language: str | None = None
+    language_supported: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -156,6 +158,8 @@ class EngineSnapshot:
             "open_files": list(self.open_files),
             "file_tree": [node.to_json() for node in self.file_tree],
             "git": self.git.to_json(),
+            "language": self.language,
+            "language_supported": self.language_supported,
         }
 
     @classmethod
@@ -174,4 +178,6 @@ class EngineSnapshot:
                 for item in data.get("file_tree") or []
             ],
             git=GitState.from_json(data.get("git")),
+            language=data.get("language"),
+            language_supported=bool(data.get("language_supported", False)),
         )

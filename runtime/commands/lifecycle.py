@@ -10,7 +10,7 @@ from protocol.commands import (
     StartSession,
     SubmitUserMessage,
 )
-from protocol.events import ErrorOccurred, SessionList
+from protocol.events import ErrorOccurred, SessionList, WarningOccurred
 from runtime.commands.register import handles
 from runtime.store import SessionState
 from runtime.store.sqlite import list_sessions, load as load_snapshot
@@ -44,6 +44,8 @@ def start_session(session, command: StartSession) -> None:
         session._persist()
     session._bind_loop()
     session._emit_snapshot()
+    if session.language.warning:
+        session._emit(WarningOccurred(message=session.language.warning))
 
 
 @handles(ListSessions)

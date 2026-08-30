@@ -15,6 +15,7 @@ from protocol.events import (
     GitStateUpdated,
     SessionList,
     SnapshotReady,
+    WarningOccurred,
 )
 from protocol.snapshot import FileTreeNode, GitState
 
@@ -130,6 +131,8 @@ def format_event(event) -> str:
         snap = event.snapshot
         lines = [
             f"session {snap.session_id}",
+            f"language: {snap.language or 'unknown'}  "
+            f"tree-sitter/LSP: {'yes' if snap.language_supported else 'no'}",
             f"open_files: {snap.open_files or []}",
             f"file_tree: {_tree_size(snap.file_tree)} entries (rebuilt, not stored)",
         ]
@@ -158,6 +161,8 @@ def format_event(event) -> str:
         return f"opened {event.path} ({nlines} lines)"
     if isinstance(event, ChatMessageAdded):
         return f"{event.role}: {event.text}"
+    if isinstance(event, WarningOccurred):
+        return f"warning: {event.message}"
     return json.dumps(event.to_json(), indent=2)
 
 

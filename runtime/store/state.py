@@ -13,7 +13,12 @@ class SessionState:
     ended: bool = False
 
     def snapshot(
-        self, workspace: str, file_tree: list[FileTreeNode], git: GitState
+        self,
+        workspace: str,
+        file_tree: list[FileTreeNode],
+        git: GitState,
+        language: str | None = None,
+        language_supported: bool = False,
     ) -> EngineSnapshot:
         if self.session_id is None:
             raise RuntimeError("no active session")
@@ -25,6 +30,8 @@ class SessionState:
             open_files=list(self.open_files),
             file_tree=file_tree,
             git=git,
+            language=language,
+            language_supported=language_supported,
         )
 
     @classmethod

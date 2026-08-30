@@ -13,6 +13,7 @@ from agents.agent_loop import AgentLoop
 from llm.openrouter import OpenRouterLLM
 from protocol.snapshot import ChatMessage, EngineSnapshot, GitState
 from runtime.commands import HANDLERS
+from runtime.language import LanguageInfo, detect as detect_language
 from runtime.store import SessionState
 from runtime.store.sqlite import init as init_store
 from runtime.store.sqlite import save as save_snapshot
@@ -29,6 +30,7 @@ class EngineSession:
         self._subscribers: list[asyncio.Queue[Event]] = []
         self._llm: OpenRouterLLM | None = None
         self._loop: AgentLoop | None = None
+        self.language: LanguageInfo = detect_language(self._workspace)
         try:
             self._llm = OpenRouterLLM.from_env(self._workspace)
         except RuntimeError:
@@ -64,6 +66,8 @@ class EngineSession:
             str(self._workspace),
             list_tree(self._workspace),
             read_git(self._workspace),
+            language=self.language.name,
+            language_supported=self.language.supported,
         )
 
     def shutdown(self) -> None:

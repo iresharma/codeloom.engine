@@ -36,6 +36,16 @@ def _is_repo(workspace: Path) -> bool:
     return output.strip() == "true"
 
 
+def tracked_paths(workspace: Path) -> list[str] | None:
+    workspace = workspace.resolve()
+    if not _is_repo(workspace):
+        return None
+    output = _run(workspace, "ls-files")
+    if not output:
+        return []
+    return [line for line in output.splitlines() if line]
+
+
 def _run(workspace: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],

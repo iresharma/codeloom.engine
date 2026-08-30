@@ -67,6 +67,8 @@ def _persist_payload(snapshot: EngineSnapshot) -> dict:
     data = snapshot.to_json()
     data.pop("file_tree", None)
     data.pop("git", None)
+    data.pop("language", None)
+    data.pop("language_supported", None)
     return data
 
 

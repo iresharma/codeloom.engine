@@ -70,5 +70,11 @@ class ErrorOccurred(ProtocolMessage):
 
 @event
 @dataclass
+class WarningOccurred(ProtocolMessage):
+    message: str
+
+
+@event
+@dataclass
 class SessionEnded(ProtocolMessage):
     reason: str
