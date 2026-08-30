@@ -1,0 +1,4 @@
+# Engine core is stdlib-only.
+# Optional extras:
+# tree-sitter>=0.23
+# tree-sitter-python>=0.23
