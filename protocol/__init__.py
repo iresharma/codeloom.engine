@@ -1,60 +1,27 @@
 from protocol.codec import ProtocolError, decode_command, decode_event, encode
-from protocol.commands import (
-    COMMANDS,
-    CloseFile,
-    Command,
-    ListSessions,
-    OpenFile,
-    RequestGit,
-    RequestSnapshot,
-    Shutdown,
-    StartSession,
-    SubmitUserMessage,
-)
-from protocol.events import (
-    EVENTS,
-    ChatMessageAdded,
-    ErrorOccurred,
-    Event,
-    FileClosed,
-    FileContent,
-    FileTreeUpdated,
-    GitStateUpdated,
-    SessionEnded,
-    SessionList,
-    SnapshotReady,
-)
+from protocol.commands import COMMANDS, Command
+from protocol.events import EVENTS, Event
+from protocol.message import ProtocolMessage
 from protocol.snapshot import ChatMessage, EngineSnapshot, FileTreeNode, GitState, SessionSummary
+
+globals().update(COMMANDS)
+globals().update(EVENTS)
 
 __all__ = [
     "COMMANDS",
     "EVENTS",
-    "ChatMessage",
-    "ChatMessageAdded",
-    "CloseFile",
     "Command",
-    "EngineSnapshot",
-    "ErrorOccurred",
     "Event",
-    "FileClosed",
-    "FileContent",
-    "FileTreeNode",
-    "FileTreeUpdated",
-    "GitState",
-    "GitStateUpdated",
     "ProtocolError",
-    "ListSessions",
-    "OpenFile",
-    "RequestGit",
-    "RequestSnapshot",
-    "SessionEnded",
-    "SessionList",
+    "ProtocolMessage",
+    "ChatMessage",
+    "EngineSnapshot",
+    "FileTreeNode",
+    "GitState",
     "SessionSummary",
-    "Shutdown",
-    "SnapshotReady",
-    "StartSession",
-    "SubmitUserMessage",
     "decode_command",
     "decode_event",
     "encode",
+    *COMMANDS,
+    *EVENTS,
 ]

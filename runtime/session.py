@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,14 @@ from runtime.store import save as save_snapshot
 from tools.registry import discover_tools
 
 
+def handles(command_type: type):
+    def deco(fn):
+        fn._engine_command = command_type
+        return fn
+
+    return deco
+
+
 class EngineSession:
     def __init__(self, workspace: Path, db_path: Path):
         self._workspace = workspace.resolve()
@@ -57,29 +66,30 @@ class EngineSession:
     async def start(self) -> None:
         init_store(self._db_path)
 
+    @classmethod
+    def _handlers(cls) -> dict:
+        cached = getattr(cls, "_handler_map", None)
+        if cached is None:
+            mapping = {}
+            for name in dir(cls):
+                value = getattr(cls, name)
+                command_type = getattr(value, "_engine_command", None)
+                if command_type is not None:
+                    mapping[command_type] = value
+            cls._handler_map = mapping
+            cached = mapping
+        return cached
+
     async def handle(self, command: Command) -> None:
-        if isinstance(command, StartSession):
-            self._on_start_session(command.workspace, command.session_id)
-        elif isinstance(command, ListSessions):
-            self._emit(SessionList(sessions=list_sessions(self._db_path)))
-        elif isinstance(command, SubmitUserMessage):
-            await self._on_user_message(command.text)
-        elif isinstance(command, RequestSnapshot):
-            if not self._require_session():
-                return
-            self._emit_snapshot()
-        elif isinstance(command, OpenFile):
-            self._on_open_file(command.path)
-        elif isinstance(command, CloseFile):
-            self._on_close_file(command.path)
-        elif isinstance(command, RequestGit):
-            self._on_request_git()
-        elif isinstance(command, Shutdown):
-            self.shutdown()
-        else:
+        fn = type(self)._handlers().get(type(command))
+        if fn is None:
             self._emit(
                 ErrorOccurred(message=f"unknown command: {type(command).__name__}")
             )
+            return
+        result = fn(self, command)
+        if inspect.isawaitable(result):
+            await result
 
     def subscribe(self) -> asyncio.Queue[Event]:
         queue: asyncio.Queue[Event] = asyncio.Queue()
@@ -116,8 +126,9 @@ class EngineSession:
     def emit_error(self, message: str) -> None:
         self._emit(ErrorOccurred(message=message))
 
-    def _on_start_session(self, workspace: str, session_id: str | None) -> None:
-        incoming = Path(workspace).expanduser().resolve()
+    @handles(StartSession)
+    def _on_start_session(self, command: StartSession) -> None:
+        incoming = Path(command.workspace).expanduser().resolve()
         if incoming != self._workspace:
             self._emit(
                 ErrorOccurred(
@@ -130,11 +141,11 @@ class EngineSession:
             return
 
         self._persist()
-        if session_id:
-            loaded = load_snapshot(self._db_path, session_id)
+        if command.session_id:
+            loaded = load_snapshot(self._db_path, command.session_id)
             if loaded is None:
                 self._emit(
-                    ErrorOccurred(message=f"unknown session: {session_id}")
+                    ErrorOccurred(message=f"unknown session: {command.session_id}")
                 )
                 return
             self._state = SessionState.from_snapshot(loaded)
@@ -170,28 +181,40 @@ class EngineSession:
             )
         )
 
-    async def _on_user_message(self, text: str) -> None:
+    @handles(ListSessions)
+    def _on_list_sessions(self, command: ListSessions) -> None:
+        self._emit(SessionList(sessions=list_sessions(self._db_path)))
+
+    @handles(SubmitUserMessage)
+    async def _on_user_message(self, command: SubmitUserMessage) -> None:
         if not self._require_session():
             return
         if self._loop is None:
             self._emit(ErrorOccurred(message="set OPENROUTER_API_KEY"))
             return
-        self._add_message(role="user", text=text)
+        self._add_message(role="user", text=command.text)
         try:
-            reply = await self._loop.run(text)
+            reply = await self._loop.run(command.text)
         except Exception as exc:
             self._emit(ErrorOccurred(message=f"llm error: {exc}"))
             return
         self._add_message(role="assistant", text=reply)
         self._persist()
 
-    def _on_open_file(self, path: str) -> None:
+    @handles(RequestSnapshot)
+    def _on_request_snapshot(self, command: RequestSnapshot) -> None:
+        if not self._require_session():
+            return
+        self._emit_snapshot()
+
+    @handles(OpenFile)
+    def _on_open_file(self, command: OpenFile) -> None:
         if not self._require_session():
             return
         try:
-            rel, content = read_text(self._workspace, path)
+            rel, content = read_text(self._workspace, command.path)
         except FileNotFoundError:
-            self._emit(ErrorOccurred(message=f"file not found: {path}"))
+            self._emit(ErrorOccurred(message=f"file not found: {command.path}"))
             return
         except WorkspacePathError as exc:
             self._emit(ErrorOccurred(message=str(exc)))
@@ -201,27 +224,33 @@ class EngineSession:
         self._persist()
         self._emit(FileContent(path=rel, content=content))
 
-    def _on_close_file(self, path: str) -> None:
+    @handles(CloseFile)
+    def _on_close_file(self, command: CloseFile) -> None:
         if not self._require_session():
             return
         try:
             rel = relative_posix(
-                self._workspace, resolve_in_workspace(self._workspace, path)
+                self._workspace, resolve_in_workspace(self._workspace, command.path)
             )
         except WorkspacePathError as exc:
             self._emit(ErrorOccurred(message=str(exc)))
             return
         if rel not in self._state.open_files:
-            self._emit(ErrorOccurred(message=f"file is not open: {path}"))
+            self._emit(ErrorOccurred(message=f"file is not open: {command.path}"))
             return
         self._state.open_files.remove(rel)
         self._persist()
         self._emit(FileClosed(path=rel))
 
-    def _on_request_git(self) -> None:
+    @handles(RequestGit)
+    def _on_request_git(self, command: RequestGit) -> None:
         if not self._require_session():
             return
         self._emit(GitStateUpdated(git=read_git(self._workspace)))
+
+    @handles(Shutdown)
+    def _on_shutdown(self, command: Shutdown) -> None:
+        self.shutdown()
 
     def _emit_snapshot(self) -> None:
         self._drop_missing_open_files()

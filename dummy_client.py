@@ -4,36 +4,41 @@ import argparse
 import asyncio
 import json
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 from protocol.codec import ProtocolError, decode_event, encode
-from protocol.commands import (
-    CloseFile,
-    ListSessions,
-    OpenFile,
-    RequestGit,
-    RequestSnapshot,
-    Shutdown,
-    StartSession,
-    SubmitUserMessage,
+from protocol.commands import COMMANDS, StartSession, SubmitUserMessage
+from protocol.events import (
+    ChatMessageAdded,
+    FileContent,
+    GitStateUpdated,
+    SessionList,
+    SnapshotReady,
 )
-from protocol.events import FileContent, GitStateUpdated, SessionList, SnapshotReady, ChatMessageAdded
 from protocol.snapshot import FileTreeNode, GitState
 
-HELP = """\
-start [id]          start a new session, or resume id
-sessions            list stored sessions
-open <path>         open a file (path is stored as UI state)
-close <path>        close a file
-snapshot            request the current snapshot (tree and git rebuilt)
-git                 refresh git status (not stored)
-shutdown            persist and close the current session (server stays up)
-exit                disconnect this client (server stays up)
-help                this text
-<text>              send as a user message
-"""
-
 CLIENT_EXIT = object()
+_COMMANDS_BY_NAME = {name.lower(): cls for name, cls in COMMANDS.items()}
+
+
+def _help_text() -> str:
+    lines = [
+        "start [id]          StartSession (workspace filled by this client)",
+        "exit                disconnect this client (server stays up)",
+        "help                this text",
+    ]
+    for name, cls in COMMANDS.items():
+        if name in ("StartSession", "SubmitUserMessage"):
+            continue
+        names = [item.name for item in fields(cls)]
+        if names:
+            args = " ".join(f"<{item}>" for item in names)
+            lines.append(f"{name} {args}")
+        else:
+            lines.append(name)
+    lines.append("<text>              SubmitUserMessage")
+    return "\n".join(lines) + "\n"
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,40 +57,43 @@ def _split(line: str) -> tuple[str, str]:
     parts = text.split(maxsplit=1)
     name = parts[0].lower()
     rest = parts[1].strip() if len(parts) > 1 else ""
-    if name == "startsession":
-        name = "start"
     return name, rest
 
 
 def command_from_line(line: str, workspace: Path):
     name, rest = _split(line)
     if name == "help":
-        print(HELP, end="", flush=True)
+        print(_help_text(), end="", flush=True)
         return None
-    if name == "start":
-        if not rest:
-            return StartSession(workspace=str(workspace))
-        return StartSession(workspace=str(workspace), session_id=rest)
-    if name == "sessions":
-        return ListSessions()
-    if name == "snapshot":
-        return RequestSnapshot()
-    if name == "git":
-        return RequestGit()
-    if name == "open":
-        if not rest:
-            print("usage: open <path>", flush=True)
-            return None
-        return OpenFile(path=rest)
-    if name == "close":
-        if not rest:
-            print("usage: close <path>", flush=True)
-            return None
-        return CloseFile(path=rest)
-    if name == "shutdown":
-        return Shutdown()
     if name in ("exit", "quit"):
         return CLIENT_EXIT
+    if name in ("start", "startsession"):
+        return StartSession(
+            workspace=str(workspace),
+            session_id=rest or None,
+        )
+    cls = _COMMANDS_BY_NAME.get(name)
+    if cls is StartSession:
+        return StartSession(
+            workspace=str(workspace),
+            session_id=rest or None,
+        )
+    if cls is SubmitUserMessage:
+        if not rest:
+            print("usage: SubmitUserMessage <text>", flush=True)
+            return None
+        return SubmitUserMessage(text=rest)
+    if cls is not None:
+        names = [item.name for item in fields(cls)]
+        if not names:
+            return cls()
+        if len(names) == 1:
+            if not rest:
+                print(f"usage: {cls.__name__} <{names[0]}>", flush=True)
+                return None
+            return cls(**{names[0]: rest})
+        print(f"usage: {cls.__name__}", flush=True)
+        return None
     if line.startswith("/"):
         print(f"unknown command: {line.split()[0]}  (try help)", flush=True)
         return None

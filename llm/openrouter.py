@@ -123,6 +123,7 @@ def _tool_calls_from(message) -> list[ToolCall]:
     raw = getattr(message, "tool_calls", None)
     if not isinstance(raw, list):
         return []
+    calls: list[ToolCall] = []
     for item in raw:
         fn = getattr(item, "function", item)
         name = getattr(fn, "name", "") or ""
