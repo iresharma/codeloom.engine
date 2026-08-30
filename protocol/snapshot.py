@@ -89,6 +89,54 @@ class FileTreeNode:
 
 
 @dataclass
+class GitState:
+    branch: str | None
+    dirty: bool
+    staged: list[str]
+    unstaged: list[str]
+    untracked: list[str]
+    staged_diff: str
+    unstaged_diff: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "branch": self.branch,
+            "dirty": self.dirty,
+            "staged": list(self.staged),
+            "unstaged": list(self.unstaged),
+            "untracked": list(self.untracked),
+            "staged_diff": self.staged_diff,
+            "unstaged_diff": self.unstaged_diff,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any] | None) -> GitState:
+        if not data:
+            return cls.empty()
+        return cls(
+            branch=data.get("branch"),
+            dirty=bool(data.get("dirty", False)),
+            staged=list(data.get("staged") or []),
+            unstaged=list(data.get("unstaged") or []),
+            untracked=list(data.get("untracked") or []),
+            staged_diff=data.get("staged_diff") or "",
+            unstaged_diff=data.get("unstaged_diff") or "",
+        )
+
+    @classmethod
+    def empty(cls) -> GitState:
+        return cls(
+            branch=None,
+            dirty=False,
+            staged=[],
+            unstaged=[],
+            untracked=[],
+            staged_diff="",
+            unstaged_diff="",
+        )
+
+
+@dataclass
 class EngineSnapshot:
     session_id: str
     workspace: str
@@ -96,6 +144,7 @@ class EngineSnapshot:
     ended: bool
     open_files: list[str]
     file_tree: list[FileTreeNode]
+    git: GitState
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -106,6 +155,7 @@ class EngineSnapshot:
             "ended": self.ended,
             "open_files": list(self.open_files),
             "file_tree": [node.to_json() for node in self.file_tree],
+            "git": self.git.to_json(),
         }
 
     @classmethod
@@ -123,4 +173,5 @@ class EngineSnapshot:
                 item if isinstance(item, FileTreeNode) else FileTreeNode.from_json(item)
                 for item in data.get("file_tree") or []
             ],
+            git=GitState.from_json(data.get("git")),
         )

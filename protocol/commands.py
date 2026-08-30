@@ -81,6 +81,16 @@ class CloseFile:
 
 
 @dataclass
+class RequestGit:
+    def to_json(self) -> dict[str, Any]:
+        return {"type": "RequestGit"}
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> RequestGit:
+        return cls()
+
+
+@dataclass
 class Shutdown:
     def to_json(self) -> dict[str, Any]:
         return {"type": "Shutdown"}
@@ -97,6 +107,7 @@ Command = Union[
     RequestSnapshot,
     OpenFile,
     CloseFile,
+    RequestGit,
     Shutdown,
 ]
 
@@ -107,5 +118,6 @@ COMMANDS: dict[str, type[Command]] = {
     "RequestSnapshot": RequestSnapshot,
     "OpenFile": OpenFile,
     "CloseFile": CloseFile,
+    "RequestGit": RequestGit,
     "Shutdown": Shutdown,
 }

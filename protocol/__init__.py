@@ -5,6 +5,7 @@ from protocol.commands import (
     Command,
     ListSessions,
     OpenFile,
+    RequestGit,
     RequestSnapshot,
     Shutdown,
     StartSession,
@@ -18,11 +19,12 @@ from protocol.events import (
     FileClosed,
     FileContent,
     FileTreeUpdated,
+    GitStateUpdated,
     SessionEnded,
     SessionList,
     SnapshotReady,
 )
-from protocol.snapshot import ChatMessage, EngineSnapshot, FileTreeNode, SessionSummary
+from protocol.snapshot import ChatMessage, EngineSnapshot, FileTreeNode, GitState, SessionSummary
 
 __all__ = [
     "COMMANDS",
@@ -38,9 +40,12 @@ __all__ = [
     "FileContent",
     "FileTreeNode",
     "FileTreeUpdated",
+    "GitState",
+    "GitStateUpdated",
     "ProtocolError",
     "ListSessions",
     "OpenFile",
+    "RequestGit",
     "RequestSnapshot",
     "SessionEnded",
     "SessionList",

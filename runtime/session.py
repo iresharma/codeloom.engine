@@ -10,6 +10,7 @@ from protocol.commands import (
     Command,
     ListSessions,
     OpenFile,
+    RequestGit,
     RequestSnapshot,
     Shutdown,
     StartSession,
@@ -21,12 +22,14 @@ from protocol.events import (
     Event,
     FileClosed,
     FileContent,
+    GitStateUpdated,
     SessionEnded,
     SessionList,
     SnapshotReady,
 )
-from protocol.snapshot import ChatMessage, EngineSnapshot
+from protocol.snapshot import ChatMessage, EngineSnapshot, GitState
 from runtime.fs import WorkspacePathError, list_tree, read_text, relative_posix, resolve_in_workspace
+from runtime.git import read_state as read_git
 from runtime.state import SessionState
 from runtime.store import init as init_store
 from runtime.store import list_sessions
@@ -59,6 +62,8 @@ class EngineSession:
             self._on_open_file(command.path)
         elif isinstance(command, CloseFile):
             self._on_close_file(command.path)
+        elif isinstance(command, RequestGit):
+            self._on_request_git()
         elif isinstance(command, Shutdown):
             self.shutdown()
         else:
@@ -78,7 +83,11 @@ class EngineSession:
             pass
 
     def snapshot(self) -> EngineSnapshot:
-        return self._state.snapshot(str(self._workspace), list_tree(self._workspace))
+        return self._state.snapshot(
+            str(self._workspace),
+            list_tree(self._workspace),
+            read_git(self._workspace),
+        )
 
     def shutdown(self) -> None:
         if not self.close_session():
@@ -162,6 +171,11 @@ class EngineSession:
         self._persist()
         self._emit(FileClosed(path=rel))
 
+    def _on_request_git(self) -> None:
+        if not self._require_session():
+            return
+        self._emit(GitStateUpdated(git=read_git(self._workspace)))
+
     def _emit_snapshot(self) -> None:
         self._drop_missing_open_files()
         self._emit(SnapshotReady(snapshot=self.snapshot()))
@@ -192,7 +206,10 @@ class EngineSession:
     def _persist(self) -> None:
         if self._state.session_id is None:
             return
-        save_snapshot(self._db_path, self.snapshot())
+        save_snapshot(
+            self._db_path,
+            self._state.snapshot(str(self._workspace), [], GitState.empty()),
+        )
 
     def _add_message(self, role: str, text: str) -> None:
         message = ChatMessage(

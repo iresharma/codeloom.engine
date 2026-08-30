@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from protocol.snapshot import ChatMessage, EngineSnapshot, FileTreeNode
+from protocol.snapshot import ChatMessage, EngineSnapshot, FileTreeNode, GitState
 
 
 @dataclass
@@ -12,7 +12,9 @@ class SessionState:
     open_files: list[str] = field(default_factory=list)
     ended: bool = False
 
-    def snapshot(self, workspace: str, file_tree: list[FileTreeNode]) -> EngineSnapshot:
+    def snapshot(
+        self, workspace: str, file_tree: list[FileTreeNode], git: GitState
+    ) -> EngineSnapshot:
         if self.session_id is None:
             raise RuntimeError("no active session")
         return EngineSnapshot(
@@ -22,6 +24,7 @@ class SessionState:
             ended=self.ended,
             open_files=list(self.open_files),
             file_tree=file_tree,
+            git=git,
         )
 
     @classmethod

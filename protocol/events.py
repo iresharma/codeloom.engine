@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Union
 
-from protocol.snapshot import EngineSnapshot, FileTreeNode, SessionSummary
+from protocol.snapshot import EngineSnapshot, FileTreeNode, GitState, SessionSummary
 
 
 @dataclass
@@ -113,6 +113,21 @@ class FileTreeUpdated:
 
 
 @dataclass
+class GitStateUpdated:
+    git: GitState
+
+    def to_json(self) -> dict[str, Any]:
+        return {"type": "GitStateUpdated", "git": self.git.to_json()}
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> GitStateUpdated:
+        git = data.get("git")
+        if isinstance(git, GitState):
+            return cls(git=git)
+        return cls(git=GitState.from_json(git))
+
+
+@dataclass
 class ErrorOccurred:
     message: str
 
@@ -143,6 +158,7 @@ Event = Union[
     FileContent,
     FileClosed,
     FileTreeUpdated,
+    GitStateUpdated,
     ErrorOccurred,
     SessionEnded,
 ]
@@ -154,6 +170,7 @@ EVENTS: dict[str, type[Event]] = {
     "FileContent": FileContent,
     "FileClosed": FileClosed,
     "FileTreeUpdated": FileTreeUpdated,
+    "GitStateUpdated": GitStateUpdated,
     "ErrorOccurred": ErrorOccurred,
     "SessionEnded": SessionEnded,
 }

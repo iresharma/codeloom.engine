@@ -11,20 +11,22 @@ from protocol.commands import (
     CloseFile,
     ListSessions,
     OpenFile,
+    RequestGit,
     RequestSnapshot,
     Shutdown,
     StartSession,
     SubmitUserMessage,
 )
-from protocol.events import FileContent, SessionList, SnapshotReady
-from protocol.snapshot import FileTreeNode
+from protocol.events import FileContent, GitStateUpdated, SessionList, SnapshotReady
+from protocol.snapshot import FileTreeNode, GitState
 
 HELP = """\
 start [id]          start a new session, or resume id
 sessions            list stored sessions
 open <path>         open a file (path is stored as UI state)
 close <path>        close a file
-snapshot            request the current snapshot (tree rebuilt from disk)
+snapshot            request the current snapshot (tree and git rebuilt)
+git                 refresh git status (not stored)
 shutdown            persist and close the current session (server stays up)
 exit                disconnect this client (server stays up)
 help                this text
@@ -68,6 +70,8 @@ def command_from_line(line: str, workspace: Path):
         return ListSessions()
     if name == "snapshot":
         return RequestSnapshot()
+    if name == "git":
+        return RequestGit()
     if name == "open":
         if not rest:
             print("usage: open <path>", flush=True)
@@ -97,6 +101,22 @@ def _tree_size(nodes: list[FileTreeNode]) -> int:
     return total
 
 
+def _format_git(git: GitState) -> list[str]:
+    if git.branch is None:
+        return ["git: (not a repository)"]
+    lines = [
+        f"git: {git.branch}  dirty={git.dirty}",
+        f"  staged: {git.staged or []}",
+        f"  unstaged: {git.unstaged or []}",
+        f"  untracked: {git.untracked or []}",
+    ]
+    if git.staged_diff:
+        lines.append("  staged_diff: (present)")
+    if git.unstaged_diff:
+        lines.append("  unstaged_diff: (present)")
+    return lines
+
+
 def format_event(event) -> str:
     if isinstance(event, SnapshotReady):
         snap = event.snapshot
@@ -104,14 +124,17 @@ def format_event(event) -> str:
             f"session {snap.session_id}",
             f"open_files: {snap.open_files or []}",
             f"file_tree: {_tree_size(snap.file_tree)} entries (rebuilt, not stored)",
-            "messages:",
         ]
+        lines.extend(_format_git(snap.git))
+        lines.append("messages:")
         if not snap.messages:
             lines.append("  (none)")
         else:
             for message in snap.messages:
                 lines.append(f"  {message.role}: {message.text}")
         return "\n".join(lines)
+    if isinstance(event, GitStateUpdated):
+        return "\n".join(_format_git(event.git))
     if isinstance(event, SessionList):
         if not event.sessions:
             return "sessions: (none)"
