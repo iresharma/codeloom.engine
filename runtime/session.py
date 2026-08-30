@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -37,6 +38,7 @@ from runtime.store import init as init_store
 from runtime.store import list_sessions
 from runtime.store import load as load_snapshot
 from runtime.store import save as save_snapshot
+from tools.registry import discover_tools
 
 
 class EngineSession:
@@ -146,8 +148,27 @@ class EngineSession:
         if self._llm is None:
             self._loop = None
             return
-        self._loop = AgentLoop(self._llm)
+        registry = discover_tools()
+        for message in registry.errors:
+            self._emit(ErrorOccurred(message=message))
+        self._loop = AgentLoop(
+            self._llm,
+            tools=registry,
+            workspace=self._workspace,
+            on_tool=self._on_tool,
+        )
         self._loop.hydrate(self._state.messages)
+
+    def _on_tool(self, name: str, arguments: dict, result: str) -> None:
+        preview = result if len(result) <= 400 else result[:400] + "…"
+        self._emit(
+            ChatMessageAdded(
+                id=uuid4().hex,
+                role="tool",
+                text=f"{name}({json.dumps(arguments)})\n{preview}",
+                ts=datetime.now(timezone.utc).isoformat(),
+            )
+        )
 
     async def _on_user_message(self, text: str) -> None:
         if not self._require_session():

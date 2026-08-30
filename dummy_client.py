@@ -17,7 +17,7 @@ from protocol.commands import (
     StartSession,
     SubmitUserMessage,
 )
-from protocol.events import FileContent, GitStateUpdated, SessionList, SnapshotReady
+from protocol.events import FileContent, GitStateUpdated, SessionList, SnapshotReady, ChatMessageAdded
 from protocol.snapshot import FileTreeNode, GitState
 
 HELP = """\
@@ -148,6 +148,8 @@ def format_event(event) -> str:
     if isinstance(event, FileContent):
         nlines = event.content.count("\n") + (0 if event.content.endswith("\n") else 1)
         return f"opened {event.path} ({nlines} lines)"
+    if isinstance(event, ChatMessageAdded):
+        return f"{event.role}: {event.text}"
     return json.dumps(event.to_json(), indent=2)
 
 

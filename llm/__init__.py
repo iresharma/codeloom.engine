@@ -1,3 +1,3 @@
-from llm.openrouter import OpenRouterLLM
+from llm.openrouter import LLMResult, OpenRouterLLM, ToolCall
 
-__all__ = ["OpenRouterLLM"]
+__all__ = ["LLMResult", "OpenRouterLLM", "ToolCall"]

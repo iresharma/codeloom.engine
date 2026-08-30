@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+import json
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from openrouter import OpenRouter
 
 _PLACEHOLDERS = {"", "...", "<OPENROUTER_API_KEY>", "your-key", "changeme"}
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments_json: str
+
+    def arguments(self) -> dict:
+        try:
+            data = json.loads(self.arguments_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+
+@dataclass
+class LLMResult:
+    text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 class OpenRouterLLM:
@@ -26,18 +48,25 @@ class OpenRouterLLM:
         model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
         return cls(api_key=api_key, model=model)
 
-    async def complete(self, messages: list[dict]) -> str:
+    async def complete(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> LLMResult:
         token = self._api_key
         authorization = (
             token if token.lower().startswith("bearer ") else f"Bearer {token}"
         )
-        response = await self._client.chat.send_async(
-            messages=messages,
-            model=self.model,
-            stream=False,
-            http_headers={"Authorization": authorization},
-        )
-        return _text_from(response)
+        kwargs: dict = {
+            "messages": messages,
+            "model": self.model,
+            "stream": False,
+            "http_headers": {"Authorization": authorization},
+        }
+        if tools:
+            kwargs["tools"] = tools
+        response = await self._client.chat.send_async(**kwargs)
+        return _result_from(response)
 
 
 def _load_env_sh(path: Path) -> None:
@@ -62,14 +91,19 @@ def _load_env_sh(path: Path) -> None:
         os.environ[key] = value
 
 
-def _text_from(response) -> str:
+def _result_from(response) -> LLMResult:
     choices = getattr(response, "choices", None)
     if not choices:
         inner = getattr(response, "object", None) or getattr(response, "result", None)
         if inner is not None and inner is not response:
-            return _text_from(inner)
+            return _result_from(inner)
         raise RuntimeError("OpenRouter response had no choices")
-    content = getattr(choices[0].message, "content", None)
+    message = choices[0].message
+    return LLMResult(text=_text_from(message), tool_calls=_tool_calls_from(message))
+
+
+def _text_from(message) -> str:
+    content = getattr(message, "content", None)
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -83,3 +117,19 @@ def _text_from(response) -> str:
                 parts.append(str(getattr(part, "text", "") or ""))
         return "".join(parts)
     return ""
+
+
+def _tool_calls_from(message) -> list[ToolCall]:
+    raw = getattr(message, "tool_calls", None)
+    if not isinstance(raw, list):
+        return []
+    for item in raw:
+        fn = getattr(item, "function", item)
+        name = getattr(fn, "name", "") or ""
+        arguments = getattr(fn, "arguments", "") or "{}"
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments)
+        call_id = getattr(item, "id", "") or name
+        if name:
+            calls.append(ToolCall(id=call_id, name=name, arguments_json=arguments))
+    return calls
