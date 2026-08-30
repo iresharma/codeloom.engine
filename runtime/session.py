@@ -27,6 +27,8 @@ from protocol.events import (
     SessionList,
     SnapshotReady,
 )
+from agents.agent_loop import AgentLoop
+from llm.openrouter import OpenRouterLLM
 from protocol.snapshot import ChatMessage, EngineSnapshot, GitState
 from runtime.fs import WorkspacePathError, list_tree, read_text, relative_posix, resolve_in_workspace
 from runtime.git import read_state as read_git
@@ -43,6 +45,12 @@ class EngineSession:
         self._db_path = db_path
         self._state = SessionState()
         self._subscribers: list[asyncio.Queue[Event]] = []
+        self._llm: OpenRouterLLM | None = None
+        self._loop: AgentLoop | None = None
+        try:
+            self._llm = OpenRouterLLM.from_env(self._workspace)
+        except RuntimeError:
+            self._llm = None
 
     async def start(self) -> None:
         init_store(self._db_path)
@@ -53,7 +61,7 @@ class EngineSession:
         elif isinstance(command, ListSessions):
             self._emit(SessionList(sessions=list_sessions(self._db_path)))
         elif isinstance(command, SubmitUserMessage):
-            self._on_user_message(command.text)
+            await self._on_user_message(command.text)
         elif isinstance(command, RequestSnapshot):
             if not self._require_session():
                 return
@@ -100,6 +108,7 @@ class EngineSession:
         self._persist()
         self._emit(SessionEnded(reason="shutdown"))
         self._state = SessionState()
+        self._loop = None
         return True
 
     def emit_error(self, message: str) -> None:
@@ -130,13 +139,30 @@ class EngineSession:
         else:
             self._state = SessionState(session_id=uuid4().hex)
             self._persist()
+        self._bind_loop()
         self._emit_snapshot()
 
-    def _on_user_message(self, text: str) -> None:
+    def _bind_loop(self) -> None:
+        if self._llm is None:
+            self._loop = None
+            return
+        self._loop = AgentLoop(self._llm)
+        self._loop.hydrate(self._state.messages)
+
+    async def _on_user_message(self, text: str) -> None:
         if not self._require_session():
             return
+        if self._loop is None:
+            self._emit(ErrorOccurred(message="set OPENROUTER_API_KEY"))
+            return
         self._add_message(role="user", text=text)
-        self._add_message(role="engine", text=f"ack: {text}")
+        try:
+            reply = await self._loop.run(text)
+        except Exception as exc:
+            self._emit(ErrorOccurred(message=f"llm error: {exc}"))
+            return
+        self._add_message(role="assistant", text=reply)
+        self._persist()
 
     def _on_open_file(self, path: str) -> None:
         if not self._require_session():
