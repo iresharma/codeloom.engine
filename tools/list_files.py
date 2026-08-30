@@ -1,6 +1,6 @@
-from tools.base import ToolContext, tool
-from runtime.fs import list_tree
 from protocol.snapshot import FileTreeNode
+from runtime.tools.fs import list_tree
+from tools.base import ToolContext, tool
 
 
 @tool(description="List files in the workspace as relative paths, one per line.")

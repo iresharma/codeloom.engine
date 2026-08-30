@@ -54,6 +54,37 @@ def read_text(workspace: Path, path: str) -> tuple[str, str]:
     return relative_posix(workspace, resolved), content
 
 
+DEFAULT_READ_LIMIT = 200
+MAX_READ_LIMIT = 400
+
+
+def read_window(
+    workspace: Path,
+    path: str,
+    offset: int = 1,
+    limit: int = DEFAULT_READ_LIMIT,
+) -> str:
+    rel, content = read_text(workspace, path)
+    lines = content.splitlines()
+    total = len(lines)
+    if total == 0:
+        return f"{rel}  empty"
+    start = max(1, offset)
+    take = min(max(1, limit), MAX_READ_LIMIT)
+    if start > total:
+        return f"{rel}  offset {start} is past end ({total} lines)"
+    end = min(total, start + take - 1)
+    width = len(str(total))
+    body = "\n".join(
+        f"{index:>{width}}|{lines[index - 1]}"
+        for index in range(start, end + 1)
+    )
+    header = f"{rel}  lines {start}-{end} of {total}"
+    if end < total:
+        header += f"  (next offset={end + 1})"
+    return f"{header}\n{body}"
+
+
 def _list_dir(workspace: Path, directory: Path) -> list[FileTreeNode]:
     nodes = []
     try:

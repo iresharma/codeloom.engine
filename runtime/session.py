@@ -7,47 +7,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from protocol.commands import (
-    CloseFile,
-    Command,
-    ListSessions,
-    OpenFile,
-    RequestGit,
-    RequestSnapshot,
-    Shutdown,
-    StartSession,
-    SubmitUserMessage,
-)
-from protocol.events import (
-    ChatMessageAdded,
-    ErrorOccurred,
-    Event,
-    FileClosed,
-    FileContent,
-    GitStateUpdated,
-    SessionEnded,
-    SessionList,
-    SnapshotReady,
-)
+from protocol.commands import Command
+from protocol.events import ChatMessageAdded, ErrorOccurred, Event, FileContent, SessionEnded, SnapshotReady
 from agents.agent_loop import AgentLoop
 from llm.openrouter import OpenRouterLLM
 from protocol.snapshot import ChatMessage, EngineSnapshot, GitState
-from runtime.fs import WorkspacePathError, list_tree, read_text, relative_posix, resolve_in_workspace
-from runtime.git import read_state as read_git
-from runtime.state import SessionState
-from runtime.store import init as init_store
-from runtime.store import list_sessions
-from runtime.store import load as load_snapshot
-from runtime.store import save as save_snapshot
+from runtime.commands import HANDLERS
+from runtime.store import SessionState
+from runtime.store.sqlite import init as init_store
+from runtime.store.sqlite import save as save_snapshot
+from runtime.tools.fs import WorkspacePathError, list_tree, read_text
+from runtime.tools.git import read_state as read_git
 from tools.registry import discover_tools
-
-
-def handles(command_type: type):
-    def deco(fn):
-        fn._engine_command = command_type
-        return fn
-
-    return deco
 
 
 class EngineSession:
@@ -66,22 +37,8 @@ class EngineSession:
     async def start(self) -> None:
         init_store(self._db_path)
 
-    @classmethod
-    def _handlers(cls) -> dict:
-        cached = getattr(cls, "_handler_map", None)
-        if cached is None:
-            mapping = {}
-            for name in dir(cls):
-                value = getattr(cls, name)
-                command_type = getattr(value, "_engine_command", None)
-                if command_type is not None:
-                    mapping[command_type] = value
-            cls._handler_map = mapping
-            cached = mapping
-        return cached
-
     async def handle(self, command: Command) -> None:
-        fn = type(self)._handlers().get(type(command))
+        fn = HANDLERS.get(type(command))
         if fn is None:
             self._emit(
                 ErrorOccurred(message=f"unknown command: {type(command).__name__}")
@@ -126,35 +83,6 @@ class EngineSession:
     def emit_error(self, message: str) -> None:
         self._emit(ErrorOccurred(message=message))
 
-    @handles(StartSession)
-    def _on_start_session(self, command: StartSession) -> None:
-        incoming = Path(command.workspace).expanduser().resolve()
-        if incoming != self._workspace:
-            self._emit(
-                ErrorOccurred(
-                    message=(
-                        f"workspace mismatch: got {incoming}, "
-                        f"expected {self._workspace}"
-                    )
-                )
-            )
-            return
-
-        self._persist()
-        if command.session_id:
-            loaded = load_snapshot(self._db_path, command.session_id)
-            if loaded is None:
-                self._emit(
-                    ErrorOccurred(message=f"unknown session: {command.session_id}")
-                )
-                return
-            self._state = SessionState.from_snapshot(loaded)
-        else:
-            self._state = SessionState(session_id=uuid4().hex)
-            self._persist()
-        self._bind_loop()
-        self._emit_snapshot()
-
     def _bind_loop(self) -> None:
         if self._llm is None:
             self._loop = None
@@ -180,77 +108,6 @@ class EngineSession:
                 ts=datetime.now(timezone.utc).isoformat(),
             )
         )
-
-    @handles(ListSessions)
-    def _on_list_sessions(self, command: ListSessions) -> None:
-        self._emit(SessionList(sessions=list_sessions(self._db_path)))
-
-    @handles(SubmitUserMessage)
-    async def _on_user_message(self, command: SubmitUserMessage) -> None:
-        if not self._require_session():
-            return
-        if self._loop is None:
-            self._emit(ErrorOccurred(message="set OPENROUTER_API_KEY"))
-            return
-        self._add_message(role="user", text=command.text)
-        try:
-            reply = await self._loop.run(command.text)
-        except Exception as exc:
-            self._emit(ErrorOccurred(message=f"llm error: {exc}"))
-            return
-        self._add_message(role="assistant", text=reply)
-        self._persist()
-
-    @handles(RequestSnapshot)
-    def _on_request_snapshot(self, command: RequestSnapshot) -> None:
-        if not self._require_session():
-            return
-        self._emit_snapshot()
-
-    @handles(OpenFile)
-    def _on_open_file(self, command: OpenFile) -> None:
-        if not self._require_session():
-            return
-        try:
-            rel, content = read_text(self._workspace, command.path)
-        except FileNotFoundError:
-            self._emit(ErrorOccurred(message=f"file not found: {command.path}"))
-            return
-        except WorkspacePathError as exc:
-            self._emit(ErrorOccurred(message=str(exc)))
-            return
-        if rel not in self._state.open_files:
-            self._state.open_files.append(rel)
-        self._persist()
-        self._emit(FileContent(path=rel, content=content))
-
-    @handles(CloseFile)
-    def _on_close_file(self, command: CloseFile) -> None:
-        if not self._require_session():
-            return
-        try:
-            rel = relative_posix(
-                self._workspace, resolve_in_workspace(self._workspace, command.path)
-            )
-        except WorkspacePathError as exc:
-            self._emit(ErrorOccurred(message=str(exc)))
-            return
-        if rel not in self._state.open_files:
-            self._emit(ErrorOccurred(message=f"file is not open: {command.path}"))
-            return
-        self._state.open_files.remove(rel)
-        self._persist()
-        self._emit(FileClosed(path=rel))
-
-    @handles(RequestGit)
-    def _on_request_git(self, command: RequestGit) -> None:
-        if not self._require_session():
-            return
-        self._emit(GitStateUpdated(git=read_git(self._workspace)))
-
-    @handles(Shutdown)
-    def _on_shutdown(self, command: Shutdown) -> None:
-        self.shutdown()
 
     def _emit_snapshot(self) -> None:
         self._drop_missing_open_files()

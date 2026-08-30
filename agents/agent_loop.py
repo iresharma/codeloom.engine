@@ -9,7 +9,8 @@ from tools.registry import ToolRegistry
 
 DEFAULT_SYSTEM = (
     "You are a coding assistant for this workspace. "
-    "Use tools to list and read files instead of guessing."
+    "Use search to find code, then read_file with offset/limit windows. "
+    "Do not guess file contents."
 )
 MAX_TURNS = 8
 
