@@ -18,14 +18,15 @@ class EngineServer:
         self._clients: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
 
     async def serve(self) -> None:
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         if self.socket_path.exists():
             self.socket_path.unlink()
+        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         fanout = self.session.subscribe()
         asyncio.create_task(self._fanout(fanout), name="engine-fanout")
         self._server = await asyncio.start_unix_server(self._on_client, path=str(self.socket_path))
         async with self._server:
             await self._server.serve_forever()
+       
 
     async def close(self) -> None:
         if self._server is not None:
