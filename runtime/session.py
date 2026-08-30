@@ -6,8 +6,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from protocol.commands import (
+    CloseFile,
     Command,
     ListSessions,
+    OpenFile,
     RequestSnapshot,
     Shutdown,
     StartSession,
@@ -17,11 +19,14 @@ from protocol.events import (
     ChatMessageAdded,
     ErrorOccurred,
     Event,
+    FileClosed,
+    FileContent,
     SessionEnded,
     SessionList,
     SnapshotReady,
 )
 from protocol.snapshot import ChatMessage, EngineSnapshot
+from runtime.fs import WorkspacePathError, list_tree, read_text, relative_posix, resolve_in_workspace
 from runtime.state import SessionState
 from runtime.store import init as init_store
 from runtime.store import list_sessions
@@ -49,7 +54,11 @@ class EngineSession:
         elif isinstance(command, RequestSnapshot):
             if not self._require_session():
                 return
-            self._emit(SnapshotReady(snapshot=self.snapshot()))
+            self._emit_snapshot()
+        elif isinstance(command, OpenFile):
+            self._on_open_file(command.path)
+        elif isinstance(command, CloseFile):
+            self._on_close_file(command.path)
         elif isinstance(command, Shutdown):
             self.shutdown()
         else:
@@ -69,11 +78,11 @@ class EngineSession:
             pass
 
     def snapshot(self) -> EngineSnapshot:
-        return self._state.snapshot(str(self._workspace))
+        return self._state.snapshot(str(self._workspace), list_tree(self._workspace))
 
     def shutdown(self) -> None:
         if not self.close_session():
-            self._emit(ErrorOccurred(message="no active session; send StartSession"))
+            self._emit(ErrorOccurred(message="no active session; start one first"))
 
     def close_session(self) -> bool:
         if self._state.session_id is None:
@@ -112,7 +121,7 @@ class EngineSession:
         else:
             self._state = SessionState(session_id=uuid4().hex)
             self._persist()
-        self._emit(SnapshotReady(snapshot=self.snapshot()))
+        self._emit_snapshot()
 
     def _on_user_message(self, text: str) -> None:
         if not self._require_session():
@@ -120,9 +129,63 @@ class EngineSession:
         self._add_message(role="user", text=text)
         self._add_message(role="engine", text=f"ack: {text}")
 
+    def _on_open_file(self, path: str) -> None:
+        if not self._require_session():
+            return
+        try:
+            rel, content = read_text(self._workspace, path)
+        except FileNotFoundError:
+            self._emit(ErrorOccurred(message=f"file not found: {path}"))
+            return
+        except WorkspacePathError as exc:
+            self._emit(ErrorOccurred(message=str(exc)))
+            return
+        if rel not in self._state.open_files:
+            self._state.open_files.append(rel)
+        self._persist()
+        self._emit(FileContent(path=rel, content=content))
+
+    def _on_close_file(self, path: str) -> None:
+        if not self._require_session():
+            return
+        try:
+            rel = relative_posix(
+                self._workspace, resolve_in_workspace(self._workspace, path)
+            )
+        except WorkspacePathError as exc:
+            self._emit(ErrorOccurred(message=str(exc)))
+            return
+        if rel not in self._state.open_files:
+            self._emit(ErrorOccurred(message=f"file is not open: {path}"))
+            return
+        self._state.open_files.remove(rel)
+        self._persist()
+        self._emit(FileClosed(path=rel))
+
+    def _emit_snapshot(self) -> None:
+        self._drop_missing_open_files()
+        self._emit(SnapshotReady(snapshot=self.snapshot()))
+        for path in list(self._state.open_files):
+            try:
+                rel, content = read_text(self._workspace, path)
+            except (FileNotFoundError, WorkspacePathError) as exc:
+                self._emit(ErrorOccurred(message=f"{path}: {exc}"))
+                continue
+            self._emit(FileContent(path=rel, content=content))
+
+    def _drop_missing_open_files(self) -> None:
+        kept = []
+        for path in self._state.open_files:
+            try:
+                rel, _content = read_text(self._workspace, path)
+            except (FileNotFoundError, WorkspacePathError):
+                continue
+            kept.append(rel)
+        self._state.open_files = kept
+
     def _require_session(self) -> bool:
         if self._state.session_id is None:
-            self._emit(ErrorOccurred(message="no active session; send StartSession"))
+            self._emit(ErrorOccurred(message="no active session; start one first"))
             return False
         return True
 

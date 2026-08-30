@@ -1,8 +1,10 @@
 from protocol.codec import ProtocolError, decode_command, decode_event, encode
 from protocol.commands import (
     COMMANDS,
+    CloseFile,
     Command,
     ListSessions,
+    OpenFile,
     RequestSnapshot,
     Shutdown,
     StartSession,
@@ -13,23 +15,32 @@ from protocol.events import (
     ChatMessageAdded,
     ErrorOccurred,
     Event,
+    FileClosed,
+    FileContent,
+    FileTreeUpdated,
     SessionEnded,
     SessionList,
     SnapshotReady,
 )
-from protocol.snapshot import ChatMessage, EngineSnapshot, SessionSummary
+from protocol.snapshot import ChatMessage, EngineSnapshot, FileTreeNode, SessionSummary
 
 __all__ = [
     "COMMANDS",
     "EVENTS",
     "ChatMessage",
     "ChatMessageAdded",
+    "CloseFile",
     "Command",
     "EngineSnapshot",
     "ErrorOccurred",
     "Event",
+    "FileClosed",
+    "FileContent",
+    "FileTreeNode",
+    "FileTreeUpdated",
     "ProtocolError",
     "ListSessions",
+    "OpenFile",
     "RequestSnapshot",
     "SessionEnded",
     "SessionList",

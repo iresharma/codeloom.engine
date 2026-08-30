@@ -56,11 +56,17 @@ def save(path: Path, snapshot: EngineSnapshot) -> None:
               json = excluded.json,
               saved_at = excluded.saved_at
             """,
-            (snapshot.session_id, json.dumps(snapshot.to_json()), now, now),
+            (snapshot.session_id, json.dumps(_persist_payload(snapshot)), now, now),
         )
         conn.commit()
     finally:
         conn.close()
+
+
+def _persist_payload(snapshot: EngineSnapshot) -> dict:
+    data = snapshot.to_json()
+    data.pop("file_tree", None)
+    return data
 
 
 def list_sessions(path: Path) -> list[SessionSummary]:
@@ -80,7 +86,8 @@ def list_sessions(path: Path) -> list[SessionSummary]:
             SessionSummary(
                 id=session_id,
                 saved_at=saved_at,
-                message_count=len(data.get("messages", [])),
+                message_count=len(data.get("messages") or []),
+                open_files=list(data.get("open_files") or []),
             )
         )
     return summaries

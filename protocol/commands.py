@@ -57,6 +57,30 @@ class RequestSnapshot:
 
 
 @dataclass
+class OpenFile:
+    path: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {"type": "OpenFile", "path": self.path}
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> OpenFile:
+        return cls(path=data["path"])
+
+
+@dataclass
+class CloseFile:
+    path: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {"type": "CloseFile", "path": self.path}
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> CloseFile:
+        return cls(path=data["path"])
+
+
+@dataclass
 class Shutdown:
     def to_json(self) -> dict[str, Any]:
         return {"type": "Shutdown"}
@@ -67,7 +91,13 @@ class Shutdown:
 
 
 Command = Union[
-    StartSession, ListSessions, SubmitUserMessage, RequestSnapshot, Shutdown
+    StartSession,
+    ListSessions,
+    SubmitUserMessage,
+    RequestSnapshot,
+    OpenFile,
+    CloseFile,
+    Shutdown,
 ]
 
 COMMANDS: dict[str, type[Command]] = {
@@ -75,5 +105,7 @@ COMMANDS: dict[str, type[Command]] = {
     "ListSessions": ListSessions,
     "SubmitUserMessage": SubmitUserMessage,
     "RequestSnapshot": RequestSnapshot,
+    "OpenFile": OpenFile,
+    "CloseFile": CloseFile,
     "Shutdown": Shutdown,
 }
