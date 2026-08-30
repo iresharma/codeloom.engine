@@ -131,7 +131,7 @@ def _pick(counts: Counter[str], markers: set[str]) -> str | None:
     if counts:
         return counts.most_common(1)[0][0]
     if markers:
-        return sorted(markers)[0]
+        return min(markers)
     return None
 
 

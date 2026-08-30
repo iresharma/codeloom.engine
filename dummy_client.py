@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
+from contextlib import suppress
 from dataclasses import fields
 from pathlib import Path
 
@@ -54,7 +55,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _split(line: str) -> tuple[str, str]:
-    text = line[1:] if line.startswith("/") else line
+    text = line.removeprefix("/")
     parts = text.split(maxsplit=1)
     name = parts[0].lower()
     rest = parts[1].strip() if len(parts) > 1 else ""
@@ -131,8 +132,10 @@ def format_event(event) -> str:
         snap = event.snapshot
         lines = [
             f"session {snap.session_id}",
-            f"language: {snap.language or 'unknown'}  "
-            f"tree-sitter/LSP: {'yes' if snap.language_supported else 'no'}",
+            (
+                f"language: {snap.language or 'unknown'}  "
+                f"tree-sitter/LSP: {'yes' if snap.language_supported else 'no'}"
+            ),
             f"open_files: {snap.open_files or []}",
             f"file_tree: {_tree_size(snap.file_tree)} entries (rebuilt, not stored)",
         ]
@@ -240,10 +243,8 @@ async def main() -> None:
         await asyncio.gather(events_task, repl_task, return_exceptions=True)
     finally:
         writer.close()
-        try:
+        with suppress(OSError):
             await writer.wait_closed()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

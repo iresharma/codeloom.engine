@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from protocol.message import ProtocolMessage
 
@@ -20,7 +19,7 @@ Command = ProtocolMessage
 @dataclass
 class StartSession(ProtocolMessage):
     workspace: str
-    session_id: Optional[str] = None
+    session_id: str | None = None
 
 
 @command

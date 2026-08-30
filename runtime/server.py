@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from pathlib import Path
 
 from protocol.codec import ProtocolError, decode_command, encode
@@ -58,10 +59,8 @@ class EngineServer:
         finally:
             self._session.unsubscribe(queue)
             writer.close()
-            try:
+            with suppress(OSError):
                 await writer.wait_closed()
-            except Exception:
-                pass
 
     async def _read_commands(self, reader: asyncio.StreamReader) -> None:
         while True:

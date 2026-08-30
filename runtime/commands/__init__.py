@@ -1,6 +1,6 @@
+from runtime.commands import files as _files  # noqa: F401
+from runtime.commands import git as _git  # noqa: F401
+from runtime.commands import lifecycle as _lifecycle  # noqa: F401
 from runtime.commands.register import HANDLERS, handles
-from runtime.commands import files as _files
-from runtime.commands import git as _git
-from runtime.commands import lifecycle as _lifecycle
 
 __all__ = ["HANDLERS", "handles"]

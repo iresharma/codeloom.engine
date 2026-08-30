@@ -29,7 +29,7 @@ class ToolRegistry:
             return f"error: unknown tool {name}"
         try:
             text = await spec.execute(ctx, arguments)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return f"error: {exc}"
         if len(text) > MAX_RESULT:
             return text[:MAX_RESULT] + "\n...[truncated]"
@@ -47,7 +47,7 @@ def discover_tools() -> ToolRegistry:
         try:
             module = importlib.import_module(info.name)
             module = importlib.reload(module)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             registry.errors.append(f"{info.name}: {exc}")
             continue
         for value in vars(module).values():

@@ -13,7 +13,8 @@ from protocol.commands import (
 from protocol.events import ErrorOccurred, SessionList, WarningOccurred
 from runtime.commands.register import handles
 from runtime.store import SessionState
-from runtime.store.sqlite import list_sessions, load as load_snapshot
+from runtime.store.sqlite import list_sessions
+from runtime.store.sqlite import load as load_snapshot
 
 
 @handles(StartSession)
@@ -63,7 +64,7 @@ async def submit_user_message(session, command: SubmitUserMessage) -> None:
     session._add_message(role="user", text=command.text)
     try:
         reply = await session._loop.run(command.text)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         session._emit(ErrorOccurred(message=f"llm error: {exc}"))
         return
     session._add_message(role="assistant", text=reply)

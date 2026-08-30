@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Union, get_args, get_origin
+from typing import Any, Union, get_args, get_origin
 
 _SKIP_PARAMS = {"ctx", "context", "self"}
 _JSON_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean"}
@@ -12,6 +13,8 @@ _JSON_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean"}
 @dataclass
 class ToolContext:
     workspace: Path
+    language: Any = None
+    lsp: Any = None
 
 
 @dataclass
@@ -74,7 +77,7 @@ def tool(
 def _schema_from_fn(fn: Callable) -> dict:
     try:
         hints = inspect.get_type_hints(fn)
-    except Exception:
+    except (TypeError, NameError, AttributeError, ValueError):
         hints = {}
     properties: dict[str, Any] = {}
     required: list[str] = []

@@ -1,4 +1,5 @@
-from runtime.tools.search import DEFAULT_MAX_MATCHES, search as run_search
+from runtime.tools.search import DEFAULT_MAX_MATCHES
+from runtime.tools.search import search as run_search
 from tools.base import ToolContext, tool
 
 

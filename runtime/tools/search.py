@@ -4,7 +4,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from runtime.tools.fs import SKIP_NAMES, WorkspacePathError, relative_posix, resolve_in_workspace
+from runtime.tools.fs import (
+    SKIP_NAMES,
+    WorkspacePathError,
+    relative_posix,
+    resolve_in_workspace,
+)
 
 DEFAULT_MAX_MATCHES = 80
 MAX_MATCHES = 200
@@ -55,6 +60,7 @@ def search(
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("rg timed out") from exc

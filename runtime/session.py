@@ -3,22 +3,33 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import threading
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from protocol.commands import Command
-from protocol.events import ChatMessageAdded, ErrorOccurred, Event, FileContent, SessionEnded, SnapshotReady
 from agents.agent_loop import AgentLoop
 from llm.openrouter import OpenRouterLLM
+from protocol.commands import Command
+from protocol.events import (
+    ChatMessageAdded,
+    ErrorOccurred,
+    Event,
+    FileContent,
+    SessionEnded,
+    SnapshotReady,
+)
 from protocol.snapshot import ChatMessage, EngineSnapshot, GitState
 from runtime.commands import HANDLERS
-from runtime.language import LanguageInfo, detect as detect_language
+from runtime.language import LanguageInfo
+from runtime.language import detect as detect_language
 from runtime.store import SessionState
 from runtime.store.sqlite import init as init_store
 from runtime.store.sqlite import save as save_snapshot
 from runtime.tools.fs import WorkspacePathError, list_tree, read_text
 from runtime.tools.git import read_state as read_git
+from runtime.tools.lsp import LSPManager, LSPTimeoutError
 from tools.registry import discover_tools
 
 
@@ -30,6 +41,7 @@ class EngineSession:
         self._subscribers: list[asyncio.Queue[Event]] = []
         self._llm: OpenRouterLLM | None = None
         self._loop: AgentLoop | None = None
+        self._lsp: LSPManager | None = None
         self.language: LanguageInfo = detect_language(self._workspace)
         try:
             self._llm = OpenRouterLLM.from_env(self._workspace)
@@ -82,6 +94,7 @@ class EngineSession:
         self._emit(SessionEnded(reason="shutdown"))
         self._state = SessionState()
         self._loop = None
+        self._stop_lsp()
         return True
 
     def emit_error(self, message: str) -> None:
@@ -94,13 +107,42 @@ class EngineSession:
         registry = discover_tools()
         for message in registry.errors:
             self._emit(ErrorOccurred(message=message))
+        self._start_lsp()
         self._loop = AgentLoop(
             self._llm,
             tools=registry,
             workspace=self._workspace,
             on_tool=self._on_tool,
+            language=self.language,
+            lsp=self._lsp,
         )
         self._loop.hydrate(self._state.messages)
+
+    def _start_lsp(self) -> None:
+        self._stop_lsp()
+        if not self.language.supported:
+            return
+        self._lsp = LSPManager(self._workspace)
+        threading.Thread(
+            target=self._warm_lsp,
+            daemon=True,
+            name="lsp-warm-start",
+        ).start()
+
+    def _warm_lsp(self) -> None:
+        manager = self._lsp
+        name = self.language.name
+        if manager is None or not name:
+            return
+        with suppress(OSError, RuntimeError, ValueError, LSPTimeoutError):
+            manager.warm_start(name)
+
+    def _stop_lsp(self) -> None:
+        if self._lsp is None:
+            return
+        with suppress(OSError, RuntimeError, LSPTimeoutError):
+            self._lsp.shutdown_all()
+        self._lsp = None
 
     def _on_tool(self, name: str, arguments: dict, result: str) -> None:
         preview = result if len(result) <= 400 else result[:400] + "…"

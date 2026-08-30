@@ -9,8 +9,22 @@ from tools.registry import ToolRegistry
 
 DEFAULT_SYSTEM = (
     "You are a coding assistant for this workspace. "
-    "Use search to find code, then read_file with offset/limit windows. "
-    "Do not guess file contents."
+    "Do not guess file contents. Cheaper-first: search or list_files "
+    "to locate a file, list_symbols to see what is in it, find_symbol "
+    "for one definition's source. "
+    "Use get_node_at and query_tree (presets: imports, functions, "
+    "classes, methods, calls) for local syntax without waiting on LSP. "
+    "Use parse_file only when nesting/shape matters and the outline "
+    "is not enough. "
+    "Feed a 1-based name position from find_symbol into "
+    "goto_definition, find_references, or hover for cross-file and "
+    "type questions. "
+    "Use document_symbols when the sitter outline looks incomplete "
+    "(interfaces, enums). "
+    "Use get_diagnostics for type/lint issues. "
+    "LSP tools work for python, go, and javascript/typescript; if a "
+    "server is missing, fall back to sitter tools and read_file. "
+    "read_file with offset/limit windows for surrounding context."
 )
 MAX_TURNS = 8
 
@@ -23,10 +37,16 @@ class AgentLoop:
         workspace: Path | None = None,
         system_prompt: str = DEFAULT_SYSTEM,
         on_tool: Callable[[str, dict, str], None] | None = None,
+        language=None,
+        lsp=None,
     ):
         self._llm = llm
         self._tools = tools or ToolRegistry()
-        self._ctx = ToolContext(workspace=workspace or Path("."))
+        self._ctx = ToolContext(
+            workspace=workspace or Path("."),
+            language=language,
+            lsp=lsp,
+        )
         self._system_prompt = system_prompt
         self._on_tool = on_tool
         self._history: list[dict] = []
