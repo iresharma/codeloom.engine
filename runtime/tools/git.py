@@ -6,7 +6,7 @@ from pathlib import Path
 from protocol.snapshot import GitState
 
 
-def read_state(workspace: Path) -> GitState:
+def read_state(workspace: Path, *, diffs: bool = True) -> GitState:
     workspace = workspace.resolve()
     if not _is_repo(workspace):
         return GitState.empty()
@@ -14,8 +14,8 @@ def read_state(workspace: Path) -> GitState:
     branch = _run(workspace, "rev-parse", "--abbrev-ref", "HEAD").strip() or None
     porcelain = _run(workspace, "status", "--porcelain")
     staged, unstaged, untracked = _parse_porcelain(porcelain)
-    staged_diff = _run(workspace, "diff", "--cached")
-    unstaged_diff = _run(workspace, "diff")
+    staged_diff = _run(workspace, "diff", "--cached") if diffs else ""
+    unstaged_diff = _run(workspace, "diff") if diffs else ""
     dirty = bool(staged or unstaged or untracked)
     return GitState(
         branch=branch,

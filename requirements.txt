@@ -4,3 +4,4 @@ tree-sitter-python
 tree-sitter-javascript
 tree-sitter-typescript
 tree-sitter-go
+pytest>=8.0

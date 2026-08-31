@@ -24,7 +24,15 @@ DEFAULT_SYSTEM = (
     "Use get_diagnostics for type/lint issues. "
     "LSP tools work for python, go, and javascript/typescript; if a "
     "server is missing, fall back to sitter tools and read_file. "
-    "read_file with offset/limit windows for surrounding context."
+    "read_file with offset/limit windows for surrounding context. "
+    "Always read_file a path before editing it. Prefer str_replace "
+    "with enough surrounding context that the match is unique; the "
+    "tool refuses ambiguous matches instead of guessing. Use "
+    "replace_lines for a window you already have open, apply_patch "
+    "for larger structural changes, and replace_symbol / "
+    "insert_after_imports for AST-scoped edits. Use rename_symbol "
+    "instead of search-and-replace on identifiers. If an edit goes "
+    "wrong, call undo_edit."
 )
 MAX_TURNS = 8
 
@@ -39,6 +47,10 @@ class AgentLoop:
         on_tool: Callable[[str, dict, str], None] | None = None,
         language=None,
         lsp=None,
+        files=None,
+        journal=None,
+        session_id: str | None = None,
+        on_edit=None,
     ):
         self._llm = llm
         self._tools = tools or ToolRegistry()
@@ -46,6 +58,10 @@ class AgentLoop:
             workspace=workspace or Path("."),
             language=language,
             lsp=lsp,
+            files=files,
+            journal=journal,
+            session_id=session_id,
+            on_edit=on_edit,
         )
         self._system_prompt = system_prompt
         self._on_tool = on_tool

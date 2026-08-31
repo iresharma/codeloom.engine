@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from runtime.tools import lsp as run_lsp
+from runtime.tools.edits import apply_workspace_edit, normalize_workspace_edit
 from tools.base import ToolContext, tool
 
 _LSP_MISSING = (
@@ -189,3 +190,56 @@ async def document_symbols(ctx: ToolContext, path: str) -> str:
     return await asyncio.to_thread(
         run_lsp.document_symbols, ctx.workspace, ctx.lsp, path
     )
+
+
+@tool(
+    description=(
+        "Rename a symbol at a 1-based position via the language server. "
+        "Updates references correctly, unlike search-and-replace on the name. "
+        "Read the file first. Get coordinates from find_symbol or read_file."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path relative to the workspace root",
+            },
+            "line": {
+                "type": "integer",
+                "description": "1-based line number containing the symbol",
+            },
+            "character": {
+                "type": "integer",
+                "description": "1-based column of, or within, the symbol name",
+            },
+            "new_name": {
+                "type": "string",
+                "description": "New identifier",
+            },
+        },
+        "required": ["path", "line", "character", "new_name"],
+    },
+)
+async def rename_symbol(ctx: ToolContext, path: str, line, character, new_name: str) -> str:
+    err = _require_lsp(ctx)
+    if err:
+        return err
+    payload = await asyncio.to_thread(
+        run_lsp.rename_symbol,
+        ctx.workspace,
+        ctx.lsp,
+        path,
+        _as_int(line, 1),
+        _as_int(character, 1),
+        new_name,
+    )
+    if isinstance(payload, str):
+        return payload
+    try:
+        grouped = normalize_workspace_edit(ctx.workspace, payload)
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {exc}"
+    if not grouped:
+        return f"error: language server returned no file edits for rename of {path}"
+    return await apply_workspace_edit(ctx, grouped, "rename_symbol")

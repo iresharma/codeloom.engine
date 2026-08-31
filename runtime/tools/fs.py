@@ -42,29 +42,17 @@ def list_tree(workspace: Path) -> list[FileTreeNode]:
 
 
 def read_text(workspace: Path, path: str) -> tuple[str, str]:
-    resolved = resolve_in_workspace(workspace, path)
-    if not resolved.exists():
-        raise FileNotFoundError(path)
-    if not resolved.is_file():
-        raise WorkspacePathError("not a file")
-    try:
-        content = resolved.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise WorkspacePathError("file is not valid UTF-8") from exc
-    return relative_posix(workspace, resolved), content
+    from runtime.tools.fileid import read_source
+
+    src = read_source(workspace, path)
+    return src.rel, src.text
 
 
 DEFAULT_READ_LIMIT = 200
 MAX_READ_LIMIT = 400
 
 
-def read_window(
-    workspace: Path,
-    path: str,
-    offset: int = 1,
-    limit: int = DEFAULT_READ_LIMIT,
-) -> str:
-    rel, content = read_text(workspace, path)
+def format_window(rel: str, content: str, offset: int, limit: int) -> str:
     lines = content.splitlines()
     total = len(lines)
     if total == 0:
@@ -83,6 +71,18 @@ def read_window(
     if end < total:
         header += f"  (next offset={end + 1})"
     return f"{header}\n{body}"
+
+
+def read_window(
+    workspace: Path,
+    path: str,
+    offset: int = 1,
+    limit: int = DEFAULT_READ_LIMIT,
+) -> str:
+    from runtime.tools.fileid import read_source
+
+    src = read_source(workspace, path)
+    return format_window(src.rel, src.text, offset, limit)
 
 
 def _list_dir(workspace: Path, directory: Path) -> list[FileTreeNode]:

@@ -8,12 +8,18 @@ from contextlib import suppress
 from dataclasses import fields
 from pathlib import Path
 
-from protocol.codec import ProtocolError, decode_event, encode
-from protocol.commands import COMMANDS, StartSession, SubmitUserMessage
+from protocol.codec import STREAM_LIMIT, decode_event, encode
+from protocol.commands import COMMANDS, StartSession, SubmitUserMessage, UndoLastEdit
 from protocol.events import (
+    ChatHistoryAdded,
+    ChatHistoryComplete,
     ChatMessageAdded,
+    ErrorOccurred,
+    FileClosed,
     FileContent,
+    FileEdited,
     GitStateUpdated,
+    SessionEnded,
     SessionList,
     SnapshotReady,
     WarningOccurred,
@@ -27,11 +33,12 @@ _COMMANDS_BY_NAME = {name.lower(): cls for name, cls in COMMANDS.items()}
 def _help_text() -> str:
     lines = [
         "start [id]          StartSession (workspace filled by this client)",
+        "undo                UndoLastEdit (last agent write batch)",
         "exit                disconnect this client (server stays up)",
         "help                this text",
     ]
     for name, cls in COMMANDS.items():
-        if name in ("StartSession", "SubmitUserMessage"):
+        if name in ("StartSession", "SubmitUserMessage", "UndoLastEdit"):
             continue
         names = [item.name for item in fields(cls)]
         if names:
@@ -39,7 +46,11 @@ def _help_text() -> str:
             lines.append(f"{name} {args}")
         else:
             lines.append(name)
-    lines.append("<text>              SubmitUserMessage")
+    lines.append("<text>              SubmitUserMessage (agent may call write tools)")
+    lines.append("")
+    lines.append("Write events: FileEdited prints the applied diff; tool chat lines")
+    lines.append("are a 400-char preview. Open a file first to also see FileContent")
+    lines.append("refresh after each edit. undo restores the last journal batch.")
     return "\n".join(lines) + "\n"
 
 
@@ -74,6 +85,8 @@ def command_from_line(line: str, workspace: Path):
             workspace=str(workspace),
             session_id=rest or None,
         )
+    if name in ("undo", "undolastedit"):
+        return UndoLastEdit()
     cls = _COMMANDS_BY_NAME.get(name)
     if cls is StartSession:
         return StartSession(
@@ -140,12 +153,9 @@ def format_event(event) -> str:
             f"file_tree: {_tree_size(snap.file_tree)} entries (rebuilt, not stored)",
         ]
         lines.extend(_format_git(snap.git))
-        lines.append("messages:")
-        if not snap.messages:
-            lines.append("  (none)")
-        else:
-            for message in snap.messages:
-                lines.append(f"  {message.role}: {message.text}")
+        lines.append(
+            f"chat history: {snap.message_count} messages (streamed next, not packed here)"
+        )
         return "\n".join(lines)
     if isinstance(event, GitStateUpdated):
         return "\n".join(_format_git(event.git))
@@ -160,28 +170,82 @@ def format_event(event) -> str:
             )
         return "\n".join(lines)
     if isinstance(event, FileContent):
-        nlines = event.content.count("\n") + (0 if event.content.endswith("\n") else 1)
-        return f"opened {event.path} ({nlines} lines)"
+        return _format_file_content(event)
+    if isinstance(event, FileEdited):
+        return _format_file_edited(event)
+    if isinstance(event, FileClosed):
+        return f"closed {event.path}"
+    if isinstance(event, ChatHistoryAdded):
+        return f"[history {event.index + 1}/{event.total}] {event.role}: {event.text}"
+    if isinstance(event, ChatHistoryComplete):
+        return f"chat history complete ({event.count})"
     if isinstance(event, ChatMessageAdded):
         return f"{event.role}: {event.text}"
+    if isinstance(event, ErrorOccurred):
+        return f"error: {event.message}"
     if isinstance(event, WarningOccurred):
         return f"warning: {event.message}"
+    if isinstance(event, SessionEnded):
+        return f"session ended ({event.reason})"
     return json.dumps(event.to_json(), indent=2)
+
+
+_FILE_PREVIEW = 24
+_DIFF_PREVIEW = 80
+
+
+def _line_count(text: str) -> int:
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _preview_block(text: str, limit: int) -> str:
+    lines = text.splitlines()
+    if len(lines) <= limit:
+        return text if text.endswith("\n") or not text else text + "\n"
+    head = "\n".join(lines[:limit])
+    extra = len(lines) - limit
+    return f"{head}\n... ({extra} more lines)\n"
+
+
+def _format_file_content(event: FileContent) -> str:
+    nlines = _line_count(event.content)
+    header = f"file {event.path} ({nlines} lines)"
+    if not event.content:
+        return f"{header}\n  (empty)"
+    body = _preview_block(event.content, _FILE_PREVIEW)
+    return header + "\n" + "".join(f"  {line}" for line in body.splitlines(keepends=True))
+
+
+def _format_file_edited(event: FileEdited) -> str:
+    ident = event.edit_id or "-"
+    header = f"edited {event.path}  tool={event.tool}  id={ident}"
+    if not event.diff.strip():
+        return f"{header}\n  (no textual diff)"
+    body = _preview_block(event.diff, _DIFF_PREVIEW)
+    return header + "\n" + body
 
 
 async def print_events(reader: asyncio.StreamReader, done: asyncio.Event) -> None:
     while True:
-        line = await reader.readline()
+        try:
+            line = await reader.readline()
+        except (asyncio.LimitOverrunError, ValueError) as exc:
+            print(f"\nbad event stream: {exc}", flush=True)
+            done.set()
+            break
         if not line:
             print("\ndisconnected from server; press enter to exit", flush=True)
             done.set()
             break
         try:
             event = decode_event(line)
-        except ProtocolError as exc:
+            text = format_event(event)
+        except Exception as exc:  # noqa: BLE001
             print(f"\nbad event: {exc}", flush=True)
             continue
-        print(f"\n{format_event(event)}", flush=True)
+        print(f"\n{text}", flush=True)
 
 
 async def repl(
@@ -223,7 +287,9 @@ async def main() -> None:
         sys.exit(1)
 
     try:
-        reader, writer = await asyncio.open_unix_connection(str(socket_path))
+        reader, writer = await asyncio.open_unix_connection(
+            str(socket_path), limit=STREAM_LIMIT
+        )
     except (ConnectionRefusedError, FileNotFoundError) as exc:
         print(f"could not connect to {socket_path}: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -232,14 +298,17 @@ async def main() -> None:
     events_task = asyncio.create_task(print_events(reader, done))
     repl_task = asyncio.create_task(repl(writer, workspace, done))
     try:
-        await asyncio.wait(
+        done_tasks, pending = await asyncio.wait(
             {events_task, repl_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
+        for task in done_tasks:
+            exc = task.exception() if not task.cancelled() else None
+            if exc is not None:
+                print(f"client error: {exc}", file=sys.stderr, flush=True)
         done.set()
-        for task in (events_task, repl_task):
-            if not task.done():
-                task.cancel()
+        for task in pending:
+            task.cancel()
         await asyncio.gather(events_task, repl_task, return_exceptions=True)
     finally:
         writer.close()

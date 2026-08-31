@@ -13,10 +13,13 @@ from agents.agent_loop import AgentLoop
 from llm.openrouter import OpenRouterLLM
 from protocol.commands import Command
 from protocol.events import (
+    ChatHistoryAdded,
+    ChatHistoryComplete,
     ChatMessageAdded,
     ErrorOccurred,
     Event,
     FileContent,
+    FileEdited,
     SessionEnded,
     SnapshotReady,
 )
@@ -30,6 +33,7 @@ from runtime.store.sqlite import save as save_snapshot
 from runtime.tools.fs import WorkspacePathError, list_tree, read_text
 from runtime.tools.git import read_state as read_git
 from runtime.tools.lsp import LSPManager, LSPTimeoutError
+from runtime.tools.tracker import FileTracker
 from tools.registry import discover_tools
 
 
@@ -42,6 +46,9 @@ class EngineSession:
         self._llm: OpenRouterLLM | None = None
         self._loop: AgentLoop | None = None
         self._lsp: LSPManager | None = None
+        self._files = FileTracker()
+        self._history_task: asyncio.Task | None = None
+        self._history_generation = 0
         self.language: LanguageInfo = detect_language(self._workspace)
         try:
             self._llm = OpenRouterLLM.from_env(self._workspace)
@@ -77,7 +84,7 @@ class EngineSession:
         return self._state.snapshot(
             str(self._workspace),
             list_tree(self._workspace),
-            read_git(self._workspace),
+            read_git(self._workspace, diffs=False),
             language=self.language.name,
             language_supported=self.language.supported,
         )
@@ -89,6 +96,7 @@ class EngineSession:
     def close_session(self) -> bool:
         if self._state.session_id is None:
             return False
+        self._cancel_history_replay()
         self._state.ended = True
         self._persist()
         self._emit(SessionEnded(reason="shutdown"))
@@ -108,6 +116,7 @@ class EngineSession:
         for message in registry.errors:
             self._emit(ErrorOccurred(message=message))
         self._start_lsp()
+        self._files = FileTracker()
         self._loop = AgentLoop(
             self._llm,
             tools=registry,
@@ -115,6 +124,10 @@ class EngineSession:
             on_tool=self._on_tool,
             language=self.language,
             lsp=self._lsp,
+            files=self._files,
+            journal=self._db_path,
+            session_id=self._state.session_id,
+            on_edit=self._on_edit,
         )
         self._loop.hydrate(self._state.messages)
 
@@ -144,6 +157,22 @@ class EngineSession:
             self._lsp.shutdown_all()
         self._lsp = None
 
+    def _on_edit(self, path: str, diff: str, tool: str, edit_id) -> None:
+        self._emit(
+            FileEdited(
+                path=path,
+                diff=diff,
+                tool=tool,
+                edit_id=str(edit_id) if edit_id is not None else "",
+            )
+        )
+        if path in self._state.open_files:
+            try:
+                rel, content = read_text(self._workspace, path)
+            except (FileNotFoundError, WorkspacePathError):
+                return
+            self._emit(FileContent(path=rel, content=content))
+
     def _on_tool(self, name: str, arguments: dict, result: str) -> None:
         preview = result if len(result) <= 400 else result[:400] + "…"
         self._emit(
@@ -155,9 +184,21 @@ class EngineSession:
             )
         )
 
+    def _cancel_history_replay(self) -> None:
+        self._history_generation += 1
+        task = self._history_task
+        self._history_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
     def _emit_snapshot(self) -> None:
         self._drop_missing_open_files()
-        self._emit(SnapshotReady(snapshot=self.snapshot()))
+        self._cancel_history_replay()
+        snap = self.snapshot()
+        history = list(snap.messages)
+        snap.messages = []
+        snap.message_count = len(history)
+        self._emit(SnapshotReady(snapshot=snap))
         for path in list(self._state.open_files):
             try:
                 rel, content = read_text(self._workspace, path)
@@ -165,6 +206,35 @@ class EngineSession:
                 self._emit(ErrorOccurred(message=f"{path}: {exc}"))
                 continue
             self._emit(FileContent(path=rel, content=content))
+        if not history:
+            self._emit(ChatHistoryComplete(count=0))
+            return
+        generation = self._history_generation
+        self._history_task = asyncio.get_running_loop().create_task(
+            self._replay_history(history, generation)
+        )
+
+    async def _replay_history(self, history, generation: int) -> None:
+        total = len(history)
+        try:
+            for index, message in enumerate(history):
+                if generation != self._history_generation:
+                    return
+                self._emit(
+                    ChatHistoryAdded(
+                        id=message.id,
+                        role=message.role,
+                        text=message.text,
+                        ts=message.ts,
+                        index=index,
+                        total=total,
+                    )
+                )
+                await asyncio.sleep(0)
+            if generation == self._history_generation:
+                self._emit(ChatHistoryComplete(count=total))
+        except asyncio.CancelledError:
+            return
 
     def _drop_missing_open_files(self) -> None:
         kept = []

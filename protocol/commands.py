@@ -60,5 +60,11 @@ class RequestGit(ProtocolMessage):
 
 @command
 @dataclass
+class UndoLastEdit(ProtocolMessage):
+    pass
+
+
+@command
+@dataclass
 class Shutdown(ProtocolMessage):
     pass

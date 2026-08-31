@@ -6,6 +6,9 @@ from typing import Any
 from protocol.commands import COMMANDS, Command
 from protocol.events import EVENTS, Event
 
+# asyncio StreamReader defaults to 64KiB per line; snapshots can exceed that.
+STREAM_LIMIT = 8 * 1024 * 1024
+
 
 class ProtocolError(ValueError):
     pass

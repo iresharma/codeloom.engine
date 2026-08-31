@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from runtime.tools.fs import WorkspacePathError, relative_posix, resolve_in_workspace
@@ -173,6 +174,172 @@ def language_for(path: str, language: str = "") -> str | None:
     return EXTENSION_TO_LANG.get(Path(path).suffix.lower())
 
 
+def parse_bytes(lang: str, source: bytes):
+    from tree_sitter import Parser
+
+    parser = Parser(_languages()[lang])
+    return parser.parse(source)
+
+
+@dataclass
+class SyntaxFault:
+    line: int
+    col: int
+    kind: str
+    text: str
+
+
+def check_syntax(lang: str, source: bytes) -> list[SyntaxFault]:
+    tree = parse_bytes(lang, source)
+    faults: list[SyntaxFault] = []
+
+    def walk(node) -> None:
+        if node.type == "ERROR" or node.is_missing:
+            kind = "MISSING" if node.is_missing else "ERROR"
+            line, col = _pos(node)
+            faults.append(
+                SyntaxFault(line=line, col=col, kind=kind, text=_clip(_text(source, node)))
+            )
+        for child in node.children:
+            walk(child)
+
+    walk(tree.root_node)
+    return faults
+
+
+def syntax_gate(
+    path: str,
+    new_text: str,
+    old_text: str | None,
+    language: str = "",
+) -> str | None:
+    """Return an error string if the edit introduces syntax faults, else None."""
+    lang = language_for(path, language)
+    if lang is None:
+        return None
+    new_bytes = new_text.encode("utf-8")
+    post = check_syntax(lang, new_bytes)
+    if old_text is None:
+        if not post:
+            return None
+        return _format_syntax_error(path, post, created=True)
+    pre = check_syntax(lang, old_text.encode("utf-8"))
+    if len(post) > len(pre):
+        return _format_syntax_error(path, post, created=False)
+    edited = _differing_line_range(old_text, new_text)
+    pre_keys = {(item.line, item.col, item.kind) for item in pre}
+    for item in post:
+        if (item.line, item.col, item.kind) in pre_keys:
+            continue
+        if edited is not None and edited[0] <= item.line <= edited[1]:
+            return _format_syntax_error(path, post, created=False)
+    return None
+
+
+def _format_syntax_error(path: str, faults: list[SyntaxFault], created: bool) -> str:
+    kind = "new file" if created else "edit"
+    lines = [f"error: syntax gate rejected {kind} of '{path}'"]
+    for item in faults[:12]:
+        extra = f"  {item.text}" if item.text else ""
+        lines.append(f"  {path}:{item.line}:{item.col} {item.kind}{extra}")
+    if len(faults) > 12:
+        lines.append(f"  ... ({len(faults) - 12} more)")
+    return "\n".join(lines)
+
+
+def _differing_line_range(old: str, new: str) -> tuple[int, int] | None:
+    old_lines = old.splitlines()
+    new_lines = new.splitlines()
+    max_len = max(len(old_lines), len(new_lines))
+    if max_len == 0:
+        return None
+    start = 0
+    while (
+        start < len(old_lines)
+        and start < len(new_lines)
+        and old_lines[start] == new_lines[start]
+    ):
+        start += 1
+    end_old = len(old_lines)
+    end_new = len(new_lines)
+    while (
+        end_old > start
+        and end_new > start
+        and old_lines[end_old - 1] == new_lines[end_new - 1]
+    ):
+        end_old -= 1
+        end_new -= 1
+    last = max(end_old, end_new, start + 1)
+    return start + 1, last
+
+
+def _parse_text(path: str, text: str, language: str = ""):
+    lang = language_for(path, language)
+    if lang is None:
+        ext = Path(path).suffix or "(none)"
+        return None, None, None, (
+            f"error: no tree-sitter grammar for '{path}' "
+            f"(extension {ext}; supported: python, go, javascript, typescript)"
+        )
+    source = text.encode("utf-8")
+    tree = parse_bytes(lang, source)
+    return tree, source, lang, None
+
+
+def symbol_range_in_text(
+    path: str, text: str, symbol: str, language: str = ""
+) -> tuple[int, int] | str:
+    if not symbol:
+        return "error: symbol is required"
+    tree, source, lang, err = _parse_text(path, text, language)
+    if err:
+        return err
+    types = SYMBOL_TYPES.get(lang, set())
+    node = _find_named_node(tree.root_node, types, symbol, source)
+    if node is None:
+        return f"error: symbol '{symbol}' not found in '{path}'"
+    return node.start_byte, node.end_byte
+
+
+def replace_symbol_in_text(
+    path: str, text: str, symbol: str, new_body: str, language: str = ""
+) -> str:
+    span = symbol_range_in_text(path, text, symbol, language)
+    if isinstance(span, str):
+        raise ValueError(span)
+    start, end = span
+    source = text.encode("utf-8")
+    updated = source[:start] + new_body.encode("utf-8") + source[end:]
+    return updated.decode("utf-8")
+
+
+def insert_after_imports_in_text(
+    path: str, text: str, snippet: str, language: str = ""
+) -> str:
+    tree, source, lang, err = _parse_text(path, text, language)
+    if err:
+        raise ValueError(err)
+    last = None
+
+    def walk(node) -> None:
+        nonlocal last
+        if node.type in IMPORT_TYPES:
+            last = node
+        for child in node.children:
+            walk(child)
+
+    walk(tree.root_node)
+    insert = snippet if snippet.endswith("\n") else snippet + "\n"
+    encoded = insert.encode("utf-8")
+    if last is None:
+        updated = encoded + source
+    else:
+        at = last.end_byte
+        prefix = b"\n" if at < len(source) and source[at : at + 1] != b"\n" else b""
+        updated = source[:at] + prefix + encoded + source[at:]
+    return updated.decode("utf-8")
+
+
 def _parse(workspace: Path, path: str, language: str = ""):
     try:
         resolved = resolve_in_workspace(workspace, path)
@@ -191,10 +358,7 @@ def _parse(workspace: Path, path: str, language: str = ""):
         source = resolved.read_bytes()
     except OSError as exc:
         return None, None, None, f"error: {exc}"
-    from tree_sitter import Parser
-
-    parser = Parser(_languages()[lang])
-    tree = parser.parse(source)
+    tree = parse_bytes(lang, source)
     rel = relative_posix(workspace, resolved)
     return tree, source, rel, lang
 

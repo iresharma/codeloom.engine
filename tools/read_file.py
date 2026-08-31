@@ -1,4 +1,5 @@
-from runtime.tools.fs import DEFAULT_READ_LIMIT, read_window
+from runtime.tools.fileid import read_source
+from runtime.tools.fs import DEFAULT_READ_LIMIT, format_window
 from tools.base import ToolContext, tool
 
 
@@ -33,9 +34,12 @@ def _as_int(value, default: int) -> int:
     },
 )
 def read_file(ctx: ToolContext, path: str, offset=1, limit=DEFAULT_READ_LIMIT) -> str:
-    return read_window(
-        ctx.workspace,
-        path,
+    src = read_source(ctx.workspace, path)
+    if ctx.files is not None:
+        ctx.files.mark(src.rel, src.raw_sha256)
+    return format_window(
+        src.rel,
+        src.text,
         offset=_as_int(offset, 1),
         limit=_as_int(limit, DEFAULT_READ_LIMIT),
     )

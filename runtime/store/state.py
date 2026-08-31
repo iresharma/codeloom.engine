@@ -32,6 +32,7 @@ class SessionState:
             git=git,
             language=language,
             language_supported=language_supported,
+            message_count=len(self.messages),
         )
 
     @classmethod

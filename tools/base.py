@@ -15,6 +15,10 @@ class ToolContext:
     workspace: Path
     language: Any = None
     lsp: Any = None
+    files: Any = None
+    journal: Any = None
+    session_id: str | None = None
+    on_edit: Any = None
 
 
 @dataclass

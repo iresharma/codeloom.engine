@@ -27,6 +27,23 @@ class ChatMessageAdded(ProtocolMessage):
 
 @event
 @dataclass
+class ChatHistoryAdded(ProtocolMessage):
+    id: str
+    role: str
+    text: str
+    ts: str
+    index: int
+    total: int
+
+
+@event
+@dataclass
+class ChatHistoryComplete(ProtocolMessage):
+    count: int
+
+
+@event
+@dataclass
 class SnapshotReady(ProtocolMessage):
     snapshot: EngineSnapshot
 
@@ -42,6 +59,15 @@ class SessionList(ProtocolMessage):
 class FileContent(ProtocolMessage):
     path: str
     content: str
+
+
+@event
+@dataclass
+class FileEdited(ProtocolMessage):
+    path: str
+    diff: str
+    tool: str
+    edit_id: str
 
 
 @event

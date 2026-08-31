@@ -220,6 +220,8 @@ class LSPManager:
         self._clients: dict[tuple[str, ...], LSPClient] = {}
         self._opened_files: set[str] = set()
         self._diagnostics: dict[str, list[dict]] = {}
+        self._versions: dict[str, int] = {}
+        self._diag_seq: dict[str, int] = {}
         self._lock = threading.Lock()
         self._closed = False
 
@@ -269,11 +271,12 @@ class LSPManager:
                     },
                     "window": {"workDoneProgress": True},
                     "textDocument": {
-                        "synchronization": {"didSave": True},
+                        "synchronization": {"didSave": True, "didChange": True},
                         "publishDiagnostics": {"relatedInformation": True},
                         "definition": {},
                         "references": {},
                         "hover": {},
+                        "rename": {"prepareSupport": True},
                         "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
                     },
                 },
@@ -316,6 +319,7 @@ class LSPManager:
                 uri = params.get("uri", "<unknown>")
                 with self._lock:
                     self._diagnostics[uri] = params.get("diagnostics", [])
+                    self._diag_seq[uri] = self._diag_seq.get(uri, 0) + 1
 
     @staticmethod
     def _settings_section(settings: dict, section: str | None):
@@ -433,6 +437,7 @@ class LSPManager:
         )
         with self._lock:
             self._opened_files.add(full_path)
+            self._versions.setdefault(full_path, 1)
         return uri
 
     def index_workspace(self, language: str, max_files: int = INDEX_FILE_CAP) -> int:
@@ -503,6 +508,92 @@ class LSPManager:
         return client.request(
             "textDocument/documentSymbol",
             {"textDocument": {"uri": uri}},
+        )
+
+    def cached_diagnostics(self, rel_path: str) -> list:
+        full_path = str(Path(self.root, rel_path).resolve())
+        uri = self._path_to_uri(full_path)
+        with self._lock:
+            return list(self._diagnostics.get(uri, []))
+
+    def did_change(self, rel_path: str, new_text: str) -> str | None:
+        full_path = str(Path(self.root, rel_path).resolve())
+        ext = Path(full_path).suffix
+        cfg = self._config_for_extension(ext)
+        if cfg is None:
+            return None
+        uri = self._path_to_uri(full_path)
+        with self._lock:
+            already_open = full_path in self._opened_files
+        if not already_open:
+            client = self._client_for(cfg)
+            client.notify(
+                "textDocument/didOpen",
+                {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": self._language_id(cfg, ext),
+                        "version": 1,
+                        "text": new_text,
+                    }
+                },
+            )
+            with self._lock:
+                self._opened_files.add(full_path)
+                self._versions[full_path] = 1
+                self._diagnostics.pop(uri, None)
+            return uri
+        client = self._client_for(cfg)
+        with self._lock:
+            version = self._versions.get(full_path, 1) + 1
+            self._versions[full_path] = version
+            self._diagnostics.pop(uri, None)
+        client.notify(
+            "textDocument/didChange",
+            {
+                "textDocument": {"uri": uri, "version": version},
+                "contentChanges": [{"text": new_text}],
+            },
+        )
+        return uri
+
+    def diagnostics_after_change(
+        self, rel_path: str, new_text: str, timeout: float = 5.0
+    ) -> list:
+        full_path = str(Path(self.root, rel_path).resolve())
+        uri = self._path_to_uri(full_path)
+        with self._lock:
+            seq_before = self._diag_seq.get(uri, 0)
+        if self.did_change(rel_path, new_text) is None:
+            return []
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._closed:
+            with self._lock:
+                if self._diag_seq.get(uri, 0) > seq_before:
+                    return list(self._diagnostics.get(uri, []))
+            time.sleep(0.1)
+        with self._lock:
+            return list(self._diagnostics.get(uri, []))
+
+    def ask_rename(self, rel_path: str, line: int, character: int, new_name: str):
+        full_path = str(Path(self.root, rel_path).resolve())
+        if full_path not in self._opened_files:
+            self.open_file_and_get_diagnostics(rel_path)
+        ext = Path(full_path).suffix
+        cfg = self._config_for_extension(ext)
+        if cfg is None:
+            raise ValueError(f"No LSP server configured for extension '{ext}'")
+        client = self._client_for(cfg)
+        uri = self._path_to_uri(full_path)
+        text = Path(full_path).read_text(encoding="utf-8", errors="replace")
+        self.did_change(rel_path, text)
+        return client.request(
+            "textDocument/rename",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": character},
+                "newName": new_name,
+            },
         )
 
 
@@ -721,3 +812,25 @@ def document_symbols(workspace: Path, lsp: LSPManager, path: str) -> str:
         return f"{len(lines)} symbol(s) in {path}\n" + "\n".join(lines) + footer
     except (LSPTimeoutError, RuntimeError, ValueError, OSError) as exc:
         return f"error: getting document symbols for '{path}': {exc}"
+
+
+def rename_symbol(
+    workspace: Path,
+    lsp: LSPManager,
+    path: str,
+    line: int,
+    character: int,
+    new_name: str,
+):
+    err = _resolve(workspace, path)
+    if err:
+        return err
+    if not new_name:
+        return "error: new_name is required"
+    try:
+        result = lsp.ask_rename(path, line - 1, character - 1, new_name)
+        if not result:
+            return f"error: language server returned no edits for rename at {path}:{line}:{character}"
+        return result
+    except (LSPTimeoutError, RuntimeError, ValueError, OSError) as exc:
+        return f"error: renaming symbol in '{path}' at {line}:{character}: {exc}"

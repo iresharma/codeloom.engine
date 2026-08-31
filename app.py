@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import platform
 import signal
+import sys
 from pathlib import Path
 
 from runtime.server import EngineServer
@@ -25,6 +27,15 @@ async def main() -> None:
     workspace = Path(args.workspace).expanduser().resolve()
     engine_dir = workspace / ".engine"
     engine_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=== Engine Server Startup ===", flush=True)
+    print(f"workspace: {workspace}", flush=True)
+    print(f"engine dir: {engine_dir}", flush=True)
+    print(f"db path: {engine_dir / 'session.db'}", flush=True)
+    print(f"socket path: {engine_dir / 'engine.sock'}", flush=True)
+    print(f"python version: {sys.version.split()[0]}", flush=True)
+    print(f"platform: {platform.platform()}", flush=True)
+    print("==============================", flush=True)
 
     session = EngineSession(workspace, db_path=engine_dir / "session.db")
     await session.start()

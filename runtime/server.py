@@ -4,7 +4,8 @@ import asyncio
 from contextlib import suppress
 from pathlib import Path
 
-from protocol.codec import ProtocolError, decode_command, encode
+from protocol.codec import STREAM_LIMIT, ProtocolError, decode_command, encode
+from protocol.events import ErrorOccurred
 from runtime.session import EngineSession
 
 
@@ -20,7 +21,7 @@ class EngineServer:
             self._socket_path.unlink()
 
         server = await asyncio.start_unix_server(
-            self._on_client, path=str(self._socket_path)
+            self._on_client, path=str(self._socket_path), limit=STREAM_LIMIT
         )
         try:
             async with server:
@@ -69,10 +70,13 @@ class EngineServer:
                 break
             try:
                 command = decode_command(line)
-            except ProtocolError as exc:
+            except (ProtocolError, TypeError, ValueError) as exc:
                 self._session.emit_error(str(exc))
                 continue
-            await self._session.handle(command)
+            try:
+                await self._session.handle(command)
+            except Exception as exc:  # noqa: BLE001
+                self._session.emit_error(f"{type(command).__name__} failed: {exc}")
 
     async def _write_events(
         self,
@@ -81,5 +85,15 @@ class EngineServer:
     ) -> None:
         while True:
             event = await queue.get()
-            writer.write(encode(event))
+            payload = encode(event)
+            if len(payload) >= STREAM_LIMIT:
+                payload = encode(
+                    ErrorOccurred(
+                        message=(
+                            f"dropped {type(event).__name__}: {len(payload)} bytes "
+                            f"exceeds the {STREAM_LIMIT} byte NDJSON line limit"
+                        )
+                    )
+                )
+            writer.write(payload)
             await writer.drain()

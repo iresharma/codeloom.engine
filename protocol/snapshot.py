@@ -147,6 +147,7 @@ class EngineSnapshot:
     git: GitState
     language: str | None = None
     language_supported: bool = False
+    message_count: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -160,17 +161,19 @@ class EngineSnapshot:
             "git": self.git.to_json(),
             "language": self.language,
             "language_supported": self.language_supported,
+            "message_count": self.message_count,
         }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> EngineSnapshot:
+        messages = [
+            item if isinstance(item, ChatMessage) else ChatMessage.from_json(item)
+            for item in data.get("messages", [])
+        ]
         return cls(
             session_id=data["session_id"],
             workspace=data["workspace"],
-            messages=[
-                item if isinstance(item, ChatMessage) else ChatMessage.from_json(item)
-                for item in data.get("messages", [])
-            ],
+            messages=messages,
             ended=bool(data.get("ended", False)),
             open_files=list(data.get("open_files") or []),
             file_tree=[
@@ -180,4 +183,5 @@ class EngineSnapshot:
             git=GitState.from_json(data.get("git")),
             language=data.get("language"),
             language_supported=bool(data.get("language_supported", False)),
+            message_count=int(data.get("message_count", len(messages))),
         )

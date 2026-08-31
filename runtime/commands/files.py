@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from protocol.commands import CloseFile, OpenFile
+from protocol.commands import CloseFile, OpenFile, UndoLastEdit
 from protocol.events import ErrorOccurred, FileClosed, FileContent
 from runtime.commands.register import handles
+from runtime.tools.edits import undo_last
 from runtime.tools.fs import (
     WorkspacePathError,
     read_text,
     relative_posix,
     resolve_in_workspace,
 )
+from tools.base import ToolContext
 
 
 @handles(OpenFile)
@@ -47,3 +49,21 @@ def close_file(session, command: CloseFile) -> None:
     session._state.open_files.remove(rel)
     session._persist()
     session._emit(FileClosed(path=rel))
+
+
+@handles(UndoLastEdit)
+async def undo_last_edit(session, command: UndoLastEdit) -> None:
+    if not session._require_session():
+        return
+    ctx = ToolContext(
+        workspace=session._workspace,
+        language=session.language,
+        lsp=session._lsp,
+        files=session._files,
+        journal=session._db_path,
+        session_id=session._state.session_id,
+        on_edit=session._on_edit,
+    )
+    text = await undo_last(ctx)
+    if text.startswith("error:"):
+        session._emit(ErrorOccurred(message=text))

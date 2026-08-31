@@ -17,13 +17,45 @@ class ProtocolMessage:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]):
-        hints = get_type_hints(cls)
+        hints = _type_hints(cls)
         kwargs: dict[str, Any] = {}
         for item in fields(cls):
             if item.name not in data:
                 continue
             kwargs[item.name] = _decode(data[item.name], hints.get(item.name, Any))
         return cls(**kwargs)
+
+
+def _type_hints(cls) -> dict[str, Any]:
+    try:
+        return get_type_hints(cls)
+    except TypeError:
+        module = __import__(cls.__module__, fromlist=["*"])
+        globalns = vars(module)
+        hints: dict[str, Any] = {}
+        for name, raw in getattr(cls, "__annotations__", {}).items():
+            hints[name] = _resolve_annotation(raw, globalns)
+        return hints
+
+
+def _resolve_annotation(raw: Any, globalns: dict[str, Any]) -> Any:
+    if not isinstance(raw, str):
+        return raw
+    text = raw.strip()
+    optional = False
+    if text.endswith("| None"):
+        text = text[: -len("| None")].rstrip()
+        optional = True
+    elif text.endswith("|None"):
+        text = text[: -len("|None")].rstrip()
+        optional = True
+    try:
+        resolved = eval(text, {"__builtins__": __builtins__}, globalns)
+    except Exception:
+        resolved = Any
+    if optional:
+        return Union[resolved, type(None)]
+    return resolved
 
 
 def _encode(value: Any) -> Any:
