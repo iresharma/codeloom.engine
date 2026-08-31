@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -222,6 +223,9 @@ class LSPManager:
         self._diagnostics: dict[str, list[dict]] = {}
         self._versions: dict[str, int] = {}
         self._diag_seq: dict[str, int] = {}
+        # sha256 of the text last handed to the server, so an out-of-band
+        # change on disk is detectable without trusting mtime.
+        self._sent_sha: dict[str, str] = {}
         self._lock = threading.Lock()
         self._closed = False
 
@@ -358,6 +362,7 @@ class LSPManager:
             clients = list(self._clients.values())
             self._clients.clear()
             self._opened_files.clear()
+            self._sent_sha.clear()
         for client in clients:
             client.shutdown()
 
@@ -438,6 +443,7 @@ class LSPManager:
         with self._lock:
             self._opened_files.add(full_path)
             self._versions.setdefault(full_path, 1)
+            self._sent_sha[full_path] = self._text_sha(text)
         return uri
 
     def index_workspace(self, language: str, max_files: int = INDEX_FILE_CAP) -> int:
@@ -461,7 +467,17 @@ class LSPManager:
         with self._lock:
             already_open = full_path in self._opened_files
         if already_open:
-            return self._diagnostics.get(uri, [])
+            # The file may have changed outside the edit funnel (the user's
+            # editor, a git checkout, a build step). Returning the cached
+            # entry there would report diagnostics for content the server no
+            # longer has, with nothing marking them stale.
+            stale = self._stale_disk_text(full_path)
+            if stale is not None:
+                return self.diagnostics_after_change(
+                    rel_path, stale, timeout=wait_timeout
+                )
+            with self._lock:
+                return list(self._diagnostics.get(uri, []))
         ext = Path(full_path).suffix
         cfg = self._config_for_extension(ext)
         if cfg is None:
@@ -481,6 +497,8 @@ class LSPManager:
         full_path = str(Path(self.root, rel_path).resolve())
         if full_path not in self._opened_files:
             self.open_file_and_get_diagnostics(rel_path)
+        else:
+            self.sync_if_stale(rel_path)
         ext = Path(full_path).suffix
         cfg = self._config_for_extension(ext)
         if cfg is None:
@@ -499,6 +517,8 @@ class LSPManager:
         full_path = str(Path(self.root, rel_path).resolve())
         if full_path not in self._opened_files:
             self.open_file_and_get_diagnostics(rel_path)
+        else:
+            self.sync_if_stale(rel_path)
         ext = Path(full_path).suffix
         cfg = self._config_for_extension(ext)
         if cfg is None:
@@ -515,6 +535,44 @@ class LSPManager:
         uri = self._path_to_uri(full_path)
         with self._lock:
             return list(self._diagnostics.get(uri, []))
+
+    @staticmethod
+    def _text_sha(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+
+    @staticmethod
+    def _disk_text(full_path: str) -> str | None:
+        """Read with the same newline normalization used when opening."""
+        try:
+            return Path(full_path).read_text(errors="replace")
+        except OSError:
+            return None
+
+    def _stale_disk_text(self, full_path: str) -> str | None:
+        """Disk text, when it differs from what the server was last sent."""
+        with self._lock:
+            if full_path not in self._opened_files:
+                return None
+            sent = self._sent_sha.get(full_path)
+        text = self._disk_text(full_path)
+        if text is None:
+            return None
+        if sent is not None and self._text_sha(text) == sent:
+            return None
+        return text
+
+    def sync_if_stale(self, rel_path: str) -> bool:
+        """Push disk content when the server's view is out of date.
+
+        Notification only, with no diagnostics wait: the server processes
+        messages in order, so a request sent after this returns is answered
+        against the updated content.
+        """
+        full_path = str(Path(self.root, rel_path).resolve())
+        text = self._stale_disk_text(full_path)
+        if text is None:
+            return False
+        return self.did_change(rel_path, text) is not None
 
     def did_change(self, rel_path: str, new_text: str) -> str | None:
         full_path = str(Path(self.root, rel_path).resolve())
@@ -541,12 +599,14 @@ class LSPManager:
             with self._lock:
                 self._opened_files.add(full_path)
                 self._versions[full_path] = 1
+                self._sent_sha[full_path] = self._text_sha(new_text)
                 self._diagnostics.pop(uri, None)
             return uri
         client = self._client_for(cfg)
         with self._lock:
             version = self._versions.get(full_path, 1) + 1
             self._versions[full_path] = version
+            self._sent_sha[full_path] = self._text_sha(new_text)
             self._diagnostics.pop(uri, None)
         client.notify(
             "textDocument/didChange",
@@ -585,8 +645,7 @@ class LSPManager:
             raise ValueError(f"No LSP server configured for extension '{ext}'")
         client = self._client_for(cfg)
         uri = self._path_to_uri(full_path)
-        text = Path(full_path).read_text(encoding="utf-8", errors="replace")
-        self.did_change(rel_path, text)
+        self.sync_if_stale(rel_path)
         return client.request(
             "textDocument/rename",
             {
