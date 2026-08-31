@@ -71,6 +71,7 @@ def _persist_payload(snapshot: EngineSnapshot) -> dict:
     data.pop("git", None)
     data.pop("language", None)
     data.pop("language_supported", None)
+    data.pop("pending_prompt", None)
     return data
 
 

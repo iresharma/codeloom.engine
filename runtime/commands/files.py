@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from protocol.commands import CloseFile, OpenFile, UndoLastEdit
-from protocol.events import ErrorOccurred, FileClosed, FileContent
+from protocol.events import ErrorOccurred, FileClosed
 from runtime.commands.register import handles
 from runtime.tools.edits import undo_last
 from runtime.tools.fs import (
@@ -18,7 +18,7 @@ def open_file(session, command: OpenFile) -> None:
     if not session._require_session():
         return
     try:
-        rel, content = read_text(session._workspace, command.path)
+        rel, _content = read_text(session._workspace, command.path)
     except FileNotFoundError:
         session._emit(ErrorOccurred(message=f"file not found: {command.path}"))
         return
@@ -28,7 +28,7 @@ def open_file(session, command: OpenFile) -> None:
     if rel not in session._state.open_files:
         session._state.open_files.append(rel)
     session._persist()
-    session._emit(FileContent(path=rel, content=content))
+    session._emit_file_content(rel)
 
 
 @handles(CloseFile)
@@ -63,6 +63,7 @@ async def undo_last_edit(session, command: UndoLastEdit) -> None:
         journal=session._db_path,
         session_id=session._state.session_id,
         on_edit=session._on_edit,
+        config=session._config,
     )
     text = await undo_last(ctx)
     if text.startswith("error:"):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from runtime.config import EngineConfig
 from runtime.store.edits import ensure_schema
 from runtime.tools.fileid import read_source
 from runtime.tools.tracker import FileTracker
@@ -17,6 +18,7 @@ def ctx(tmp_path):
         files=FileTracker(),
         journal=db,
         session_id="test-session",
+        config=EngineConfig(),
     )
 
 

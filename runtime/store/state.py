@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from protocol.snapshot import ChatMessage, EngineSnapshot, FileTreeNode, GitState
+from protocol.snapshot import (
+    ChatMessage,
+    EngineSnapshot,
+    FileTreeNode,
+    GitState,
+    PendingPrompt,
+    Stats,
+)
 
 
 @dataclass
@@ -11,6 +18,8 @@ class SessionState:
     messages: list[ChatMessage] = field(default_factory=list)
     open_files: list[str] = field(default_factory=list)
     ended: bool = False
+    stats: Stats = field(default_factory=Stats)
+    pending_prompt: PendingPrompt | None = None
 
     def snapshot(
         self,
@@ -33,6 +42,9 @@ class SessionState:
             language=language,
             language_supported=language_supported,
             message_count=len(self.messages),
+            file_tree_count=_tree_count(file_tree),
+            stats=self.stats,
+            pending_prompt=self.pending_prompt,
         )
 
     @classmethod
@@ -42,4 +54,15 @@ class SessionState:
             messages=list(snap.messages),
             open_files=list(snap.open_files),
             ended=False,
+            stats=snap.stats or Stats(),
+            pending_prompt=None,
         )
+
+
+def _tree_count(nodes: list[FileTreeNode]) -> int:
+    total = 0
+    for node in nodes:
+        total += 1
+        if node.children:
+            total += _tree_count(node.children)
+    return total

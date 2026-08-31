@@ -137,6 +137,89 @@ class GitState:
 
 
 @dataclass
+class Stats:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+    total_tokens: int = 0
+    cost: float = 0.0
+    requests: int = 0
+    tool_calls: int = 0
+    turns: int = 0
+    elapsed_s: float = 0.0
+    last_turn_tokens: int = 0
+    last_turn_cost: float = 0.0
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "cached_tokens": self.cached_tokens,
+            "total_tokens": self.total_tokens,
+            "cost": self.cost,
+            "requests": self.requests,
+            "tool_calls": self.tool_calls,
+            "turns": self.turns,
+            "elapsed_s": self.elapsed_s,
+            "last_turn_tokens": self.last_turn_tokens,
+            "last_turn_cost": self.last_turn_cost,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any] | None) -> Stats:
+        if not data:
+            return cls()
+        return cls(
+            prompt_tokens=int(data.get("prompt_tokens") or 0),
+            completion_tokens=int(data.get("completion_tokens") or 0),
+            reasoning_tokens=int(data.get("reasoning_tokens") or 0),
+            cached_tokens=int(data.get("cached_tokens") or 0),
+            total_tokens=int(data.get("total_tokens") or 0),
+            cost=float(data.get("cost") or 0),
+            requests=int(data.get("requests") or 0),
+            tool_calls=int(data.get("tool_calls") or 0),
+            turns=int(data.get("turns") or 0),
+            elapsed_s=float(data.get("elapsed_s") or 0),
+            last_turn_tokens=int(data.get("last_turn_tokens") or 0),
+            last_turn_cost=float(data.get("last_turn_cost") or 0),
+        )
+
+
+@dataclass
+class PendingPrompt:
+    prompt_id: str
+    question: str
+    kind: str
+    choices: list[str]
+    default: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "prompt_id": self.prompt_id,
+            "question": self.question,
+            "kind": self.kind,
+            "choices": list(self.choices),
+        }
+        if self.default is not None:
+            payload["default"] = self.default
+        return payload
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any] | None) -> PendingPrompt | None:
+        if not data:
+            return None
+        return cls(
+            prompt_id=data["prompt_id"],
+            question=data["question"],
+            kind=data.get("kind") or "text",
+            choices=list(data.get("choices") or []),
+            default=data.get("default"),
+        )
+
+
+@dataclass
 class EngineSnapshot:
     session_id: str
     workspace: str
@@ -148,9 +231,12 @@ class EngineSnapshot:
     language: str | None = None
     language_supported: bool = False
     message_count: int = 0
+    file_tree_count: int = 0
+    stats: Stats | None = None
+    pending_prompt: PendingPrompt | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "type": "EngineSnapshot",
             "session_id": self.session_id,
             "workspace": self.workspace,
@@ -162,7 +248,12 @@ class EngineSnapshot:
             "language": self.language,
             "language_supported": self.language_supported,
             "message_count": self.message_count,
+            "file_tree_count": self.file_tree_count,
+            "stats": (self.stats or Stats()).to_json(),
         }
+        if self.pending_prompt is not None:
+            payload["pending_prompt"] = self.pending_prompt.to_json()
+        return payload
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> EngineSnapshot:
@@ -184,4 +275,7 @@ class EngineSnapshot:
             language=data.get("language"),
             language_supported=bool(data.get("language_supported", False)),
             message_count=int(data.get("message_count", len(messages))),
+            file_tree_count=int(data.get("file_tree_count") or 0),
+            stats=Stats.from_json(data.get("stats")),
+            pending_prompt=PendingPrompt.from_json(data.get("pending_prompt")),
         )

@@ -66,5 +66,18 @@ class UndoLastEdit(ProtocolMessage):
 
 @command
 @dataclass
+class AbortAgent(ProtocolMessage):
+    agent_id: str | None = None
+
+
+@command
+@dataclass
+class AnswerPrompt(ProtocolMessage):
+    prompt_id: str
+    text: str
+
+
+@command
+@dataclass
 class Shutdown(ProtocolMessage):
     pass

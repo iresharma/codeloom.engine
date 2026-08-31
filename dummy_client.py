@@ -9,36 +9,63 @@ from dataclasses import fields
 from pathlib import Path
 
 from protocol.codec import STREAM_LIMIT, decode_event, encode
-from protocol.commands import COMMANDS, StartSession, SubmitUserMessage, UndoLastEdit
+from protocol.commands import (
+    AbortAgent,
+    AnswerPrompt,
+    COMMANDS,
+    StartSession,
+    SubmitUserMessage,
+    UndoLastEdit,
+)
 from protocol.events import (
+    AgentStateChanged,
     ChatHistoryAdded,
     ChatHistoryComplete,
     ChatMessageAdded,
+    ChatMessageDelta,
+    ChatMessageStarted,
+    CommandOutputChunk,
+    ContextCompacted,
     ErrorOccurred,
     FileClosed,
     FileContent,
     FileEdited,
+    FileTreeUpdated,
     GitStateUpdated,
     SessionEnded,
     SessionList,
     SnapshotReady,
+    StatsUpdated,
+    ToolCallFinished,
+    ToolCallStarted,
+    UserPromptRequested,
     WarningOccurred,
 )
 from protocol.snapshot import FileTreeNode, GitState
 
 CLIENT_EXIT = object()
 _COMMANDS_BY_NAME = {name.lower(): cls for name, cls in COMMANDS.items()}
+_LAST_PROMPT_ID = ""
+_STREAM_ID = ""
 
 
 def _help_text() -> str:
     lines = [
         "start [id]          StartSession (workspace filled by this client)",
         "undo                UndoLastEdit (last agent write batch)",
+        "abort               AbortAgent (cancel the in-flight turn)",
+        "answer <text>       AnswerPrompt (or just type the answer while a prompt is up)",
         "exit                disconnect this client (server stays up)",
         "help                this text",
     ]
     for name, cls in COMMANDS.items():
-        if name in ("StartSession", "SubmitUserMessage", "UndoLastEdit"):
+        if name in (
+            "StartSession",
+            "SubmitUserMessage",
+            "UndoLastEdit",
+            "AbortAgent",
+            "AnswerPrompt",
+        ):
             continue
         names = [item.name for item in fields(cls)]
         if names:
@@ -87,6 +114,16 @@ def command_from_line(line: str, workspace: Path):
         )
     if name in ("undo", "undolastedit"):
         return UndoLastEdit()
+    if name in ("abort", "abortagent"):
+        return AbortAgent()
+    if name in ("answer", "answerprompt"):
+        if not _LAST_PROMPT_ID:
+            print("no prompt is outstanding", flush=True)
+            return None
+        if not rest:
+            print("usage: answer <text>  (or type the answer at the answer> prompt)", flush=True)
+            return None
+        return _take_answer(rest)
     cls = _COMMANDS_BY_NAME.get(name)
     if cls is StartSession:
         return StartSession(
@@ -112,7 +149,16 @@ def command_from_line(line: str, workspace: Path):
     if line.startswith("/"):
         print(f"unknown command: {line.split()[0]}  (try help)", flush=True)
         return None
+    if _LAST_PROMPT_ID:
+        return _take_answer(line)
     return SubmitUserMessage(text=line)
+
+
+def _take_answer(text: str) -> AnswerPrompt:
+    global _LAST_PROMPT_ID
+    prompt_id = _LAST_PROMPT_ID
+    _LAST_PROMPT_ID = ""
+    return AnswerPrompt(prompt_id=prompt_id, text=text)
 
 
 def _tree_size(nodes: list[FileTreeNode]) -> int:
@@ -156,6 +202,13 @@ def format_event(event) -> str:
         lines.append(
             f"chat history: {snap.message_count} messages (streamed next, not packed here)"
         )
+        lines.append(
+            f"file_tree_count: {snap.file_tree_count} (tree streamed as FileTreeUpdated)"
+        )
+        if snap.stats is not None:
+            lines.append(
+                f"stats: {snap.stats.total_tokens} tokens · ${snap.stats.cost:.3f}"
+            )
         return "\n".join(lines)
     if isinstance(event, GitStateUpdated):
         return "\n".join(_format_git(event.git))
@@ -179,8 +232,48 @@ def format_event(event) -> str:
         return f"[history {event.index + 1}/{event.total}] {event.role}: {event.text}"
     if isinstance(event, ChatHistoryComplete):
         return f"chat history complete ({event.count})"
+    if isinstance(event, ChatMessageStarted):
+        return ""
+    if isinstance(event, ChatMessageDelta):
+        global _STREAM_ID
+        prefix = "" if _STREAM_ID == event.id else "\n"
+        _STREAM_ID = event.id
+        print(f"{prefix}{event.text}", end="", flush=True)
+        return ""
     if isinstance(event, ChatMessageAdded):
+        if event.id == _STREAM_ID:
+            return ""
         return f"{event.role}: {event.text}"
+    if isinstance(event, ToolCallStarted):
+        return f"tool {event.name} started"
+    if isinstance(event, ToolCallFinished):
+        flag = "ok" if event.ok else "error"
+        return f"tool {event.name} {flag} ({event.duration_ms}ms)\n  {event.preview}"
+    if isinstance(event, CommandOutputChunk):
+        return f"  [{event.stream}] {event.text.rstrip()}"
+    if isinstance(event, AgentStateChanged):
+        return f"agent {event.state}  turn={event.turn}/{event.max_turns}"
+    if isinstance(event, StatsUpdated):
+        s = event.stats
+        return (
+            f"tokens {s.prompt_tokens / 1000:.1f}k in / {s.completion_tokens / 1000:.1f}k out "
+            f"· ${s.cost:.3f} · {s.elapsed_s:.1f}s · turn {s.turns}"
+        )
+    if isinstance(event, UserPromptRequested):
+        global _LAST_PROMPT_ID
+        _LAST_PROMPT_ID = event.prompt_id
+        extra = f"  choices={event.choices}" if event.choices else ""
+        return (
+            f"PROMPT {event.kind}: {event.question}{extra}\n"
+            f"  type the answer (yes/no) or: answer <text>"
+        )
+    if isinstance(event, ContextCompacted):
+        return (
+            f"compacted {event.strategy}: {event.messages_before}->{event.messages_after} "
+            f"saved {event.chars_saved} chars"
+        )
+    if isinstance(event, FileTreeUpdated):
+        return f"file_tree updated ({_tree_size(event.file_tree)} entries)"
     if isinstance(event, ErrorOccurred):
         return f"error: {event.message}"
     if isinstance(event, WarningOccurred):
@@ -245,6 +338,8 @@ async def print_events(reader: asyncio.StreamReader, done: asyncio.Event) -> Non
         except Exception as exc:  # noqa: BLE001
             print(f"\nbad event: {exc}", flush=True)
             continue
+        if text == "":
+            continue
         print(f"\n{text}", flush=True)
 
 
@@ -256,7 +351,8 @@ async def repl(
     loop = asyncio.get_running_loop()
     while not done.is_set():
         try:
-            line = await loop.run_in_executor(None, lambda: input("engine> "))
+            hint = "answer> " if _LAST_PROMPT_ID else "engine> "
+            line = await loop.run_in_executor(None, lambda h=hint: input(h))
         except EOFError:
             print("bye", flush=True)
             done.set()

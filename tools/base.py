@@ -19,6 +19,10 @@ class ToolContext:
     journal: Any = None
     session_id: str | None = None
     on_edit: Any = None
+    config: Any = None
+    ask_user: Any = None
+    on_output: Any = None
+    on_proc: Any = None
 
 
 @dataclass

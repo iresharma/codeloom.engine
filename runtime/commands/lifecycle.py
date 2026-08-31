@@ -55,20 +55,17 @@ def list_stored_sessions(session, command: ListSessions) -> None:
 
 
 @handles(SubmitUserMessage)
-async def submit_user_message(session, command: SubmitUserMessage) -> None:
+def submit_user_message(session, command: SubmitUserMessage) -> None:
     if not session._require_session():
+        return
+    pending = session._prompts.pending()
+    if pending is not None:
+        session._prompts.answer(pending.prompt_id, command.text)
         return
     if session._loop is None:
         session._emit(ErrorOccurred(message="set OPENROUTER_API_KEY"))
         return
-    session._add_message(role="user", text=command.text)
-    try:
-        reply = await session._loop.run(command.text)
-    except Exception as exc:  # noqa: BLE001
-        session._emit(ErrorOccurred(message=f"llm error: {exc}"))
-        return
-    session._add_message(role="assistant", text=reply)
-    session._persist()
+    session.start_turn(command.text)
 
 
 @handles(RequestSnapshot)
@@ -79,5 +76,5 @@ def request_snapshot(session, command: RequestSnapshot) -> None:
 
 
 @handles(Shutdown)
-def shutdown(session, command: Shutdown) -> None:
-    session.shutdown()
+async def shutdown(session, command: Shutdown) -> None:
+    await session.aclose()

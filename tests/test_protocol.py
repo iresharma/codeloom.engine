@@ -47,6 +47,31 @@ def test_snapshot_optional_language():
     assert decoded.snapshot.message_count == 0
 
 
+def test_new_commands_and_events_round_trip():
+    from protocol.commands import AbortAgent, AnswerPrompt
+    from protocol.events import UserPromptRequested
+    from protocol.snapshot import Stats
+    from protocol.events import StatsUpdated
+
+    parsed = decode_command(encode(AbortAgent()))
+    assert parsed.agent_id is None
+    answer = decode_command(encode(AnswerPrompt(prompt_id="p", text="yes")))
+    assert answer.text == "yes"
+    prompt = decode_event(
+        encode(
+            UserPromptRequested(
+                prompt_id="p",
+                question="ok?",
+                kind="confirm",
+                choices=["yes", "no"],
+            )
+        )
+    )
+    assert prompt.choices == ["yes", "no"]
+    stats = decode_event(encode(StatsUpdated(stats=Stats(prompt_tokens=3))))
+    assert stats.stats.prompt_tokens == 3
+
+
 def test_history_events_round_trip():
     from protocol.events import ChatHistoryAdded, ChatHistoryComplete
 
@@ -103,6 +128,7 @@ def test_snapshot_streams_history_after_ui_bootstrap(tmp_path):
         ChatHistoryComplete,
         ChatMessageAdded,
         FileContent,
+        FileTreeUpdated,
         SnapshotReady,
     )
     from runtime.session import EngineSession
@@ -128,8 +154,13 @@ def test_snapshot_streams_history_after_ui_bootstrap(tmp_path):
         assert len(snaps) == 1
         assert snaps[0].snapshot.messages == []
         assert snaps[0].snapshot.message_count == 2
-        assert [type(item) for item in immediate[:2]] == [SnapshotReady, FileContent]
-        assert immediate[1].path == "open.py"
+        assert snaps[0].snapshot.file_tree == []
+        assert [type(item) for item in immediate[:3]] == [
+            SnapshotReady,
+            FileTreeUpdated,
+            FileContent,
+        ]
+        assert immediate[2].path == "open.py"
         assert not any(isinstance(item, ChatHistoryAdded) for item in immediate)
         assert not any(isinstance(item, ChatHistoryComplete) for item in immediate)
         assert session._history_task is not None

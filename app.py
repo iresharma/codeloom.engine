@@ -40,12 +40,22 @@ async def main() -> None:
     session = EngineSession(workspace, db_path=engine_dir / "session.db")
     await session.start()
     server = EngineServer(session, socket_path=engine_dir / "engine.sock")
+    loop = asyncio.get_running_loop()
+    force = False
 
-    def _stop() -> None:
-        session.close_session()
+    async def _graceful() -> None:
+        await session.aclose()
         server.stop()
 
-    loop = asyncio.get_running_loop()
+    def _stop() -> None:
+        nonlocal force
+        if force:
+            session.close_session()
+            server.stop()
+            return
+        force = True
+        loop.create_task(_graceful())
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _stop)
 

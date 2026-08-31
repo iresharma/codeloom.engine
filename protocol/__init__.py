@@ -7,7 +7,9 @@ from protocol.snapshot import (
     EngineSnapshot,
     FileTreeNode,
     GitState,
+    PendingPrompt,
     SessionSummary,
+    Stats,
 )
 
 globals().update(COMMANDS)
@@ -22,9 +24,11 @@ __all__ = [
     "Event",
     "FileTreeNode",
     "GitState",
+    "PendingPrompt",
     "ProtocolError",
     "ProtocolMessage",
     "SessionSummary",
+    "Stats",
     "decode_command",
     "decode_event",
     "encode",
