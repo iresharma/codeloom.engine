@@ -23,6 +23,11 @@ class ToolContext:
     ask_user: Any = None
     on_output: Any = None
     on_proc: Any = None
+    agent_id: str = ""
+    role: str = ""
+    profile: str = ""
+    write_globs: list[str] | None = None
+    write_lock: Any = None
 
 
 @dataclass

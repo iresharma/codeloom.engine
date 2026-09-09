@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from llm.provider import LLMResult, ToolCall
 from protocol.commands import AbortAgent, StartSession, SubmitUserMessage
@@ -50,7 +51,7 @@ def test_submit_returns_before_turn_finishes(tmp_path):
     asyncio.run(run())
 
 
-def test_second_submit_refused(tmp_path):
+def test_second_submit_is_queued(tmp_path):
     async def run():
         hang = asyncio.Event()
         session = EngineSession(tmp_path, tmp_path / "session.db")
@@ -68,9 +69,16 @@ def test_second_submit_refused(tmp_path):
             item = queue.get_nowait()
             if isinstance(item, ErrorOccurred):
                 errors.append(item.message)
-        assert any("busy" in message for message in errors)
+        assert not any("busy" in message for message in errors)
         hang.set()
-        await session._turn_task
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            turn = session._turn_task
+            if (turn is None or turn.done()) and not session._pending_user:
+                break
+            await asyncio.sleep(0.02)
+        users = [m.text for m in session._state.messages if m.role == "user"]
+        assert users == ["one", "two"]
 
     asyncio.run(run())
 
@@ -138,7 +146,7 @@ def test_abort_with_agent_id(tmp_path):
             item = queue.get_nowait()
             if isinstance(item, ErrorOccurred):
                 messages.append(item.message)
-        assert any("subagents" in message for message in messages)
+        assert any("unknown agent" in message for message in messages)
 
     asyncio.run(run())
 
@@ -173,6 +181,43 @@ def test_abort_between_tool_calls(tmp_path):
         await task
         history = session._loop._history
         assert not any(item.get("tool_calls") for item in history)
+
+    asyncio.run(run())
+
+
+def test_tool_only_complete_does_not_start_chat(tmp_path):
+    async def run():
+        session = EngineSession(tmp_path, tmp_path / "session.db")
+        await session.start()
+        queue = session.subscribe()
+        session._on_message_start("m-tool")
+        session._on_delta("m-tool", "reasoning", "planning")
+        session._add_message("assistant", "   ")
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        assert not any(isinstance(item, ChatMessageStarted) for item in events)
+        assert not any(
+            isinstance(item, ChatMessageAdded) and item.role == "assistant"
+            for item in events
+        )
+        session._on_delta("m-tool", "text", "hello")
+        session._add_message("assistant", "hello", message_id="m-tool")
+        started = []
+        deltas = []
+        added = []
+        while not queue.empty():
+            item = queue.get_nowait()
+            if isinstance(item, ChatMessageStarted):
+                started.append(item)
+            elif isinstance(item, ChatMessageDelta):
+                deltas.append(item)
+            elif isinstance(item, ChatMessageAdded) and item.role == "assistant":
+                added.append(item)
+        assert len(started) == 1
+        assert started[0].id == "m-tool"
+        assert [item.text for item in deltas] == ["hello"]
+        assert added and added[-1].id == "m-tool"
 
     asyncio.run(run())
 

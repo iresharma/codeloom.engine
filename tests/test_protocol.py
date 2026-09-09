@@ -20,6 +20,14 @@ def test_start_session_with_id():
     assert parsed.session_id == "abc"
 
 
+def test_request_snapshot_replay_round_trip():
+    parsed = decode_command(encode(RequestSnapshot()))
+    assert isinstance(parsed, RequestSnapshot)
+    assert parsed.replay is True
+    inspect = decode_command(encode(RequestSnapshot(replay=False)))
+    assert inspect.replay is False
+
+
 def test_undo_and_file_edited_round_trip():
     parsed = decode_command(encode(UndoLastEdit()))
     assert isinstance(parsed, UndoLastEdit)
@@ -49,7 +57,7 @@ def test_snapshot_optional_language():
 
 def test_new_commands_and_events_round_trip():
     from protocol.commands import AbortAgent, AnswerPrompt
-    from protocol.events import UserPromptRequested
+    from protocol.events import AgentStarted, UserPromptRequested
     from protocol.snapshot import Stats
     from protocol.events import StatsUpdated
 
@@ -70,6 +78,67 @@ def test_new_commands_and_events_round_trip():
     assert prompt.choices == ["yes", "no"]
     stats = decode_event(encode(StatsUpdated(stats=Stats(prompt_tokens=3))))
     assert stats.stats.prompt_tokens == 3
+    started = decode_event(
+        encode(
+            AgentStarted(
+                agent_id="a1",
+                profile="coder",
+                parent_id="o",
+                task="edit",
+                worktree="/tmp/wt",
+                branch="engine/coder/a1",
+                batch_id="b1",
+                batch_name="edit",
+            )
+        )
+    )
+    assert started.worktree == "/tmp/wt"
+    assert started.branch == "engine/coder/a1"
+    assert started.batch_id == "b1"
+    assert started.batch_name == "edit"
+    from protocol.events import AgentsUpdated
+    from protocol.snapshot import AgentRow
+
+    updated = decode_event(
+        encode(
+            AgentsUpdated(
+                agents=[
+                    AgentRow(
+                        id="a1",
+                        role="subagent",
+                        profile="coder",
+                        status="thinking",
+                        task="add a flag",
+                        batch_id="b1",
+                        batch_name="add a flag",
+                    )
+                ]
+            )
+        )
+    )
+    assert updated.agents[0].task == "add a flag"
+    assert updated.agents[0].batch_id == "b1"
+    assert updated.agents[0].batch_name == "add a flag"
+    from protocol.events import OrchContext
+
+    ctx = decode_event(encode(OrchContext(text="--- system ---\nhello\n")))
+    assert "hello" in ctx.text
+    from protocol.events import WorktreeSettled
+
+    settled = decode_event(
+        encode(
+            WorktreeSettled(
+                agent_id="a1",
+                profile="coder",
+                action="merge",
+                detail="merged engine/coder/a1",
+                branch="engine/coder/a1",
+                ok=True,
+            )
+        )
+    )
+    assert settled.action == "merge"
+    assert settled.ok is True
 
 
 def test_history_events_round_trip():
@@ -176,5 +245,49 @@ def test_snapshot_streams_history_after_ui_bootstrap(tmp_path):
         assert not any(isinstance(item, ChatMessageAdded) for item in replayed)
         assert isinstance(replayed[-1], ChatHistoryComplete)
         assert replayed[-1].count == 2
+
+    asyncio.run(run())
+
+
+def test_snapshot_without_replay_is_base_only(tmp_path):
+    import asyncio
+
+    from protocol.commands import RequestSnapshot, StartSession
+    from protocol.events import (
+        ChatHistoryAdded,
+        ChatHistoryComplete,
+        FileContent,
+        FileTreeUpdated,
+        SnapshotReady,
+    )
+    from runtime.session import EngineSession
+
+    async def run():
+        session = EngineSession(tmp_path, tmp_path / "session.db")
+        await session.start()
+        queue = session.subscribe()
+        await session.handle(StartSession(workspace=str(tmp_path)))
+        while not queue.empty():
+            queue.get_nowait()
+        (tmp_path / "open.py").write_text("x = 1\n", encoding="utf-8")
+        session._state.open_files = ["open.py"]
+        session._add_message("user", "hello")
+        session._add_message("assistant", "world")
+        while not queue.empty():
+            queue.get_nowait()
+        await session.handle(RequestSnapshot(replay=False))
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        snaps = [item for item in events if isinstance(item, SnapshotReady)]
+        assert len(snaps) == 1
+        assert snaps[0].snapshot.messages == []
+        assert snaps[0].snapshot.message_count == 2
+        assert snaps[0].snapshot.file_tree == []
+        assert session._history_task is None
+        assert not any(isinstance(item, FileTreeUpdated) for item in events)
+        assert not any(isinstance(item, FileContent) for item in events)
+        assert not any(isinstance(item, ChatHistoryAdded) for item in events)
+        assert not any(isinstance(item, ChatHistoryComplete) for item in events)
 
     asyncio.run(run())

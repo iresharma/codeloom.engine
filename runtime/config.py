@@ -19,6 +19,7 @@ class EngineConfig:
     exec_timeout_s: int = 120
     exec_file_limit_mb: int = 2048
     context_budget: int = 120_000
+    max_spawns_per_turn: int = 8
     subscriber_capacity: int = 4096
     subscriber_bytes: int = 1 << 20
     warnings: list[str] = field(default_factory=list)
@@ -44,6 +45,9 @@ class EngineConfig:
         )
         config.context_budget = _env_int(
             "ENGINE_CONTEXT_BUDGET", config.context_budget, warnings
+        )
+        config.max_spawns_per_turn = _env_int(
+            "ENGINE_MAX_SPAWNS_PER_TURN", config.max_spawns_per_turn, warnings
         )
         config.subscriber_capacity = _env_int(
             "ENGINE_SUBSCRIBER_CAPACITY", config.subscriber_capacity, warnings

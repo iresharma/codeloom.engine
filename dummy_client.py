@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import sys
-from contextlib import suppress
 from dataclasses import fields
 from pathlib import Path
 
-from protocol.codec import STREAM_LIMIT, decode_event, encode
 from protocol.commands import (
     AbortAgent,
     AnswerPrompt,
     COMMANDS,
+    RequestOrchContext,
+    RequestSnapshot,
     StartSession,
     SubmitUserMessage,
     UndoLastEdit,
 )
 from protocol.events import (
+    AgentFinished,
+    AgentStarted,
     AgentStateChanged,
+    AgentsUpdated,
     ChatHistoryAdded,
     ChatHistoryComplete,
     ChatMessageAdded,
@@ -32,6 +34,7 @@ from protocol.events import (
     FileEdited,
     FileTreeUpdated,
     GitStateUpdated,
+    OrchContext,
     SessionEnded,
     SessionList,
     SnapshotReady,
@@ -40,6 +43,7 @@ from protocol.events import (
     ToolCallStarted,
     UserPromptRequested,
     WarningOccurred,
+    WorktreeSettled,
 )
 from protocol.snapshot import FileTreeNode, GitState
 
@@ -47,13 +51,62 @@ CLIENT_EXIT = object()
 _COMMANDS_BY_NAME = {name.lower(): cls for name, cls in COMMANDS.items()}
 _LAST_PROMPT_ID = ""
 _STREAM_ID = ""
+_NOTES: list[str] = []
+
+_CHAT_EVENTS = (
+    ChatHistoryAdded,
+    ChatMessageStarted,
+    ChatMessageDelta,
+    ChatMessageAdded,
+    UserPromptRequested,
+)
+_TOOL_EVENTS = (ToolCallStarted, ToolCallFinished, CommandOutputChunk)
+_AGENT_EVENTS = (AgentsUpdated,)
+
+
+def _note(text: str) -> None:
+    _NOTES.append(text)
+
+
+def drain_notes() -> list[str]:
+    notes = _NOTES[:]
+    _NOTES.clear()
+    return notes
+
+
+def route_event(event) -> str:
+    if isinstance(event, _TOOL_EVENTS):
+        return "tools"
+    if isinstance(event, _AGENT_EVENTS):
+        return "agents"
+    if isinstance(event, OrchContext):
+        return "context"
+    if isinstance(event, _CHAT_EVENTS):
+        return "chat"
+    return "protocol"
+
+
+def format_command(command) -> str:
+    data = command.to_json()
+    name = data.pop("type", type(command).__name__)
+    if not data:
+        return name
+    parts = []
+    for key, value in data.items():
+        rendered = repr(value)
+        if len(rendered) > 120:
+            rendered = rendered[:117] + "..."
+        parts.append(f"{key}={rendered}")
+    return f"{name} {', '.join(parts)}"
 
 
 def _help_text() -> str:
     lines = [
         "start [id]          StartSession (workspace filled by this client)",
         "undo                UndoLastEdit (last agent write batch)",
-        "abort               AbortAgent (cancel the in-flight turn)",
+        "abort [id]          AbortAgent (orch reply only; pass an id to cancel one child)",
+        "snapshot            RequestSnapshot base state (same as the snapshot button / F5)",
+        "context             RequestOrchContext (same as the context button / F6)",
         "answer <text>       AnswerPrompt (or just type the answer while a prompt is up)",
         "exit                disconnect this client (server stays up)",
         "help                this text",
@@ -65,6 +118,8 @@ def _help_text() -> str:
             "UndoLastEdit",
             "AbortAgent",
             "AnswerPrompt",
+            "RequestSnapshot",
+            "RequestOrchContext",
         ):
             continue
         names = [item.name for item in fields(cls)]
@@ -78,11 +133,14 @@ def _help_text() -> str:
     lines.append("Write events: FileEdited prints the applied diff; tool chat lines")
     lines.append("are a 400-char preview. Open a file first to also see FileContent")
     lines.append("refresh after each edit. undo restores the last journal batch.")
+    lines.append("Live agents: AgentsUpdated / SnapshotReady.agents show count,")
+    lines.append("batch, profile, task, status, and current_tool. abort <id> kills one child.")
+    lines.append("When a writer finishes, answer merge / pr / keep / discard to settle its worktree.")
     return "\n".join(lines) + "\n"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Engine REPL client")
+    parser = argparse.ArgumentParser(description="Engine TUI client")
     parser.add_argument(
         "workspace",
         nargs="?",
@@ -103,7 +161,7 @@ def _split(line: str) -> tuple[str, str]:
 def command_from_line(line: str, workspace: Path):
     name, rest = _split(line)
     if name == "help":
-        print(_help_text(), end="", flush=True)
+        _note(_help_text().rstrip("\n"))
         return None
     if name in ("exit", "quit"):
         return CLIENT_EXIT
@@ -114,14 +172,18 @@ def command_from_line(line: str, workspace: Path):
         )
     if name in ("undo", "undolastedit"):
         return UndoLastEdit()
+    if name in ("snapshot", "snap", "requestsnapshot"):
+        return RequestSnapshot(replay=False)
+    if name in ("context", "orchcontext", "requestorchcontext"):
+        return RequestOrchContext()
     if name in ("abort", "abortagent"):
-        return AbortAgent()
+        return AbortAgent(agent_id=rest or None)
     if name in ("answer", "answerprompt"):
         if not _LAST_PROMPT_ID:
-            print("no prompt is outstanding", flush=True)
+            _note("no prompt is outstanding")
             return None
         if not rest:
-            print("usage: answer <text>  (or type the answer at the answer> prompt)", flush=True)
+            _note("usage: answer <text>  (or type the answer at the answer> prompt)")
             return None
         return _take_answer(rest)
     cls = _COMMANDS_BY_NAME.get(name)
@@ -132,7 +194,7 @@ def command_from_line(line: str, workspace: Path):
         )
     if cls is SubmitUserMessage:
         if not rest:
-            print("usage: SubmitUserMessage <text>", flush=True)
+            _note("usage: SubmitUserMessage <text>")
             return None
         return SubmitUserMessage(text=rest)
     if cls is not None:
@@ -141,13 +203,13 @@ def command_from_line(line: str, workspace: Path):
             return cls()
         if len(names) == 1:
             if not rest:
-                print(f"usage: {cls.__name__} <{names[0]}>", flush=True)
+                _note(f"usage: {cls.__name__} <{names[0]}>")
                 return None
             return cls(**{names[0]: rest})
-        print(f"usage: {cls.__name__}", flush=True)
+        _note(f"usage: {cls.__name__}")
         return None
     if line.startswith("/"):
-        print(f"unknown command: {line.split()[0]}  (try help)", flush=True)
+        _note(f"unknown command: {line.split()[0]}  (try help)")
         return None
     if _LAST_PROMPT_ID:
         return _take_answer(line)
@@ -186,6 +248,35 @@ def _format_git(git: GitState) -> list[str]:
     return lines
 
 
+def _format_agents(rows) -> str:
+    rows = list(rows or [])
+    if not rows:
+        return "agents: 0 running"
+    groups: dict[str, list] = {}
+    for row in rows:
+        groups.setdefault(row.batch_id or "", []).append(row)
+    lines = [f"agents: {len(rows)} running"]
+    for batch_id, members in groups.items():
+        name = next((row.batch_name for row in members if row.batch_name), "")
+        short = batch_id[:8] if batch_id else "—"
+        label = f"{name} ({short})" if name else short
+        lines.append(f"  batch {label}  ({len(members)})")
+        for row in members:
+            tool = f" {row.current_tool}" if row.current_tool else ""
+            lines.append(
+                f"    {row.profile} {row.id[:8]}  {row.status}{tool}"
+            )
+            task = (row.task or "").replace("\n", " ").strip()
+            if task:
+                if len(task) > 80:
+                    task = task[:77] + "..."
+                lines.append(f"      {task}")
+            if row.worktree:
+                extra = f" branch={row.branch}" if row.branch else ""
+                lines.append(f"      worktree={row.worktree}{extra}")
+    return "\n".join(lines)
+
+
 def format_event(event) -> str:
     if isinstance(event, SnapshotReady):
         snap = event.snapshot
@@ -209,6 +300,13 @@ def format_event(event) -> str:
             lines.append(
                 f"stats: {snap.stats.total_tokens} tokens · ${snap.stats.cost:.3f}"
             )
+        if snap.pending_prompt is not None:
+            prompt = snap.pending_prompt
+            who = f" agent={prompt.agent_id}" if prompt.agent_id else ""
+            lines.append(f"pending_prompt{who}: {prompt.kind} {prompt.question}")
+        if snap.ended:
+            lines.append("ended: true")
+        lines.append(_format_agents(snap.agents))
         return "\n".join(lines)
     if isinstance(event, GitStateUpdated):
         return "\n".join(_format_git(event.git))
@@ -236,23 +334,51 @@ def format_event(event) -> str:
         return ""
     if isinstance(event, ChatMessageDelta):
         global _STREAM_ID
-        prefix = "" if _STREAM_ID == event.id else "\n"
+        prefix = "" if not _STREAM_ID or _STREAM_ID == event.id else "\n"
         _STREAM_ID = event.id
-        print(f"{prefix}{event.text}", end="", flush=True)
-        return ""
+        return f"{prefix}{event.text}"
     if isinstance(event, ChatMessageAdded):
         if event.id == _STREAM_ID:
             return ""
         return f"{event.role}: {event.text}"
     if isinstance(event, ToolCallStarted):
-        return f"tool {event.name} started"
+        who = f" [{event.agent_id}]" if event.agent_id else ""
+        return f"tool {event.name} started{who}"
     if isinstance(event, ToolCallFinished):
         flag = "ok" if event.ok else "error"
-        return f"tool {event.name} {flag} ({event.duration_ms}ms)\n  {event.preview}"
+        who = f" [{event.agent_id}]" if event.agent_id else ""
+        return f"tool {event.name} {flag} ({event.duration_ms}ms){who}\n  {event.preview}"
     if isinstance(event, CommandOutputChunk):
         return f"  [{event.stream}] {event.text.rstrip()}"
     if isinstance(event, AgentStateChanged):
-        return f"agent {event.state}  turn={event.turn}/{event.max_turns}"
+        who = event.agent_id or "orch"
+        return f"agent {who} {event.state}  turn={event.turn}/{event.max_turns}"
+    if isinstance(event, AgentStarted):
+        extra = ""
+        if event.worktree:
+            extra = f" worktree={event.worktree} branch={event.branch}"
+        return (
+            f"agent started {event.profile} {event.agent_id} "
+            f"batch={event.batch_name or event.batch_id[:8] or '-'} "
+            f"task={event.task[:80]}{extra}"
+        )
+    if isinstance(event, AgentFinished):
+        return (
+            f"agent finished {event.profile} {event.agent_id} "
+            f"{event.status}: {event.summary[:120]}"
+        )
+    if isinstance(event, AgentsUpdated):
+        return _format_agents(event.agents)
+    if isinstance(event, WorktreeSettled):
+        flag = "ok" if event.ok else "error"
+        extra = f" {event.pr_url}" if event.pr_url else ""
+        return (
+            f"worktree {event.action} {flag} {event.profile} {event.agent_id[:8]} "
+            f"{event.branch}{extra}\n  {event.detail}"
+        )
+    if isinstance(event, OrchContext):
+        preview = event.text if len(event.text) <= 400 else event.text[:400] + "…"
+        return f"orch context ({len(event.text)} chars)\n{preview}"
     if isinstance(event, StatsUpdated):
         s = event.stats
         return (
@@ -263,8 +389,9 @@ def format_event(event) -> str:
         global _LAST_PROMPT_ID
         _LAST_PROMPT_ID = event.prompt_id
         extra = f"  choices={event.choices}" if event.choices else ""
+        who = f" agent={event.agent_id}" if event.agent_id else ""
         return (
-            f"PROMPT {event.kind}: {event.question}{extra}\n"
+            f"PROMPT {event.kind}{who}: {event.question}{extra}\n"
             f"  type the answer (yes/no) or: answer <text>"
         )
     if isinstance(event, ContextCompacted):
@@ -320,60 +447,7 @@ def _format_file_edited(event: FileEdited) -> str:
     return header + "\n" + body
 
 
-async def print_events(reader: asyncio.StreamReader, done: asyncio.Event) -> None:
-    while True:
-        try:
-            line = await reader.readline()
-        except (asyncio.LimitOverrunError, ValueError) as exc:
-            print(f"\nbad event stream: {exc}", flush=True)
-            done.set()
-            break
-        if not line:
-            print("\ndisconnected from server; press enter to exit", flush=True)
-            done.set()
-            break
-        try:
-            event = decode_event(line)
-            text = format_event(event)
-        except Exception as exc:  # noqa: BLE001
-            print(f"\nbad event: {exc}", flush=True)
-            continue
-        if text == "":
-            continue
-        print(f"\n{text}", flush=True)
-
-
-async def repl(
-    writer: asyncio.StreamWriter,
-    workspace: Path,
-    done: asyncio.Event,
-) -> None:
-    loop = asyncio.get_running_loop()
-    while not done.is_set():
-        try:
-            hint = "answer> " if _LAST_PROMPT_ID else "engine> "
-            line = await loop.run_in_executor(None, lambda h=hint: input(h))
-        except EOFError:
-            print("bye", flush=True)
-            done.set()
-            break
-        if done.is_set():
-            break
-        text = line.strip()
-        if not text:
-            continue
-        command = command_from_line(text, workspace)
-        if command is CLIENT_EXIT:
-            print("bye", flush=True)
-            done.set()
-            break
-        if command is None:
-            continue
-        writer.write(encode(command))
-        await writer.drain()
-
-
-async def main() -> None:
+def main() -> None:
     args = parse_args()
     workspace = Path(args.workspace).expanduser().resolve()
     socket_path = workspace / ".engine" / "engine.sock"
@@ -382,35 +456,10 @@ async def main() -> None:
         print("start the engine first: python app.py", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        reader, writer = await asyncio.open_unix_connection(
-            str(socket_path), limit=STREAM_LIMIT
-        )
-    except (ConnectionRefusedError, FileNotFoundError) as exc:
-        print(f"could not connect to {socket_path}: {exc}", file=sys.stderr)
-        sys.exit(1)
+    from client_tui import DummyClientApp
 
-    done = asyncio.Event()
-    events_task = asyncio.create_task(print_events(reader, done))
-    repl_task = asyncio.create_task(repl(writer, workspace, done))
-    try:
-        done_tasks, pending = await asyncio.wait(
-            {events_task, repl_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in done_tasks:
-            exc = task.exception() if not task.cancelled() else None
-            if exc is not None:
-                print(f"client error: {exc}", file=sys.stderr, flush=True)
-        done.set()
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(events_task, repl_task, return_exceptions=True)
-    finally:
-        writer.close()
-        with suppress(OSError):
-            await writer.wait_closed()
+    DummyClientApp(workspace=workspace, socket_path=socket_path).run()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

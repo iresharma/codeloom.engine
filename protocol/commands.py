@@ -37,6 +37,12 @@ class SubmitUserMessage(ProtocolMessage):
 @command
 @dataclass
 class RequestSnapshot(ProtocolMessage):
+    replay: bool = True
+
+
+@command
+@dataclass
+class RequestOrchContext(ProtocolMessage):
     pass
 
 

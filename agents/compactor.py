@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 # Observed provider overflow phrasing. Each entry is a verbatim substring;
 # the date is when it was recorded. A test pins these so a reword fails loudly.
@@ -333,3 +334,133 @@ def read_context_md(workspace, cap: int = CONTEXT_MD_CAP) -> str:
     if notes:
         text = text + "\n... (" + "; ".join(notes) + ")"
     return text
+
+
+@dataclass
+class AgentResult:
+    status: str
+    summary: str = ""
+    outcome: str = ""
+    files_touched: list[str] = field(default_factory=list)
+    leftover_questions: list[str] = field(default_factory=list)
+    missing_checks: list[str] = field(default_factory=list)
+
+    def as_text(self) -> str:
+        lines = [
+            f"status: {self.status}",
+            f"summary: {self.summary}",
+            f"outcome: {self.outcome}",
+        ]
+        if self.files_touched:
+            lines.append("files_touched: " + ", ".join(self.files_touched))
+        if self.leftover_questions:
+            lines.append("leftover_questions: " + "; ".join(self.leftover_questions))
+        if self.missing_checks:
+            lines.append("missing_checks: " + ", ".join(self.missing_checks))
+        return "\n".join(lines)
+
+
+def write_context_md(workspace, note: str, cap: int = CONTEXT_MD_CAP) -> None:
+    path = workspace / ".engine" / "context.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = ""
+    if path.is_file():
+        existing = path.read_text(encoding="utf-8", errors="replace")
+    body = existing
+    if body and not body.endswith("\n"):
+        body += "\n"
+    body += note.rstrip() + "\n"
+    if len(body) > cap:
+        body = body[-cap:]
+        nl = body.find("\n")
+        if 0 <= nl < len(body) - 1:
+            body = body[nl + 1 :]
+    path.write_text(body, encoding="utf-8")
+
+
+def _tools_from_history(messages: list[dict]) -> set[str]:
+    names: set[str] = set()
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            fn = call.get("function") or {}
+            name = fn.get("name") or call.get("name") or ""
+            if name:
+                names.add(str(name))
+    return names
+
+
+def _paths_from_history(messages: list[dict]) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            fn = call.get("function") or {}
+            raw = fn.get("arguments") or "{}"
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+            except json.JSONDecodeError:
+                data = {}
+            if not isinstance(data, dict):
+                continue
+            path = data.get("path")
+            if isinstance(path, str) and path not in seen:
+                seen.add(path)
+                paths.append(path)
+    return paths
+
+
+def _last_assistant_text(messages: list[dict]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "assistant" and not (message.get("tool_calls") or []):
+            return _content_as_text(message.get("content"))
+    return ""
+
+
+async def compress_for_parent(
+    messages: list[dict],
+    *,
+    complete: Callable | None = None,
+    status: str = "ok",
+    required_tools: list[str] | None = None,
+    files_touched: list[str] | None = None,
+    tools_called: set[str] | None = None,
+) -> AgentResult:
+    called = tools_called or _tools_from_history(messages)
+    missing = [name for name in (required_tools or []) if name not in called]
+    if status == "ok" and missing:
+        status = "incomplete"
+    outcome = _last_assistant_text(messages)[:SUMMARY_CLIP]
+    files = list(files_touched or _paths_from_history(messages))
+    leftover: list[str] = []
+    summary = outcome[:SUMMARY_CLIP]
+    work = [item for item in messages if item.get("role") != "system"]
+    if complete is not None and len(work) > 4:
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "This transcript is from a subagent. Report to the orchestrator, "
+                    "not a human. No markdown, headings, bullets, or filler. "
+                    "At most 6 short labeled lines (what / paths / verdict / leftover). "
+                    "Omit empty fields. No preamble."
+                ),
+            },
+            {"role": "user", "content": json.dumps(work, default=str)[:20_000]},
+        ]
+        try:
+            result = await complete(prompt)
+            text = getattr(result, "text", "") or ""
+            if text.strip():
+                summary = text.strip()[:SUMMARY_CLIP]
+                outcome = summary
+        except Exception:  # noqa: BLE001
+            pass
+    return AgentResult(
+        status=status,
+        summary=summary,
+        outcome=outcome or summary,
+        files_touched=files,
+        leftover_questions=leftover,
+        missing_checks=missing,
+    )
+

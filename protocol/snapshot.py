@@ -188,12 +188,67 @@ class Stats:
 
 
 @dataclass
+class AgentRow:
+    id: str
+    role: str
+    profile: str
+    status: str
+    current_tool: str = ""
+    parent_id: str = ""
+    worktree: str = ""
+    branch: str = ""
+    task: str = ""
+    batch_id: str = ""
+    batch_name: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "role": self.role,
+            "profile": self.profile,
+            "status": self.status,
+        }
+        if self.current_tool:
+            payload["current_tool"] = self.current_tool
+        if self.parent_id:
+            payload["parent_id"] = self.parent_id
+        if self.worktree:
+            payload["worktree"] = self.worktree
+        if self.branch:
+            payload["branch"] = self.branch
+        if self.task:
+            payload["task"] = self.task
+        if self.batch_id:
+            payload["batch_id"] = self.batch_id
+        if self.batch_name:
+            payload["batch_name"] = self.batch_name
+        return payload
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> AgentRow:
+        return cls(
+            id=data["id"],
+            role=data.get("role") or "subagent",
+            profile=data.get("profile") or "",
+            status=data.get("status") or "idle",
+            current_tool=data.get("current_tool") or "",
+            parent_id=data.get("parent_id") or "",
+            worktree=data.get("worktree") or "",
+            branch=data.get("branch") or "",
+            task=data.get("task") or "",
+            batch_id=data.get("batch_id") or "",
+            batch_name=data.get("batch_name") or "",
+        )
+
+
+@dataclass
 class PendingPrompt:
     prompt_id: str
     question: str
     kind: str
     choices: list[str]
     default: str | None = None
+    agent_id: str = ""
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -204,6 +259,8 @@ class PendingPrompt:
         }
         if self.default is not None:
             payload["default"] = self.default
+        if self.agent_id:
+            payload["agent_id"] = self.agent_id
         return payload
 
     @classmethod
@@ -216,6 +273,7 @@ class PendingPrompt:
             kind=data.get("kind") or "text",
             choices=list(data.get("choices") or []),
             default=data.get("default"),
+            agent_id=data.get("agent_id") or "",
         )
 
 
@@ -234,6 +292,7 @@ class EngineSnapshot:
     file_tree_count: int = 0
     stats: Stats | None = None
     pending_prompt: PendingPrompt | None = None
+    agents: list[AgentRow] | None = None
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -250,6 +309,7 @@ class EngineSnapshot:
             "message_count": self.message_count,
             "file_tree_count": self.file_tree_count,
             "stats": (self.stats or Stats()).to_json(),
+            "agents": [row.to_json() for row in (self.agents or [])],
         }
         if self.pending_prompt is not None:
             payload["pending_prompt"] = self.pending_prompt.to_json()
@@ -278,4 +338,8 @@ class EngineSnapshot:
             file_tree_count=int(data.get("file_tree_count") or 0),
             stats=Stats.from_json(data.get("stats")),
             pending_prompt=PendingPrompt.from_json(data.get("pending_prompt")),
+            agents=[
+                item if isinstance(item, AgentRow) else AgentRow.from_json(item)
+                for item in data.get("agents") or []
+            ],
         )

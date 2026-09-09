@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -48,7 +49,6 @@ DEFAULT_SYSTEM = (
     "denial is an answer, not a retry prompt. Old tool results get "
     "trimmed; re-run the tool rather than guessing at what it said."
 )
-MAX_TURNS = 16
 
 
 class AgentLoop:
@@ -58,7 +58,7 @@ class AgentLoop:
         tools: ToolRegistry | None = None,
         workspace: Path | None = None,
         system_prompt: str = DEFAULT_SYSTEM,
-        on_tool: Callable[[str, dict, str], None] | None = None,
+        on_tool: Callable[[str, str, dict, str], None] | None = None,
         language=None,
         lsp=None,
         files=None,
@@ -70,6 +70,13 @@ class AgentLoop:
         ask_user=None,
         on_output=None,
         on_proc=None,
+        agent_id: str = "",
+        role: str = "",
+        parent_id: str = "",
+        profile: str = "",
+        write_globs: list[str] | None = None,
+        write_lock=None,
+        concurrent_tools: bool = False,
     ):
         self._llm = llm
         self._tools = tools or ToolRegistry()
@@ -77,6 +84,20 @@ class AgentLoop:
         self._hooks = hooks or AgentHooks(on_tool=on_tool)
         if on_tool is not None and self._hooks.on_tool is None:
             self._hooks.on_tool = on_tool
+        self.agent_id = agent_id
+        self.role = role
+        self.parent_id = parent_id
+        self.profile = profile
+        self._concurrent_tools = concurrent_tools
+        self._tools_called: set[str] = set()
+        self._files_touched: list[str] = []
+
+        def record_edit(path, diff, tool, edit_id) -> None:
+            if path and path not in self._files_touched:
+                self._files_touched.append(path)
+            if on_edit is not None:
+                on_edit(path, diff, tool, edit_id)
+
         self._ctx = ToolContext(
             workspace=workspace or Path("."),
             language=language,
@@ -84,11 +105,16 @@ class AgentLoop:
             files=files,
             journal=journal,
             session_id=session_id,
-            on_edit=on_edit,
+            on_edit=record_edit,
             config=self._config,
             ask_user=ask_user,
             on_output=on_output,
             on_proc=on_proc,
+            agent_id=agent_id,
+            role=role,
+            profile=profile,
+            write_globs=write_globs,
+            write_lock=write_lock,
         )
         self._system_prompt = system_prompt
         self._on_tool = self._hooks.on_tool
@@ -104,7 +130,9 @@ class AgentLoop:
         for message in messages:
             if message.role == "user":
                 self._history.append({"role": "user", "content": message.text})
-            elif message.role in ("assistant", "engine"):
+            elif message.role == "engine":
+                self._history.append({"role": "user", "content": message.text})
+            elif message.role == "assistant":
                 self._history.append({"role": "assistant", "content": message.text})
 
     def _build_messages(self) -> list[dict]:
@@ -113,6 +141,38 @@ class AgentLoop:
         if notes:
             system = f"{system}\n\n## Workspace notes\n{notes}"
         return [{"role": "system", "content": system}] + list(self._history)
+
+    def context_dump(self) -> str:
+        parts: list[str] = []
+        for message in self._build_messages():
+            role = str(message.get("role") or "?")
+            content = message.get("content")
+            if content is None:
+                text = ""
+            elif isinstance(content, str):
+                text = content
+            else:
+                text = json.dumps(content, default=str)
+            calls = message.get("tool_calls") or []
+            header = f"--- {role} ---"
+            if calls:
+                names = []
+                for call in calls:
+                    fn = call.get("function") if isinstance(call, dict) else None
+                    if isinstance(fn, dict):
+                        names.append(str(fn.get("name") or "?"))
+                    elif isinstance(call, dict):
+                        names.append(str(call.get("name") or "?"))
+                if names:
+                    header += " tools=" + ",".join(names)
+            call_id = message.get("tool_call_id")
+            if call_id:
+                header += f" tool_call_id={call_id}"
+            parts.append(header)
+            if text:
+                parts.append(text)
+            parts.append("")
+        return "\n".join(parts).rstrip() + "\n"
 
     def _state(self, state: str, turn: int = 0) -> None:
         if self._hooks.on_state is not None:
@@ -136,9 +196,6 @@ class AgentLoop:
                 self._history.append({"role": "assistant", "content": last_text})
                 return last_text
         except asyncio.CancelledError:
-            # Truncate the in-flight exchange, then re-append the user
-            # message and a single assistant abort notice so history never
-            # holds an orphaned assistant tool_calls group.
             del self._history[marker:]
             self._history.append({"role": "user", "content": task})
             self._history.append(
@@ -220,12 +277,8 @@ class AgentLoop:
         )
         if info.get("strategy") == "noop":
             return
-        # compacted includes the system message; history is everything after.
         self._history = [item for item in compacted if item is not compacted[0]]
         if compacted and compacted[0].get("role") == "system":
-            # Keep any injected summary as a second system message by
-            # storing the full compacted list minus the first system prompt
-            # that _build_messages will re-add.
             extras = [
                 item
                 for item in compacted[1:]
@@ -255,31 +308,46 @@ class AgentLoop:
                 ],
             }
         )
-        for call in result.tool_calls:
-            arguments = call.arguments()
-            if self._hooks.on_tool_start is not None:
-                self._hooks.on_tool_start(call.id, call.name, arguments)
-            started = time.monotonic()
-            try:
-                output = await self._tools.execute(call.name, self._ctx, arguments)
-                ok = not str(output).startswith("error:")
-            except asyncio.CancelledError:
-                if self._hooks.on_tool is not None:
-                    self._hooks.on_tool(call.name, arguments, "cancelled")
-                raise
-            duration = int((time.monotonic() - started) * 1000)
-            if self._hooks.on_tool is not None:
-                self._hooks.on_tool(call.name, arguments, output)
-            self._history.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": output,
-                }
+        if self._concurrent_tools and len(result.tool_calls) > 1:
+            outputs = await asyncio.gather(
+                *[self._execute_call(call) for call in result.tool_calls]
             )
-            # duration/ok are observed by the session via on_tool; stored
-            # here only so a future hook can read them if needed.
-            _ = (ok, duration)
+            for call, output in zip(result.tool_calls, outputs):
+                self._history.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": output,
+                    }
+                )
+        else:
+            for call in result.tool_calls:
+                output = await self._execute_call(call)
+                self._history.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": output,
+                    }
+                )
         errors = validate_history(self._history)
         if errors:
             raise RuntimeError("history pairing broken: " + "; ".join(errors))
+
+    async def _execute_call(self, call) -> str:
+        arguments = call.arguments()
+        if self._hooks.on_tool_start is not None:
+            self._hooks.on_tool_start(call.id, call.name, arguments)
+        started = time.monotonic()
+        try:
+            output = await self._tools.execute(call.name, self._ctx, arguments)
+            self._tools_called.add(call.name)
+        except asyncio.CancelledError:
+            if self._hooks.on_tool is not None:
+                self._hooks.on_tool(call.id, call.name, arguments, "cancelled")
+            raise
+        duration = int((time.monotonic() - started) * 1000)
+        if self._hooks.on_tool is not None:
+            self._hooks.on_tool(call.id, call.name, arguments, output)
+        _ = duration
+        return output

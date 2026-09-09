@@ -5,12 +5,13 @@ from uuid import uuid4
 
 from protocol.commands import (
     ListSessions,
+    RequestOrchContext,
     RequestSnapshot,
     Shutdown,
     StartSession,
     SubmitUserMessage,
 )
-from protocol.events import ErrorOccurred, SessionList, WarningOccurred
+from protocol.events import ErrorOccurred, OrchContext, SessionList, WarningOccurred
 from runtime.commands.register import handles
 from runtime.store import SessionState
 from runtime.store.sqlite import list_sessions
@@ -72,7 +73,20 @@ def submit_user_message(session, command: SubmitUserMessage) -> None:
 def request_snapshot(session, command: RequestSnapshot) -> None:
     if not session._require_session():
         return
-    session._emit_snapshot()
+    session._emit_snapshot(replay=command.replay)
+
+
+@handles(RequestOrchContext)
+def request_orch_context(session, command: RequestOrchContext) -> None:
+    if not session._require_session():
+        return
+    if session._loop is None:
+        session._emit(ErrorOccurred(message="set OPENROUTER_API_KEY"))
+        return
+    from runtime.subscriber import EVENT_SOFT_LIMIT, clip_text
+
+    text, _ = clip_text(session._loop.context_dump(), EVENT_SOFT_LIMIT)
+    session._emit(OrchContext(text=text))
 
 
 @handles(Shutdown)

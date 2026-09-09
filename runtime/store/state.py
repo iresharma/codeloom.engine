@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from protocol.snapshot import (
+    AgentRow,
     ChatMessage,
     EngineSnapshot,
     FileTreeNode,
@@ -20,6 +21,7 @@ class SessionState:
     ended: bool = False
     stats: Stats = field(default_factory=Stats)
     pending_prompt: PendingPrompt | None = None
+    agents: list[AgentRow] = field(default_factory=list)
 
     def snapshot(
         self,
@@ -45,6 +47,7 @@ class SessionState:
             file_tree_count=_tree_count(file_tree),
             stats=self.stats,
             pending_prompt=self.pending_prompt,
+            agents=list(self.agents),
         )
 
     @classmethod
@@ -56,6 +59,7 @@ class SessionState:
             ended=False,
             stats=snap.stats or Stats(),
             pending_prompt=None,
+            agents=[],
         )
 
 

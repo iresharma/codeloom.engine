@@ -18,6 +18,7 @@ class PromptBroker:
         self._on_pending = on_pending
         self._pending: dict[str, asyncio.Future] = {}
         self._current: PendingPrompt | None = None
+        self._ask_lock: asyncio.Lock | None = None
 
     @property
     def current(self) -> PendingPrompt | None:
@@ -34,16 +35,50 @@ class PromptBroker:
         choices: list[str] | tuple = (),
         default: str | None = None,
         timeout: float = 300.0,
+        agent_id: str = "",
+        profile: str = "",
+    ) -> str:
+        async with self._lock():
+            return await self._ask_one(
+                question,
+                kind=kind,
+                choices=choices,
+                default=default,
+                timeout=timeout,
+                agent_id=agent_id,
+                profile=profile,
+            )
+
+    def _lock(self) -> asyncio.Lock:
+        if self._ask_lock is None:
+            self._ask_lock = asyncio.Lock()
+        return self._ask_lock
+
+    async def _ask_one(
+        self,
+        question: str,
+        *,
+        kind: str,
+        choices: list[str] | tuple,
+        default: str | None,
+        timeout: float,
+        agent_id: str,
+        profile: str,
     ) -> str:
         prompt_id = uuid4().hex
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[prompt_id] = future
+        tagged = question
+        if profile or agent_id:
+            label = " ".join(part for part in (profile, agent_id[:8]) if part)
+            tagged = f"[{label}] {question}"
         record = PendingPrompt(
             prompt_id=prompt_id,
-            question=question,
+            question=tagged,
             kind=kind,
             choices=list(choices),
             default=default,
+            agent_id=agent_id,
         )
         self._current = record
         if self._on_pending is not None:
@@ -53,10 +88,11 @@ class PromptBroker:
         self._emit(
             UserPromptRequested(
                 prompt_id=prompt_id,
-                question=question,
+                question=tagged,
                 kind=kind,
                 choices=list(choices),
                 default=default,
+                agent_id=agent_id,
             )
         )
         try:
@@ -87,3 +123,11 @@ class PromptBroker:
                 future.cancel()
         self._pending.clear()
         self._current = None
+
+    def cancel_agent(self, agent_id: str) -> None:
+        current = self._current
+        if current is None or current.agent_id != agent_id:
+            return
+        future = self._pending.get(current.prompt_id)
+        if future is not None and not future.done():
+            future.cancel()
