@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from protocol.message import ProtocolMessage
 from protocol.snapshot import (
+    AgentRow,
     EngineSnapshot,
     FileTreeNode,
     GitState,
@@ -135,6 +136,7 @@ class ToolCallStarted(ProtocolMessage):
     call_id: str
     name: str
     arguments_json: str
+    agent_id: str = ""
 
 
 @event
@@ -145,6 +147,7 @@ class ToolCallFinished(ProtocolMessage):
     preview: str
     ok: bool
     duration_ms: int
+    agent_id: str = ""
 
 
 @event
@@ -153,6 +156,7 @@ class CommandOutputChunk(ProtocolMessage):
     call_id: str
     stream: str
     text: str
+    agent_id: str = ""
 
 
 @event
@@ -161,6 +165,7 @@ class AgentStateChanged(ProtocolMessage):
     state: str
     turn: int
     max_turns: int
+    agent_id: str = ""
 
 
 @event
@@ -177,6 +182,7 @@ class UserPromptRequested(ProtocolMessage):
     kind: str
     choices: list[str]
     default: str | None = None
+    agent_id: str = ""
 
 
 @event
@@ -187,3 +193,50 @@ class ContextCompacted(ProtocolMessage):
     messages_after: int
     chars_saved: int
     summary: str
+    agent_id: str = ""
+
+
+@event
+@dataclass
+class AgentStarted(ProtocolMessage):
+    agent_id: str
+    profile: str
+    parent_id: str
+    task: str
+    worktree: str = ""
+    branch: str = ""
+    batch_id: str = ""
+    batch_name: str = ""
+
+
+@event
+@dataclass
+class AgentFinished(ProtocolMessage):
+    agent_id: str
+    profile: str
+    status: str
+    summary: str
+
+
+@event
+@dataclass
+class AgentsUpdated(ProtocolMessage):
+    agents: list[AgentRow]
+
+
+@event
+@dataclass
+class OrchContext(ProtocolMessage):
+    text: str
+
+
+@event
+@dataclass
+class WorktreeSettled(ProtocolMessage):
+    agent_id: str
+    profile: str
+    action: str
+    detail: str
+    branch: str
+    pr_url: str = ""
+    ok: bool = True

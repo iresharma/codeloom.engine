@@ -5,17 +5,22 @@ import inspect
 import threading
 import time
 from contextlib import suppress
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from agents.agent_loop import AgentLoop
 from agents.hooks import AgentHooks
+from agents.orchestrator import Orchestrator
+from agents.profile import discover_profiles
 from llm.openrouter import OpenRouterLLM
 from llm.provider import Usage
 from protocol.commands import Command
 from protocol.events import (
+    AgentFinished,
+    AgentStarted,
     AgentStateChanged,
+    AgentsUpdated,
     ChatHistoryAdded,
     ChatHistoryComplete,
     ChatMessageAdded,
@@ -34,8 +39,9 @@ from protocol.events import (
     ToolCallFinished,
     ToolCallStarted,
     WarningOccurred,
+    WorktreeSettled,
 )
-from protocol.snapshot import ChatMessage, EngineSnapshot, GitState, Stats
+from protocol.snapshot import AgentRow, ChatMessage, EngineSnapshot, GitState, Stats
 from runtime.commands import HANDLERS
 from runtime.config import EngineConfig
 from runtime.language import LanguageInfo
@@ -60,15 +66,18 @@ class EngineSession:
         self._subscribers: list[Subscriber] = []
         self._config = EngineConfig.from_env(self._workspace)
         self._llm: OpenRouterLLM | None = None
-        self._loop: AgentLoop | None = None
+        self._loop: Orchestrator | None = None
         self._lsp: LSPManager | None = None
         self._files = FileTracker()
         self._history_task: asyncio.Task | None = None
         self._history_generation = 0
         self._turn_task: asyncio.Task | None = None
+        self._pending_user: list[str] = []
+        self._inbox: list[str] = []
         self._aborting = False
         self._turn_started = 0.0
         self._live_procs: set = set()
+        self._write_lock: asyncio.Lock | None = None
         self._prompts = PromptBroker(
             self._emit, self._on_prompt_state, self._set_pending_prompt
         )
@@ -130,18 +139,31 @@ class EngineSession:
         task = self._turn_task
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+        if isinstance(self._loop, Orchestrator):
+            self._loop.abort_all_children()
+            self._prompts.cancel_all()
+            self._kill_live_procs()
+            await self._loop.wait_children()
+            await self._loop.wait_settle()
+            self._loop.cleanup_worktrees()
         self.close_session()
 
     def close_session(self) -> bool:
         if self._state.session_id is None:
             return False
         self.abort_turn()
+        if isinstance(self._loop, Orchestrator):
+            self._loop.abort_all_children()
+            self._prompts.cancel_all()
+            self._kill_live_procs()
         self._cancel_history_replay()
         self._state.ended = True
         self._persist()
         self._emit(SessionEnded(reason="shutdown"))
         self._state = SessionState()
         self._loop = None
+        self._pending_user = []
+        self._inbox = []
         self._stop_lsp()
         return True
 
@@ -149,16 +171,32 @@ class EngineSession:
         self._emit(ErrorOccurred(message=message))
 
     def start_turn(self, text: str) -> None:
-        if self._turn_task is not None and not self._turn_task.done():
-            self._emit(ErrorOccurred(message="agent is busy; send AbortAgent first"))
-            return
         self._add_message(role="user", text=text)
         self._persist()
+        if self._turn_task is not None and not self._turn_task.done():
+            self._pending_user.append(text)
+            return
+        self._begin_turn(text)
+
+    def _begin_turn(self, text: str) -> None:
         self._state.stats.last_turn_tokens = 0
         self._state.stats.last_turn_cost = 0.0
-        self._turn_started = time.monotonic()
         self._aborting = False
+        self._turn_started = time.monotonic()
         self._turn_task = asyncio.get_running_loop().create_task(self._run_turn(text))
+
+    def _maybe_pump(self) -> None:
+        if self._turn_task is not None and not self._turn_task.done():
+            return
+        if self._state.ended or self._state.session_id is None:
+            return
+        if self._pending_user:
+            self._begin_turn(self._pending_user.pop(0))
+            return
+        if self._inbox:
+            report = "\n\n".join(self._inbox)
+            self._inbox.clear()
+            self._begin_turn(report)
 
     async def _run_turn(self, text: str) -> None:
         # CancelledError is swallowed: this task is the cancellation
@@ -185,6 +223,18 @@ class EngineSession:
             self._aborting = False
             self._emit_stats()
             self._on_state("idle", 0)
+            self._maybe_pump()
+            self._flush_settles_if_idle()
+
+    def _flush_settles_if_idle(self) -> None:
+        if self._turn_task is not None and not self._turn_task.done():
+            return
+        orch = self._loop
+        if not isinstance(orch, Orchestrator):
+            return
+        if orch.has_live_children():
+            return
+        orch.schedule_flush_settles()
 
     def abort_turn(self) -> bool:
         task = self._turn_task
@@ -192,7 +242,18 @@ class EngineSession:
             return False
         self._aborting = True
         self._on_state("aborting", 0)
-        self._prompts.cancel_all()
+        # abort_turn returning True means cancellation was requested, not
+        # that the turn has already stopped. Children keep running.
+        task.cancel()
+        return True
+
+    def abort_child(self, agent_id: str) -> bool:
+        if not isinstance(self._loop, Orchestrator):
+            return False
+        self._prompts.cancel_agent(agent_id)
+        return self._loop.abort_child(agent_id)
+
+    def _kill_live_procs(self) -> None:
         for proc in list(self._live_procs):
             with suppress(ProcessLookupError, OSError):
                 import os
@@ -201,10 +262,11 @@ class EngineSession:
                 pid = getattr(proc, "pid", None)
                 if pid is not None:
                     os.killpg(os.getpgid(pid), signal.SIGTERM)
-        # abort_turn returning True means cancellation was requested, not
-        # that the turn has already stopped.
-        task.cancel()
-        return True
+
+    def _ensure_write_lock(self) -> asyncio.Lock:
+        if self._write_lock is None:
+            self._write_lock = asyncio.Lock()
+        return self._write_lock
 
     def _bind_loop(self) -> None:
         if self._llm is None:
@@ -213,24 +275,37 @@ class EngineSession:
         registry = discover_tools()
         for message in registry.errors:
             self._emit(ErrorOccurred(message=message))
+        profiles = discover_profiles()
+        for message in profiles.errors:
+            self._emit(ErrorOccurred(message=message))
         for warning in self._config.warnings:
             self._emit(WarningOccurred(message=warning))
         self._start_lsp()
         self._files = FileTracker()
-        hooks = AgentHooks(
-            on_tool=self._on_tool,
-            on_tool_start=self._on_tool_start,
-            on_delta=self._on_delta,
-            on_message_start=self._on_message_start,
-            on_usage=self._on_usage,
-            on_state=self._on_state,
-            on_compact=self._on_compact,
-        )
-        self._loop = AgentLoop(
+        self._state.agents = []
+        orch_hooks = self._hooks_for("", stream_chat=True)
+
+        def child_hooks(agent_id: str, profile: str) -> AgentHooks:
+            return self._hooks_for(agent_id, stream_chat=False)
+
+        self._loop = Orchestrator(
             self._llm,
-            tools=registry,
+            all_tools=registry,
+            profiles=profiles,
+            spawn_budget=self._config.max_spawns_per_turn,
+            make_child_hooks=child_hooks,
+            make_child_lsp=self._make_child_lsp,
+            on_agent_started=self._on_agent_started,
+            on_agent_finished=self._on_agent_finished,
+            on_agent_result=self._on_agent_result,
+            on_worktree_settled=self._on_worktree_settled,
+            child_ask_user=self._prompts.ask,
+            child_on_output=self._on_command_output,
+            child_on_edit=self._on_edit,
+            child_on_proc=self._on_proc,
+            write_lock=self._ensure_write_lock(),
             workspace=self._workspace,
-            hooks=hooks,
+            hooks=orch_hooks,
             language=self.language,
             lsp=self._lsp,
             files=self._files,
@@ -244,12 +319,32 @@ class EngineSession:
         )
         self._loop.hydrate(self._state.messages)
 
+    def _hooks_for(self, agent_id: str, *, stream_chat: bool) -> AgentHooks:
+        return AgentHooks(
+            on_tool=lambda call_id, name, arguments, result: self._on_tool(
+                call_id, name, arguments, result, agent_id=agent_id
+            ),
+            on_tool_start=lambda call_id, name, arguments: self._on_tool_start(
+                call_id, name, arguments, agent_id=agent_id
+            ),
+            on_delta=self._on_delta if stream_chat else None,
+            on_message_start=self._on_message_start if stream_chat else None,
+            on_usage=self._on_usage,
+            on_state=lambda state, turn, max_turns: self._on_state(
+                state, turn, max_turns, agent_id=agent_id
+            ),
+            on_compact=lambda info: self._on_compact(info, agent_id=agent_id),
+        )
+
     def _set_pending_prompt(self, prompt) -> None:
         self._state.pending_prompt = prompt
 
     def _on_prompt_state(self, state: str) -> None:
         self._state.pending_prompt = self._prompts.pending()
-        self._on_state(state, 0)
+        agent_id = ""
+        if self._state.pending_prompt is not None:
+            agent_id = self._state.pending_prompt.agent_id
+        self._on_state(state, 0, agent_id=agent_id)
 
     def _on_proc(self, proc, register: bool) -> None:
         if register:
@@ -257,8 +352,17 @@ class EngineSession:
         else:
             self._live_procs.discard(proc)
 
-    def _on_command_output(self, call_id: str, stream: str, text: str) -> None:
-        self._emit(CommandOutputChunk(call_id=call_id or "", stream=stream, text=text))
+    def _on_command_output(
+        self, call_id: str, stream: str, text: str, agent_id: str = ""
+    ) -> None:
+        self._emit(
+            CommandOutputChunk(
+                call_id=call_id or "",
+                stream=stream,
+                text=text,
+                agent_id=agent_id,
+            )
+        )
 
     def _start_lsp(self) -> None:
         self._stop_lsp()
@@ -301,7 +405,9 @@ class EngineSession:
         if tool in {"create_file", "undo_edit"}:
             self._emit_tree()
 
-    def _on_tool_start(self, call_id: str, name: str, arguments: dict) -> None:
+    def _on_tool_start(
+        self, call_id: str, name: str, arguments: dict, agent_id: str = ""
+    ) -> None:
         self._tool_started[call_id] = time.monotonic()
         self._last_call_id = call_id
         import json
@@ -311,12 +417,20 @@ class EngineSession:
                 call_id=call_id,
                 name=name,
                 arguments_json=json.dumps(arguments),
+                agent_id=agent_id,
             )
         )
+        self._touch_agent(agent_id, status="calling_tool", current_tool=name)
 
-    def _on_tool(self, name: str, arguments: dict, result: str) -> None:
+    def _on_tool(
+        self,
+        call_id: str,
+        name: str,
+        arguments: dict,
+        result: str,
+        agent_id: str = "",
+    ) -> None:
         preview = result if len(result) <= 400 else result[:400] + "…"
-        call_id = getattr(self, "_last_call_id", "")
         started = self._tool_started.pop(call_id, 0)
         duration = int((time.monotonic() - started) * 1000) if started else 0
         self._emit(
@@ -326,22 +440,25 @@ class EngineSession:
                 preview=preview,
                 ok=not str(result).startswith("error:"),
                 duration_ms=duration,
+                agent_id=agent_id,
             )
         )
         self._state.stats.tool_calls += 1
+        self._touch_agent(agent_id, current_tool="")
 
     def _on_message_start(self, message_id: str) -> None:
         self._stream_id = message_id
-        self._emit(
-            ChatMessageStarted(
-                id=message_id,
-                role="assistant",
-                ts=datetime.now(timezone.utc).isoformat(),
-            )
-        )
 
     def _on_delta(self, message_id: str, channel: str, text: str) -> None:
-        self._streamed_ids.add(message_id)
+        if channel == "text" and message_id not in self._streamed_ids:
+            self._emit(
+                ChatMessageStarted(
+                    id=message_id,
+                    role="assistant",
+                    ts=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+            self._streamed_ids.add(message_id)
         self._emit(ChatMessageDelta(id=message_id, channel=channel, text=text))
 
     def _on_usage(self, usage: Usage) -> None:
@@ -358,16 +475,24 @@ class EngineSession:
         stats.last_turn_cost += usage.cost
         self._emit_stats()
 
-    def _on_state(self, state: str, turn: int = 0, max_turns: int | None = None) -> None:
+    def _on_state(
+        self,
+        state: str,
+        turn: int = 0,
+        max_turns: int | None = None,
+        agent_id: str = "",
+    ) -> None:
         self._emit(
             AgentStateChanged(
                 state=state,
                 turn=turn,
                 max_turns=self._config.max_turns if max_turns is None else max_turns,
+                agent_id=agent_id,
             )
         )
+        self._touch_agent(agent_id, status=state)
 
-    def _on_compact(self, info: dict) -> None:
+    def _on_compact(self, info: dict, agent_id: str = "") -> None:
         self._emit(
             ContextCompacted(
                 strategy=str(info.get("strategy") or ""),
@@ -375,6 +500,7 @@ class EngineSession:
                 messages_after=int(info.get("messages_after") or 0),
                 chars_saved=int(info.get("chars_saved") or 0),
                 summary=str(info.get("summary") or "")[:400],
+                agent_id=agent_id,
             )
         )
         if info.get("strategy") == "overflow-retry":
@@ -382,7 +508,137 @@ class EngineSession:
                 WarningOccurred(
                     message=f"context budget reduced to {self._config.context_budget}"
                 )
+                )
+
+    def _make_child_lsp(self, workspace: Path):
+        if workspace.resolve() == self._workspace:
+            return self._lsp
+        if not self.language.supported:
+            return None
+        manager = LSPManager(workspace)
+        name = self.language.name
+
+        def warm() -> None:
+            with suppress(OSError, RuntimeError, ValueError, LSPTimeoutError):
+                manager.warm_start(name)
+
+        threading.Thread(
+            target=warm, daemon=True, name="lsp-worktree-warm"
+        ).start()
+        return manager
+
+    def _on_agent_started(
+        self,
+        agent_id: str,
+        profile: str,
+        parent_id: str,
+        task: str,
+        worktree: str = "",
+        branch: str = "",
+        batch_id: str = "",
+        batch_name: str = "",
+    ) -> None:
+        self._state.agents.append(
+            AgentRow(
+                id=agent_id,
+                role="subagent",
+                profile=profile,
+                status="thinking",
+                parent_id=parent_id,
+                worktree=worktree,
+                branch=branch,
+                task=task,
+                batch_id=batch_id,
+                batch_name=batch_name,
             )
+        )
+        self._emit(
+            AgentStarted(
+                agent_id=agent_id,
+                profile=profile,
+                parent_id=parent_id,
+                task=task,
+                worktree=worktree,
+                branch=branch,
+                batch_id=batch_id,
+                batch_name=batch_name,
+            )
+        )
+        self._emit_agents()
+
+    def _on_agent_result(self, agent_id: str, profile: str, result_text: str) -> None:
+        if self._state.ended or self._state.session_id is None:
+            return
+        report = f"[agent {profile} {agent_id[:8]} finished]\n{result_text}"
+        self._add_message(role="engine", text=report)
+        self._persist()
+        self._inbox.append(report)
+        self._maybe_pump()
+
+    def _on_worktree_settled(
+        self,
+        agent_id: str,
+        profile: str,
+        action: str,
+        detail: str,
+        branch: str,
+        pr_url: str = "",
+        ok: bool = True,
+    ) -> None:
+        if self._state.ended or self._state.session_id is None:
+            return
+        self._emit(
+            WorktreeSettled(
+                agent_id=agent_id,
+                profile=profile,
+                action=action,
+                detail=detail or "",
+                branch=branch,
+                pr_url=pr_url,
+                ok=ok,
+            )
+        )
+        report = f"[worktree {profile} {agent_id[:8]} {action}]\n{detail}"
+        self._add_message(role="engine", text=report)
+        self._persist()
+        self._inbox.append(report)
+        self._maybe_pump()
+
+    def _on_agent_finished(
+        self, agent_id: str, profile: str, status: str, summary: str
+    ) -> None:
+        self._state.agents = [row for row in self._state.agents if row.id != agent_id]
+        self._emit(
+            AgentFinished(
+                agent_id=agent_id,
+                profile=profile,
+                status=status,
+                summary=summary or "",
+            )
+        )
+        self._emit_agents()
+
+    def _touch_agent(
+        self,
+        agent_id: str,
+        *,
+        status: str | None = None,
+        current_tool: str | None = None,
+    ) -> None:
+        if not agent_id:
+            return
+        for row in self._state.agents:
+            if row.id != agent_id:
+                continue
+            if status is not None:
+                row.status = status
+            if current_tool is not None:
+                row.current_tool = current_tool
+            self._emit_agents()
+            return
+
+    def _emit_agents(self) -> None:
+        self._emit(AgentsUpdated(agents=[replace(row) for row in self._state.agents]))
 
     def _emit_stats(self) -> None:
         self._emit(StatsUpdated(stats=self._state.stats))
@@ -394,9 +650,10 @@ class EngineSession:
         if task is not None and not task.done():
             task.cancel()
 
-    def _emit_snapshot(self) -> None:
+    def _emit_snapshot(self, *, replay: bool = True) -> None:
         self._drop_missing_open_files()
-        self._cancel_history_replay()
+        if replay:
+            self._cancel_history_replay()
         snap = self.snapshot()
         history = list(snap.messages)
         tree = list(snap.file_tree)
@@ -405,6 +662,8 @@ class EngineSession:
         snap.file_tree_count = snap.file_tree_count or _count_tree(tree)
         snap.file_tree = []
         self._emit(SnapshotReady(snapshot=snap))
+        if not replay:
+            return
         self._emit_tree(tree)
         for path in list(self._state.open_files):
             self._emit_file_content(path)
@@ -498,6 +757,8 @@ class EngineSession:
     def _add_message(
         self, role: str, text: str, *, message_id: str | None = None
     ) -> None:
+        if role == "assistant" and not (text or "").strip():
+            return
         message = ChatMessage(
             id=message_id or uuid4().hex,
             role=role,

@@ -92,7 +92,7 @@ already knows how to route it to `rename_session` (via `HANDLERS`).
   - No custom types beyond dataclasses/primitives/lists — the codec has no
     hook for arbitrary encoders.
 - Zero-field commands are still dataclasses with `pass` (`ListSessions`,
-  `RequestSnapshot`, `Shutdown`) — keep that even if there's nothing to carry,
+  `RequestOrchContext`, `Shutdown`) — keep that even if there's nothing to carry,
   so the type still exists for lookup/round-trip/handler dispatch.
 - Naming: the class name **is** the wire `"type"` value and doubles as the
   registry key. Don't rename a shipped command lightly — it's part of the
@@ -227,7 +227,7 @@ See `tests/test_protocol.py` for round-trip tests and
 `tests/test_turn_control.py`/`tests/test_concurrency.py` for handler-level
 tests that drive a real `EngineSession` end to end. `dummy_client.py` is also a
 convenient manual smoke-test harness — it maps lowercase command names to
-classes via `COMMANDS` and can send any registered command from the CLI.
+classes via `COMMANDS` and can send any registered command from the TUI input.
 
 ## Checklist before adding a command
 

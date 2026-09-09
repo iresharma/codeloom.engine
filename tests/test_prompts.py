@@ -27,6 +27,45 @@ def test_ask_and_answer():
     asyncio.run(run())
 
 
+def test_prompt_lock_serializes_and_tags():
+    async def run():
+        events = []
+        broker = PromptBroker(events.append)
+        first = asyncio.create_task(
+            broker.ask("one?", kind="confirm", agent_id="aaa11111", profile="coder")
+        )
+        await asyncio.sleep(0)
+        second = asyncio.create_task(
+            broker.ask("two?", kind="confirm", agent_id="bbb22222", profile="tester")
+        )
+        await asyncio.sleep(0.05)
+        prompts = [item for item in events if isinstance(item, UserPromptRequested)]
+        assert len(prompts) == 1
+        assert prompts[0].agent_id == "aaa11111"
+        assert "coder" in prompts[0].question
+        assert broker.answer(prompts[0].prompt_id, "yes")
+        await first
+        await asyncio.sleep(0)
+        prompts = [item for item in events if isinstance(item, UserPromptRequested)]
+        assert len(prompts) == 2
+        assert prompts[1].agent_id == "bbb22222"
+        assert broker.answer(prompts[1].prompt_id, "no")
+        await second
+
+    asyncio.run(run())
+    async def run():
+        events = []
+        broker = PromptBroker(events.append)
+        task = asyncio.create_task(broker.ask("ok?"))
+        await asyncio.sleep(0)
+        assert isinstance(events[0], UserPromptRequested)
+        assert broker.answer(events[0].prompt_id, "yes")
+        assert await task == "yes"
+        assert broker.pending() is None
+
+    asyncio.run(run())
+
+
 def test_unknown_id():
     async def run():
         events = []

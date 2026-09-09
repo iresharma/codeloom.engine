@@ -20,6 +20,23 @@ class ToolRegistry:
             return
         self._tools[spec.name] = spec
 
+    def names(self) -> set[str]:
+        return set(self._tools)
+
+    def subset(self, names: list[str]) -> ToolRegistry:
+        out = ToolRegistry()
+        seen: set[str] = set()
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            spec = self._tools.get(name)
+            if spec is None:
+                out.errors.append(f"unknown tool: {name}")
+                continue
+            out._tools[name] = spec
+        return out
+
     def schemas(self) -> list[dict]:
         return [spec.schema() for spec in self._tools.values()]
 

@@ -8,9 +8,11 @@ def test_defaults(monkeypatch, tmp_path):
     for key in list(monkeypatch._setitem):
         pass
     monkeypatch.delenv("ENGINE_MAX_TURNS", raising=False)
+    monkeypatch.delenv("ENGINE_MAX_SPAWNS_PER_TURN", raising=False)
     monkeypatch.delenv("ENGINE_EXEC_APPROVAL", raising=False)
     config = EngineConfig.from_env(tmp_path)
     assert config.max_turns == 16
+    assert config.max_spawns_per_turn == 8
     assert config.exec_approval == "auto"
     assert config.subscriber_bytes == 1 << 20
     assert config.warnings == []

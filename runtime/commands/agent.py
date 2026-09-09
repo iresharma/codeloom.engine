@@ -10,7 +10,8 @@ def abort_agent(session, command: AbortAgent) -> None:
     if not session._require_session():
         return
     if command.agent_id:
-        session._emit(ErrorOccurred(message="subagents are not implemented"))
+        if not session.abort_child(command.agent_id):
+            session._emit(ErrorOccurred(message=f"unknown agent: {command.agent_id}"))
         return
     if not session.abort_turn():
         session._emit(ErrorOccurred(message="no agent turn in flight"))

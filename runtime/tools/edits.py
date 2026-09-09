@@ -28,8 +28,9 @@ from runtime.tools.fileid import (
     sha256_bytes,
     synthetic_source,
 )
-from runtime.tools.fs import WorkspacePathError, relative_posix
+from runtime.tools.fs import WorkspacePathError, relative_posix, resolve_in_workspace
 from runtime.tools.sitter import syntax_gate
+from runtime.tools.writeglob import write_allowed
 from tools.base import ToolContext
 
 DIFF_RESULT_MAX = 4000
@@ -643,7 +644,41 @@ def _lsp_after(ctx: ToolContext, result: ApplyResult, before: list) -> str:
     return _format_new_diags(result.rel, _new_diagnostics(before, after))
 
 
+def _profile_write_error(ctx: ToolContext, path: str) -> str | None:
+    globs = getattr(ctx, "write_globs", None)
+    if globs is None:
+        return None
+    try:
+        resolved = resolve_in_workspace(ctx.workspace, path)
+        rel = relative_posix(ctx.workspace, resolved)
+    except WorkspacePathError as exc:
+        msg = str(exc)
+        return msg if msg.startswith("error:") else f"error: {msg}"
+    if write_allowed(rel, globs):
+        return None
+    profile = getattr(ctx, "profile", "") or "agent"
+    return f"error: profile {profile} cannot write {rel}"
+
+
 async def apply_edit(
+    ctx: ToolContext,
+    path: str,
+    mutate: Callable[[FileSource], str],
+    tool_name: str,
+    *,
+    creating: bool = False,
+) -> str:
+    denied = _profile_write_error(ctx, path)
+    if denied:
+        return denied
+    lock = getattr(ctx, "write_lock", None)
+    if lock is None:
+        return await _apply_edit_body(ctx, path, mutate, tool_name, creating=creating)
+    async with lock:
+        return await _apply_edit_body(ctx, path, mutate, tool_name, creating=creating)
+
+
+async def _apply_edit_body(
     ctx: ToolContext,
     path: str,
     mutate: Callable[[FileSource], str],
@@ -728,6 +763,22 @@ def _rollback_committed(ctx: ToolContext, committed: list[ApplyResult]) -> None:
 
 
 async def apply_workspace_edit(
+    ctx: ToolContext,
+    edits_by_path: list[tuple[str, list[TextEdit]]],
+    tool_name: str,
+) -> str:
+    for path, _edits in edits_by_path:
+        denied = _profile_write_error(ctx, path)
+        if denied:
+            return denied
+    lock = getattr(ctx, "write_lock", None)
+    if lock is None:
+        return await _apply_workspace_edit_body(ctx, edits_by_path, tool_name)
+    async with lock:
+        return await _apply_workspace_edit_body(ctx, edits_by_path, tool_name)
+
+
+async def _apply_workspace_edit_body(
     ctx: ToolContext,
     edits_by_path: list[tuple[str, list[TextEdit]]],
     tool_name: str,

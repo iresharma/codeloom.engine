@@ -5,8 +5,9 @@ A headless backend for an AI coding agent.
 Engine runs as a long-lived process bound to one workspace. It exposes a
 newline-delimited JSON protocol over a Unix domain socket, so any client — a
 TUI, a web app, an editor plugin, a test harness — can drive an LLM coding
-agent without importing a single line of agent internals. The agent gets 24
-tools for reading, searching, understanding, and editing code, backed by
+agent without importing a single line of agent internals. The orchestrator
+spawns named personalities (ask, coder, tester, …) that share tools for
+reading, searching, understanding, and editing code, backed by
 tree-sitter for instant syntax queries and the Language Server Protocol for
 real type information.
 
@@ -137,19 +138,19 @@ platform: macOS-14.5-arm64
 listening on /path/to/your/project/.engine/engine.sock
 ```
 
-In a second terminal, attach the reference client:
+In a second terminal, attach the reference client. It opens a three-panel
+TUI and starts a session on connect:
 
 ```bash
 python dummy_client.py /path/to/your/project
 ```
 
-Then drive it:
+Type in the input bar at the bottom:
 
 ```
-engine> start
-engine> openfile src/main.py
-engine> where is the retry logic in this codebase?
-engine> undo
+openfile src/main.py
+where is the retry logic in this codebase?
+undo
 ```
 
 `SIGINT` or `SIGTERM` closes the active session cleanly, shuts down any
@@ -177,12 +178,12 @@ language servers, and unlinks the socket.
               └──────────┬──────────┘               │
                          │                          │
               ┌──────────▼──────────┐               │
-              │  AgentLoop (agents) │───────────────┘
-              │  ≤8 tool turns      │
+              │ Orchestrator        │───────────────┘
+              │  spawns personalities│
               └────┬───────────┬────┘
                    │           │
       ┌────────────▼──┐   ┌────▼─────────────────────────────┐
-      │ OpenRouterLLM │   │ ToolRegistry  (tools/)  24 tools │
+      │ OpenRouterLLM │   │ ToolRegistry  (tools/)           │
       └───────────────┘   └────┬─────────────────────────────┘
                                │ every write goes through one funnel
                           ┌────▼──────────────────────────────┐
@@ -241,13 +242,14 @@ reports as an `ErrorOccurred` without dropping the connection.
 |---|---|---|
 | `StartSession` | `workspace`, `session_id?` | Starts a new session or resumes a stored one. Binds the agent loop, starts language servers, emits a snapshot. |
 | `ListSessions` | — | Returns stored sessions, most recently saved first. |
-| `SubmitUserMessage` | `text` | Runs the agent loop against the message. |
-| `RequestSnapshot` | — | Re-emits full session state. |
+| `SubmitUserMessage` | `text` | Runs an orchestrator turn. If the orch is already answering, the message is queued and played when that reply finishes. Children already running are not blocked. |
+| `RequestSnapshot` | `replay?` | Re-emits session state. Default `replay=true` also streams history, open files, and the file tree. `replay=false` is the base `SnapshotReady` only (no messages). |
+| `RequestOrchContext` | — | Returns the orch's current model context (system + notes + history). |
 | `OpenFile` | `path` | Adds a file to the open set and returns its contents. |
 | `CloseFile` | `path` | Removes a file from the open set. |
 | `RequestGit` | — | Returns current git state including diffs. |
 | `UndoLastEdit` | — | Reverts the most recent agent edit batch. |
-| `AbortAgent` | `agent_id?` | Cancels the in-flight agent turn. `agent_id` is reserved for future subagents. |
+| `AbortAgent` | `agent_id?` | With no id, cancels the in-flight orchestrator reply only (children keep working). With `agent_id`, cancels that subagent. |
 | `AnswerPrompt` | `prompt_id`, `text` | Resolves a `UserPromptRequested` (command approval, etc.). |
 | `Shutdown` | — | Ends the session, persists it, stops language servers. |
 
@@ -259,7 +261,7 @@ booted with — one process serves exactly one workspace.
 | Event | Fields | Meaning |
 |---|---|---|
 | `SnapshotReady` | `snapshot` | Full session state, with chat history stripped and streamed separately. |
-| `ChatMessageAdded` | `id`, `role`, `text`, `ts` | A new message. `role` is `user`, `assistant`, or `tool`. |
+| `ChatMessageAdded` | `id`, `role`, `text`, `ts` | A new message. `role` is `user`, `assistant`, `engine` (child report), or `tool`. |
 | `ChatHistoryAdded` | `id`, `role`, `text`, `ts`, `index`, `total` | One replayed historical message, so clients can show progress. |
 | `ChatHistoryComplete` | `count` | Replay finished. |
 | `SessionList` | `sessions` | Result of `ListSessions`. |
@@ -272,9 +274,14 @@ booted with — one process serves exactly one workspace.
 | `ChatMessageDelta` | `id`, `channel`, `text` | Incremental text or reasoning. The following `ChatMessageAdded` is canonical. |
 | `ToolCallStarted` / `ToolCallFinished` | `call_id`, `name`, … | A tool began or finished. Replaces `role=tool` chat lines. |
 | `CommandOutputChunk` | `call_id`, `stream`, `text` | Live stdout/stderr from `run_command`. |
-| `AgentStateChanged` | `state`, `turn`, `max_turns` | idle / thinking / calling_tool / waiting_for_user / aborting / compacting. |
+| `AgentStateChanged` | `state`, `turn`, `max_turns`, `agent_id?` | idle / thinking / calling_tool / waiting_for_user / aborting / compacting. Empty `agent_id` is the orchestrator. `waiting_for_user` means **this** agent's prompt is on screen; another child queued on PromptBroker still shows `calling_tool`. |
+| `AgentStarted` | `agent_id`, `profile`, `parent_id`, `task`, `worktree?`, `branch?`, `batch_id?`, `batch_name?` | A subagent began. Writers include the git worktree path and branch. Children spawned in the same orch reply share `batch_id` and a nickname from the user message. |
+| `AgentFinished` | `agent_id`, `profile`, `status`, `summary` | A subagent returned a compacted result. |
+| `AgentsUpdated` | `agents` | Full live agent list (`AgentRow`: id, profile, status, task, current_tool, batch_id, batch_name, worktree, branch). Emit after start, finish, or status/tool change. |
+| `OrchContext` | `text` | The orch's current model context, for the client's debug popup. |
+| `WorktreeSettled` | `agent_id`, `profile`, `action`, `detail`, `branch`, `pr_url?`, `ok` | The user chose merge / pr / keep / discard for a finished writer worktree. |
 | `StatsUpdated` | `stats` | Tokens, cost, elapsed time. |
-| `UserPromptRequested` | `prompt_id`, `question`, `kind`, `choices` | The agent is waiting on the user. |
+| `UserPromptRequested` | `prompt_id`, `question`, `kind`, `choices`, `agent_id?` | The engine is waiting on the user (command approval, etc.). |
 | `ContextCompacted` | `strategy`, counts, `summary` | History was trimmed or summarized. |
 | `ErrorOccurred` | `message` | Recoverable error. Never terminates the connection. |
 | `WarningOccurred` | `message` | Advisory, e.g. an unsupported project language. |
@@ -288,7 +295,8 @@ at 80,000 characters before it reaches the model.
 
 `EngineSnapshot` is the reconnect payload: `session_id`, `workspace`,
 `messages`, `ended`, `open_files`, `file_tree`, `git`, `language`,
-`language_supported`, `message_count`.
+`language_supported`, `message_count`, `agents` (live subagents with task,
+status, `current_tool`, and `batch_id`).
 
 Emitting it is a small dance designed to keep a large history from blocking the
 event loop:
@@ -301,6 +309,10 @@ event loop:
 5. History replays as individual `ChatHistoryAdded` events from a background
    task that yields between messages, ending with `ChatHistoryComplete`.
 
+`RequestSnapshot(replay=false)` stops after step 3: just the base
+`SnapshotReady` (counts, git, agents, stats). No file contents, no history
+replay. The TUI snapshot button uses that and shows the summary in a popup.
+
 The generation counter matters: if a client requests a second snapshot while
 the first replay is still streaming, the stale task notices the bumped
 generation and stops rather than interleaving two histories.
@@ -309,25 +321,21 @@ generation and stops rather than interleaving two histories.
 
 ## The agent loop
 
-`AgentLoop` (`agents/agent_loop.py`) is a straightforward OpenAI-style
-tool-calling loop, capped at `EngineConfig.max_turns` (default 16). Each turn
-either produces tool calls — which are executed and appended as `tool`
-messages — or a final text answer. Exhausting the cap returns
-`stopped after N tool turns`. A turn runs as an asyncio task so `AbortAgent`
-can be read from the same client. One turn at a time; a second
-`SubmitUserMessage` is refused until the current turn finishes or is aborted.
+The user talks only to the **orchestrator** (`agents/orchestrator.py`), which is an `AgentLoop` with no filesystem tools — only one tool per subagent personality (`ask`, `coder`, `tester`, `researcher`, `debugger`, `reviewer`) plus `write_context`. Personalities are discovered from `agents/profiles/` the same way tools are discovered from `tools/`.
 
-If any turn raises, the loop truncates history back to a marker taken before
-the user message was appended. A failed exchange leaves no partial state
-behind, so the next message starts from a coherent history.
+A spawn is fire-and-forget. The personality tool returns immediately with `agent_id` (and `worktree` / `branch` for writers). The child runs in the background with a fresh history and an allowlisted tool set. When it finishes, `compress_for_parent` turns its transcript into an `AgentResult` (`status`, `summary`, `outcome`, `files_touched`, `leftover_questions`, `missing_checks`). That string is posted to the orch as an `engine` chat line and, if the orch is idle, starts a follow-up orch turn so it can brief the user or spawn the next step. Child tokens never become assistant `ChatMessageAdded`.
 
-Resuming a session calls `hydrate()`, which replays stored `user` and
-`assistant` messages into the loop's history. Tool messages are not rehydrated:
-their results are stale by the time a session resumes, and replaying them would
-mislead the model about current file contents.
+`AgentLoop` is still an OpenAI-style tool-calling loop, capped at `EngineConfig.max_turns` (default 16). The orch may emit several personality calls in one model turn; those children run concurrently. A child's own tools stay sequential so read-before-write cannot race. `EngineConfig.max_spawns_per_turn` (default 8) caps how many children may be live at once.
 
-The system prompt encodes a deliberate cost hierarchy — cheap, instant tools
-first, expensive ones only when needed:
+`coder` and `tester` run in a git worktree (`workspace/.engine/worktrees/<agent_id>` on branch `engine/<profile>/<agent_id>`) so two writers — or a writer and your dirty checkout — do not collide. `reviewer` joins that worktree so `git_diff` sees the writer's changes. The engine prompts to **merge**, **open a PR**, **keep**, or **discard** after the writer and any reviewer on that tree have finished. Uncommitted worktree edits are committed first. A `WorktreeSettled` event and an `engine` chat line report what happened. Empty worktrees are removed without asking. `ask`, `researcher`, and `debugger` use the main workspace. If the workspace is not a git repo, spawn still starts on the main tree.
+
+You can keep talking to the orch while children run: a second `SubmitUserMessage` is queued if the orch is mid-reply, then played when that reply finishes. `AbortAgent` with no id cancels only the orch's current reply; with `agent_id` it cancels that child. Session shutdown still aborts every child and removes live worktrees.
+
+If any orch turn raises, the loop truncates history back to a marker taken before the user message was appended. A child crash becomes `status=failed` on the follow-up report and does not truncate orch history.
+
+Resuming a session hydrates **orch** chat only. Tool messages and subagent transcripts are not rehydrated.
+
+The **coder** system prompt still encodes the cheaper-first cost hierarchy:
 
 1. `search` or `list_files` to locate a file.
 2. `list_symbols` to see what is in it.
@@ -363,7 +371,7 @@ can edit a tool and pick it up by restarting the session — no server restart.
 
 ### The full tool catalogue
 
-24 tools in seven families.
+32 tools across navigation, tree-sitter, LSP, editing, execution, git, web, and browser.
 
 **Navigation** — no language server needed.
 
@@ -423,6 +431,29 @@ can edit a tool and pick it up by restarting the session — no server restart.
 |---|---|
 | `undo_edit` | Revert the last edit batch, including multi-file renames. |
 | `list_edits` | Recent edits in this session with their diffs. Default 20. |
+
+**Git (LLM-facing).** The TUI git panel still uses `RequestGit`; these are for agents.
+
+| Tool | Purpose |
+|---|---|
+| `git_status` | Branch, dirty flag, staged/unstaged/untracked paths. |
+| `git_diff` | Worktree or staged (cached) diff. |
+
+**Web.** Used by the `researcher` personality.
+
+| Tool | Purpose |
+|---|---|
+| `web_fetch` | HTTP GET, HTML stripped, 50k cap. http/https only. |
+| `web_search` | Brave Search if `BRAVE_API_KEY` is set; otherwise an error. |
+
+**Browser.** Used by the `debugger` personality. Requires Playwright; otherwise the tools return `error: browser tools unavailable`.
+
+| Tool | Purpose |
+|---|---|
+| `browser_open` | Headless Chromium, resets console/network logs. |
+| `browser_console` | Console messages since last open. |
+| `browser_screenshot` | PNG under `.engine/debug/`. |
+| `browser_network` | Failed and 4xx/5xx requests since last open. |
 
 ### Writing a new tool
 
@@ -660,6 +691,7 @@ close, and on shutdown.
 | `ENGINE_LLM_TIMEOUT_S` | `600` | LLM request timeout. |
 | `ENGINE_LLM_IDLE_S` | `90` | Stream idle timeout. |
 | `ENGINE_MAX_TURNS` | `16` | Tool-calling turns per user message. |
+| `ENGINE_MAX_SPAWNS_PER_TURN` | `8` | Live concurrent subagents (not reset each orch reply). |
 | `ENGINE_EXEC_APPROVAL` | `auto` | `auto`, `always`, or `never`. |
 | `ENGINE_EXEC_TIMEOUT_S` | `120` | Default `run_command` timeout. |
 | `ENGINE_EXEC_FILE_LIMIT_MB` | `2048` | `ulimit -f` cap (POSIX 512-byte blocks). |
@@ -680,40 +712,77 @@ guard refuses to let the agent write to it.
 
 ## The reference client
 
-`dummy_client.py` is a small asyncio REPL that connects to the socket, sends
-one command per line, and pretty-prints the event stream from a concurrent
-reader task. It is the executable specification of the protocol — worth reading
+`dummy_client.py` launches a small Textual TUI (`client_tui.py`) that connects
+to the socket, starts a session, and splits the event stream into three
+panels. It is the executable specification of the protocol — worth reading
 before writing your own client.
+
+```
++---------------------------+----------------------+
+|                           | Agents · N           |
+|                           | nickname / profile   |
+|  Agent chat               +----------------------+
+|                           | Protocol             |
+|                           | commands + events    |
+|                           +----------------------+
+|                           | Tools                |
+|                           | name / args / result |
++---------------------------+----------------------+
+| > type a message or /command   [snapshot] [context]
++--------------------------------------------------+
+```
+
+- **Chat** — user, assistant, and `engine` (child reports) messages, streamed
+  deltas, history replay, and outstanding prompts.
+- **Agents** — live subagents grouped by batch nickname (`batch_name`) plus a
+  short `batch_id`: count, profile, task, status, current tool, worktree. Fed
+  by `AgentsUpdated` and `SnapshotReady`.
+- **Protocol** — every command this client sends, plus inbound events that are
+  not chat, tools, the agents panel, or an inspect popup (files, git, stats,
+  errors, `AgentStarted` / `AgentFinished`).
+- **Tools** — live tool cards with arguments, shell chunks, status, duration,
+  and the 400-char result preview. Cards tagged with `agent_id` when a child
+  is calling the tool.
+- **Snapshot** — **snapshot** button / F5 / `snapshot` opens a popup of the
+  base `SnapshotReady` (session, language, git, stats, agents, message count).
+  It does not replay chat history.
+- **Context** — **context** button / F6 / `context` command opens a popup of
+  the orch's current model context (`OrchContext`: system prompt, workspace
+  notes, history).
 
 ```bash
 python dummy_client.py [workspace]
 ```
 
-At the `engine> ` prompt:
+The input bar uses the same grammar as the old REPL:
 
 | Input | Sends |
 |---|---|
 | `help` | Command list, generated from the `COMMANDS` registry |
 | `start [session_id]` | `StartSession` — omit the id for a fresh session |
 | `listsessions` | `ListSessions` |
-| `requestsnapshot` | `RequestSnapshot` |
+| `requestsnapshot` / `snapshot` / `snap` | `RequestSnapshot(replay=false)` — **snapshot** button / F5 opens a popup of the base state (no history replay) |
+| `context` / `orchcontext` | `RequestOrchContext` — also the **context** button and F6 |
 | `openfile <path>` | `OpenFile` |
 | `closefile <path>` | `CloseFile` |
 | `requestgit` | `RequestGit` |
 | `undo` | `UndoLastEdit` |
+| `abort` | `AbortAgent` — orch reply only; children keep running |
+| `abort <agent_id>` | `AbortAgent` for one subagent |
 | `shutdown` | `Shutdown` |
 | `exit` / `quit` | Disconnects the client; the server keeps running |
 | *anything else* | `SubmitUserMessage` with the whole line as text |
 
 A leading `/` is optional and command names are case-insensitive, so `/start`,
 `start`, and `Start` are equivalent. Because unrecognized input becomes a chat
-message, you can just type `where is the retry logic?` and hit enter. Ctrl-D
-exits.
+message, you can just type `where is the retry logic?` and hit enter. The
+client sends `StartSession` on connect. Ctrl-C or `exit` disconnects.
 
 The client formats each event type for readability: snapshots collapse to a
-summary line, file contents show the first 24 lines, and diffs show the first
-80. Unknown event types fall back to pretty-printed JSON, so a client built
-against an older protocol version still shows you something useful.
+summary (including live `agents`), `AgentsUpdated` reprints the running set
+grouped by batch, file contents show the first 24 lines, and diffs show the
+first 80. Unknown event types fall back to pretty-printed JSON, so a client
+built against an older protocol version still shows you something useful.
 
 Writing your own client is three steps: open a Unix socket connection to
 `{workspace}/.engine/engine.sock` with an 8 MiB stream limit, write
@@ -752,7 +821,7 @@ prompts, compaction):
 | `test_config.py` | `EngineConfig.from_env`, `env.sh` ordering, malformed knobs |
 | `test_llm_stream.py` | Streaming chunk assembly, idle timeout, usage extraction |
 | `test_subscriber.py` | Bounded queues, delta-drop policy, size-field coverage |
-| `test_turn_control.py` | Turn-as-task, busy refusal, abort mid-complete and between tools |
+| `test_turn_control.py` | Turn-as-task, queued submits, abort mid-complete and between tools |
 | `test_stats.py` | Usage accumulation and stats persistence |
 | `test_shell.py` | `run_command` executor: denials, approval, output caps |
 | `test_prompts.py` | `PromptBroker` ask/answer/cancel and confirm timeout |
@@ -777,7 +846,8 @@ is committed.
 
 ```
 app.py                  entry point: parse args, boot session + server, install signal handlers
-dummy_client.py         reference REPL client
+dummy_client.py         reference TUI client (command parser + entry)
+client_tui.py           Textual 3-panel UI: chat, protocol, tools
 env.sh                  API key and model (gitignored)
 requirements.txt        runtime and test dependencies
 pytest.ini              pythonpath, testpaths, the lsp marker
@@ -815,18 +885,26 @@ runtime/
     search.py             ripgrep wrapper
     git.py                git state and tracked paths
     shell.py              asyncio subprocess executor for run_command
+    web.py                HTTP fetch and Brave search
+    browser.py            Playwright headless browser (optional)
+    writeglob.py          profile write-path globs
 
 tools/                  LLM-facing tool definitions — thin wrappers over runtime/tools
   base.py               @tool decorator, ToolContext, schema inference
-  registry.py           ToolRegistry, discover_tools, 80k result cap
+  registry.py           ToolRegistry, discover_tools, subset, 80k result cap
   read_file.py list_files.py search.py sitter.py lsp.py
   edit_file.py edit_symbol.py apply_patch.py undo.py
   shell.py              run_command
+  git.py web.py browser.py
 
 agents/
-  agent_loop.py         AgentLoop, DEFAULT_SYSTEM, max_turns from EngineConfig
+  agent_loop.py         shared tool-calling loop
+  orchestrator.py       user-facing coordinator, spawn tools
+  subagent.py           personality instance
+  profile.py            AgentProfile, ProfileRegistry, discover_profiles
+  profiles/             ask, coder, tester, reviewer, researcher, debugger
   hooks.py              AgentHooks callbacks
-  compactor.py          tool-result trim, summarization, overflow detection
+  compactor.py          mid-loop compact + compress_for_parent + context.md
 
 llm/
   provider.py           LLMProvider Protocol, Usage, LLMResult, ToolCall
@@ -849,6 +927,7 @@ describe those implementations to a model. The suite exercises
 |---|---|---|
 | NDJSON line | 8 MiB | `protocol/codec.py` |
 | Agent tool turns | 16 | `EngineConfig.max_turns` |
+| Live subagents | 8 | `EngineConfig.max_spawns_per_turn` |
 | Subscriber buffer | 4096 items / 1 MiB | `runtime/subscriber.py` |
 | Per-event soft limit | 512 KiB | `EVENT_SOFT_LIMIT` |
 | NDJSON fuse | 8 MiB | `STREAM_LIMIT` — last resort, not a design target |
@@ -877,6 +956,10 @@ Ignored everywhere: `.git`, `.engine`, `.cursor`, `__pycache__`,
 
 **A new tool.** Drop a module in `tools/`, decorate with `@tool`, restart the
 session. See [Writing a new tool](#writing-a-new-tool).
+
+**A new subagent personality.** Drop a module in `agents/profiles/` that
+exports `PROFILE = AgentProfile(...)`. The orch sees it as a tool. See
+[docs/adding-a-profile.md](docs/adding-a-profile.md).
 
 **A new command.** Add a `@command` dataclass to `protocol/commands.py`, write
 a `@handles(YourCommand)` function in `runtime/commands/`, and import it from

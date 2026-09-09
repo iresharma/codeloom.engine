@@ -7,7 +7,12 @@ from typing import Any
 
 from protocol.events import (
     EVENTS,
+    AgentFinished,
+    AgentStarted,
     AgentStateChanged,
+    AgentsUpdated,
+    OrchContext,
+    WorktreeSettled,
     ChatHistoryAdded,
     ChatMessageAdded,
     ChatMessageDelta,
@@ -46,6 +51,11 @@ SIZE_FIELDS: dict[type, tuple[str, ...]] = {
     WarningOccurred: ("message",),
     ToolCallStarted: ("arguments_json",),
     ToolCallFinished: ("preview",),
+    AgentStarted: ("task",),
+    AgentFinished: ("summary",),
+    AgentsUpdated: (),
+    OrchContext: ("text",),
+    WorktreeSettled: ("detail",),
 }
 
 SMALL_STRING_FIELDS = frozenset(
@@ -69,6 +79,17 @@ SMALL_STRING_FIELDS = frozenset(
         "reason",
         "session_id",
         "workspace",
+        "agent_id",
+        "profile",
+        "parent_id",
+        "status",
+        "current_tool",
+        "worktree",
+        "branch",
+        "batch_id",
+        "batch_name",
+        "action",
+        "pr_url",
     }
 )
 
@@ -196,6 +217,8 @@ def approx_size(event: Event) -> int:
     cls = type(event)
     if cls is FileTreeUpdated:
         return _tree_size(getattr(event, "file_tree", None) or [])
+    if cls is AgentsUpdated:
+        return _agents_size(getattr(event, "agents", None) or [])
     if cls is GitStateUpdated:
         git = getattr(event, "git", None)
         if git is None:
@@ -221,6 +244,18 @@ def _tree_size(nodes) -> int:
         if children:
             total += _tree_size(children)
     return total or FLAT_SIZE
+
+
+def _agents_size(rows) -> int:
+    total = FLAT_SIZE
+    for row in rows:
+        total += len(getattr(row, "task", "") or "")
+        total += len(getattr(row, "profile", "") or "")
+        total += len(getattr(row, "current_tool", "") or "")
+        total += len(getattr(row, "worktree", "") or "")
+        total += len(getattr(row, "branch", "") or "")
+        total += len(getattr(row, "batch_name", "") or "")
+    return total
 
 
 def unbounded_str_fields(cls: type) -> list[str]:
@@ -250,6 +285,8 @@ def missing_size_fields() -> list[str]:
         if cls is GitStateUpdated:
             continue
         if cls is FileTreeUpdated:
+            continue
+        if cls is AgentsUpdated:
             continue
     return missing
 
