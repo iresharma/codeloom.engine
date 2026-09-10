@@ -185,7 +185,7 @@ class _HangEachChild(FakeProvider):
         super().__init__()
         self.hangs: list[asyncio.Event] = []
 
-    async def complete(self, messages, tools=None, *, on_delta=None):
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
         if _is_orch(tools):
             return LLMResult(text="ok")
         hang = asyncio.Event()

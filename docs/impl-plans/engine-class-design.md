@@ -53,7 +53,7 @@ flowchart LR
   Subs --> Tools
 ```
 
-[`app.py`](app.py) only boots a server for a workspace path. Clients never import `Orchestrator` or tools directly.
+[`app.py`](../../app.py) only boots a server for a workspace path. Clients never import `Orchestrator` or tools directly.
 
 ---
 
@@ -103,7 +103,7 @@ llm/
 
 ### Commands (client → engine)
 
-Defined in [`protocol/commands.py`](protocol/commands.py). Each command is a dataclass with `to_json()` / `from_json()`.
+Defined in [`protocol/commands.py`](../../protocol/commands.py). Each command is a dataclass with `to_json()` / `from_json()`.
 
 | Command | Purpose |
 |---|---|
@@ -119,7 +119,7 @@ The TUI does **not** implement folder-tree walking, git status, or agent polling
 
 ### Events (engine → clients)
 
-Defined in [`protocol/events.py`](protocol/events.py). These map 1:1 onto the TUI panels you listed.
+Defined in [`protocol/events.py`](../../protocol/events.py). These map 1:1 onto the TUI panels you listed.
 
 | Event | TUI panel |
 |---|---|
@@ -137,7 +137,7 @@ Defined in [`protocol/events.py`](protocol/events.py). These map 1:1 onto the TU
 
 ### Snapshot
 
-[`protocol/snapshot.py`](protocol/snapshot.py) — `EngineSnapshot` is the reconnect payload:
+[`protocol/snapshot.py`](../../protocol/snapshot.py) — `EngineSnapshot` is the reconnect payload:
 
 - `messages`, `open_files`, `file_tree`
 - `agents` (id, role, profile, status, current_tool, parent_id)
@@ -151,7 +151,7 @@ Defined in [`protocol/events.py`](protocol/events.py). These map 1:1 onto the TU
 
 ## Runtime classes
 
-### `EngineSession` — [`runtime/session.py`](runtime/session.py)
+### `EngineSession` — [`runtime/session.py`](../../runtime/session.py)
 
 The only object the server talks to.
 
@@ -174,7 +174,7 @@ class EngineSession:
 
 After mutating tools, session refreshes git + stats and emits `GitStateUpdated` / `StatsUpdated`.
 
-### `EngineServer` — [`runtime/server.py`](runtime/server.py)
+### `EngineServer` — [`runtime/server.py`](../../runtime/server.py)
 
 ```python
 class EngineServer:
@@ -185,7 +185,7 @@ class EngineServer:
 
 One session per workspace process. Multiple clients can subscribe to the same event fan-out.
 
-### `SessionState` — [`runtime/state.py`](runtime/state.py)
+### `SessionState` — [`runtime/state.py`](../../runtime/state.py)
 
 Mutable source of truth behind `snapshot()`. Agents, messages, open files, git cache, pending prompt, token counters. Session writes here; protocol only reads copies.
 
@@ -213,7 +213,7 @@ flowchart TD
   Profiles -->|"system prompt plus tool allowlist"| Sub
 ```
 
-### Subagent profiles — [`agents/profile.py`](agents/profile.py) + [`agents/profiles/`](agents/profiles/)
+### Subagent profiles — [`agents/profile.py`](../../agents/profile.py) + [`agents/profiles/`](../../agents/profiles/)
 
 Profiles are **only for subagents**. They are named personalities the orchestrator picks when spawning work (ask, linter, editor, reviewer, …). The orchestrator is not a profile; it has its own fixed tool set (including admin). `Subagent` stays one class — the profile is what changes prompt, tools, and limits.
 
@@ -247,7 +247,7 @@ Built-in profiles (each module in `agents/profiles/` exports one `AgentProfile`)
 
 `AgentStarted` / snapshot agent rows include `profile` so the TUI agent list can show `linter`, `editor`, etc.
 
-### `AgentLoop` — [`agents/agent_loop.py`](agents/agent_loop.py)
+### `AgentLoop` — [`agents/agent_loop.py`](../../agents/agent_loop.py)
 
 Base class. Both orch and subagent use the same turn cycle.
 
@@ -267,7 +267,7 @@ class AgentLoop:
 
 `AgentResult`: `{status, final_text, files_touched, tool_trace}`.
 
-### `Orchestrator` — [`agents/orchestrator.py`](agents/orchestrator.py)
+### `Orchestrator` — [`agents/orchestrator.py`](../../agents/orchestrator.py)
 
 Extends `AgentLoop`. **Only agent that can wait on a human.**
 
@@ -286,7 +286,7 @@ class Orchestrator(AgentLoop):
 - `on_subagent_done`: compress transcript, append a short result into orch messages, `write_context()`, emit `AgentFinished`.
 - `write_context`: append to `{workspace}/.engine/context.md` so orch keeps a long memory that survives compression. That file is also injected into orch’s `_build_messages()`.
 
-### `Subagent` — [`agents/subagent.py`](agents/subagent.py)
+### `Subagent` — [`agents/subagent.py`](../../agents/subagent.py)
 
 Same loop, **no user-input channel**. The “user prompt” is the task string from orch, not a human.
 
@@ -301,7 +301,7 @@ class Subagent(AgentLoop):
 
 When `run()` ends, result goes only to `Orchestrator.on_subagent_done`. No events that ask the TUI for a reply.
 
-### `ConversationCompressor` — [`agents/compressor.py`](agents/compressor.py)
+### `ConversationCompressor` — [`agents/compressor.py`](../../agents/compressor.py)
 
 Used when a subagent returns, and later if orch’s own history grows too large.
 
@@ -318,7 +318,7 @@ class ConversationCompressor:
 
 ### `BaseTool` + `ToolRegistry`
 
-[`tools/base.py`](tools/base.py), [`tools/registry.py`](tools/registry.py)
+[`tools/base.py`](../../tools/base.py), [`tools/registry.py`](../../tools/registry.py)
 
 ```python
 class BaseTool:
@@ -382,7 +382,7 @@ Used by `ask`, `linter`, `editor`, `reviewer` for structure-aware reads without 
 
 ## LLM boundary
 
-[`llm/provider.py`](llm/provider.py) — keep the loop independent of one vendor.
+[`llm/provider.py`](../../llm/provider.py) — keep the loop independent of one vendor.
 
 ```python
 class LLMProvider(Protocol):

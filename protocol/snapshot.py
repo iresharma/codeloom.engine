@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -136,6 +136,44 @@ class GitState:
         )
 
 
+AGENT_RUNS_CAP = 20
+
+
+@dataclass
+class AgentRun:
+    agent_id: str
+    profile: str
+    cost: float = 0.0
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+    total_tokens: int = 0
+    requests: int = 0
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "profile": self.profile,
+            "cost": self.cost,
+            "prompt_tokens": self.prompt_tokens,
+            "cached_tokens": self.cached_tokens,
+            "total_tokens": self.total_tokens,
+            "requests": self.requests,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any] | None) -> AgentRun:
+        data = data or {}
+        return cls(
+            agent_id=str(data.get("agent_id") or ""),
+            profile=str(data.get("profile") or ""),
+            cost=float(data.get("cost") or 0),
+            prompt_tokens=int(data.get("prompt_tokens") or 0),
+            cached_tokens=int(data.get("cached_tokens") or 0),
+            total_tokens=int(data.get("total_tokens") or 0),
+            requests=int(data.get("requests") or 0),
+        )
+
+
 @dataclass
 class Stats:
     prompt_tokens: int = 0
@@ -150,6 +188,7 @@ class Stats:
     elapsed_s: float = 0.0
     last_turn_tokens: int = 0
     last_turn_cost: float = 0.0
+    agent_runs: list[AgentRun] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -165,6 +204,7 @@ class Stats:
             "elapsed_s": self.elapsed_s,
             "last_turn_tokens": self.last_turn_tokens,
             "last_turn_cost": self.last_turn_cost,
+            "agent_runs": [row.to_json() for row in self.agent_runs],
         }
 
     @classmethod
@@ -184,6 +224,10 @@ class Stats:
             elapsed_s=float(data.get("elapsed_s") or 0),
             last_turn_tokens=int(data.get("last_turn_tokens") or 0),
             last_turn_cost=float(data.get("last_turn_cost") or 0),
+            agent_runs=[
+                item if isinstance(item, AgentRun) else AgentRun.from_json(item)
+                for item in data.get("agent_runs") or []
+            ],
         )
 
 

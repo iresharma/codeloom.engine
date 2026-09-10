@@ -221,6 +221,11 @@ class AgentFinished(ProtocolMessage):
     profile: str
     status: str
     summary: str
+    cost: float = 0.0
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+    total_tokens: int = 0
+    requests: int = 0
 
 
 @event

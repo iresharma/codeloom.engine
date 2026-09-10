@@ -227,7 +227,10 @@ def github_search_code(
 
 
 @tool(
-    description="Fetch a file from a GitHub repo (raw). Cap 50k chars.",
+    description=(
+        "Fetch a file from a GitHub repo (raw). Default window 12k chars; "
+        "hard cap 50k. Use offset to page."
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -240,12 +243,29 @@ def github_search_code(
                 "type": "string",
                 "description": "Branch, tag, or SHA. Empty is the default branch.",
             },
+            "offset": {
+                "type": "integer",
+                "description": "0-based char offset (default 0).",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max chars to return (default 12000, max 50000).",
+            },
         },
         "required": ["path"],
     },
 )
-def github_file(ctx: ToolContext, path: str, repo: str = "", ref: str = "") -> str:
-    return impl.github_file(ctx.workspace, repo, path, ref=ref)
+def github_file(
+    ctx: ToolContext,
+    path: str,
+    repo: str = "",
+    ref: str = "",
+    offset: int = 0,
+    limit: int = impl.FILE_WINDOW,
+) -> str:
+    return impl.github_file(
+        ctx.workspace, repo, path, ref=ref, offset=offset, limit=limit
+    )
 
 
 @tool(

@@ -45,7 +45,15 @@ from protocol.events import (
     WarningOccurred,
     WorktreeSettled,
 )
-from protocol.snapshot import AgentRow, ChatMessage, EngineSnapshot, GitState, Stats
+from protocol.snapshot import (
+    AGENT_RUNS_CAP,
+    AgentRow,
+    AgentRun,
+    ChatMessage,
+    EngineSnapshot,
+    GitState,
+    Stats,
+)
 from runtime.commands import HANDLERS
 from runtime.config import EngineConfig
 from runtime.language import LanguageInfo
@@ -209,6 +217,8 @@ class EngineSession:
         self._persist()
         if self._loop is not None:
             self._loop.set_catalog_query(text)
+        if isinstance(self._loop, Orchestrator):
+            self._loop.reset_user_message_spawns()
         if self._turn_task is not None and not self._turn_task.done():
             self._pending_user.append(text)
             return
@@ -852,8 +862,28 @@ class EngineSession:
         self._maybe_pump()
 
     def _on_agent_finished(
-        self, agent_id: str, profile: str, status: str, summary: str
+        self,
+        agent_id: str,
+        profile: str,
+        status: str,
+        summary: str,
+        usage: Usage | None = None,
     ) -> None:
+        usage = usage or Usage()
+        stats = self._state.stats
+        stats.agent_runs.append(
+            AgentRun(
+                agent_id=agent_id,
+                profile=profile,
+                cost=usage.cost,
+                prompt_tokens=usage.prompt_tokens,
+                cached_tokens=usage.cached_tokens,
+                total_tokens=usage.total_tokens,
+                requests=usage.requests,
+            )
+        )
+        if len(stats.agent_runs) > AGENT_RUNS_CAP:
+            stats.agent_runs = stats.agent_runs[-AGENT_RUNS_CAP:]
         self._state.agents = [row for row in self._state.agents if row.id != agent_id]
         self._emit(
             AgentFinished(
@@ -861,9 +891,15 @@ class EngineSession:
                 profile=profile,
                 status=status,
                 summary=summary or "",
+                cost=usage.cost,
+                prompt_tokens=usage.prompt_tokens,
+                cached_tokens=usage.cached_tokens,
+                total_tokens=usage.total_tokens,
+                requests=usage.requests,
             )
         )
         self._emit_agents()
+        self._emit_stats()
 
     def _touch_agent(
         self,

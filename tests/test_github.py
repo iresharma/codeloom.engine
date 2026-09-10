@@ -79,8 +79,23 @@ def test_search_code_this_repo_prefix(tmp_path, monkeypatch):
 def test_github_file_caps(tmp_path, monkeypatch):
     monkeypatch.setattr(gh, "run_gh", lambda *a, **k: "x" * (gh.FILE_CAP + 50))
     text = gh.github_file(tmp_path, "acme/engine", "README.md")
-    assert text.endswith("...[truncated]")
-    assert len(text) < gh.FILE_CAP + 30
+    assert "truncated" in text
+    assert len(text) < gh.FILE_WINDOW + 80
+
+
+def test_github_file_hard_cap_and_offset(tmp_path, monkeypatch):
+    monkeypatch.setattr(gh, "run_gh", lambda *a, **k: "x" * (gh.FILE_CAP + 50))
+    text = gh.github_file(
+        tmp_path, "acme/engine", "README.md", limit=gh.FILE_CAP
+    )
+    assert text.endswith("...[truncated]") or "truncated" in text
+    assert len(text) < gh.FILE_CAP + 80
+    page = gh.github_file(tmp_path, "acme/engine", "README.md", offset=10, limit=5)
+    assert page.startswith("xxxxx")
+    assert "offset=15" in page
+    omitted = gh.github_file(tmp_path, "acme/engine", "README.md", limit=0)
+    assert "truncated" in omitted
+    assert len(omitted) < gh.FILE_WINDOW + 80
 
 
 def test_github_file_directory_hint(tmp_path, monkeypatch):

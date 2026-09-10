@@ -218,7 +218,9 @@ PROFILE = AgentProfile(
 - `description` — shown to the orch so it can choose. Be specific about what
 this personality will not do.
 - `system_prompt` — the child's only system prompt (plus workspace memory rendered from
-`.engine/memory.json`).
+`.engine/memory.json`). Subagents freeze that system text on the first model call so
+prompt-cache prefixes stay stable; `remember()` during the child's own run is visible
+as a tool result, not as a rewritten system block. The orchestrator re-renders every turn.
 - `tool_names` — allowlist from `discover_tools()`. Unknown names become
 registry errors, not a crash. Never include other personality names. Include
 `MEMORY` (`remember`) unless the personality truly has nothing to persist.
@@ -228,7 +230,8 @@ list is matched against the relative path (`**/tests/**`, `**/*.md`, …).
 - `required_tools` — if these names never appear in the child's tool trace,
 `AgentResult.status` is `incomplete` (the child still exits). Used by `coder`
 (`get_diagnostics`) and `tester` (`run_command`).
-- `max_turns` — child's own cap, independent of the orch. Built-in profiles use 32.
+- `max_turns` — child's own cap, independent of the orch. Built-in profiles use 32. Do not lower researcher without `Stats.agent_runs` showing frequent `max_turns`; that would `incomplete` and invite a respawn.
+- `model` — optional OpenRouter model id for this personality. `ask` and `tester` use Haiku; researcher/coder/debugger/reviewer inherit `OPENROUTER_MODEL`. `OPENROUTER_CHILD_MODEL` overrides only profiles that leave `model` unset.
 - `needs_worktree` — if true, the child runs in a git worktree on a new branch
 under `.engine/worktrees/` so writers do not collide. `coder` and `tester`
 set this. When the child finishes with changes, those edits are committed on

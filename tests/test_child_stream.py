@@ -338,7 +338,7 @@ class _TwoStreamingAsks(FakeProvider):
         self.hang = hang
         self.orch_spawned = False
 
-    async def complete(self, messages, tools=None, *, on_delta=None):
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
         if _is_orch(tools):
             if not self.orch_spawned:
                 self.orch_spawned = True

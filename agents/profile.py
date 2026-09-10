@@ -49,7 +49,7 @@ BROWSER = [
     "browser_screenshot",
     "browser_network",
 ]
-GH_READ = [
+GH_SOCIAL = [
     "gh_pr_list",
     "gh_pr_view",
     "gh_pr_comments",
@@ -60,12 +60,15 @@ GH_READ = [
     "gh_run_view",
     "gh_release_list",
     "gh_release_view",
+]
+GH_REPO = [
     "github_compare",
     "github_search_code",
     "github_file",
     "github_repo",
     "github_tree",
 ]
+GH_READ = GH_SOCIAL + GH_REPO
 GH_WRITE = ["gh_pr_comment", "gh_issue_create"]
 PKG = ["pkg_info"]
 DOCS = ["docs_lookup", "tldr"]
@@ -96,6 +99,10 @@ TEST_GLOBS = [
     "**/cypress/**",
     "**/e2e/**",
 ]
+
+
+# Extractive children (ask, tester). Researcher stays on OPENROUTER_MODEL.
+EXTRACTOR_MODEL = "anthropic/claude-haiku-4.5"
 
 
 @dataclass

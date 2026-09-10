@@ -300,16 +300,52 @@ def test_spawn_budget(tmp_path):
         hang = asyncio.Event()
         session = await _bind(tmp_path, _HangChild(hang), max_spawns_per_turn=2)()
         orch: Orchestrator = session._loop
-        first = await orch.spawn("ask", "one")
-        second = await orch.spawn("ask", "two")
-        third = await orch.spawn("ask", "three")
+        first = await orch.spawn("debugger", "one")
+        second = await orch.spawn("debugger", "two")
+        third = await orch.spawn("debugger", "three")
         assert first.startswith("started")
         assert second.startswith("started")
         assert "spawn budget exhausted" in third
         hang.set()
         await orch.wait_children()
-        fourth = await orch.spawn("ask", "four")
+        fourth = await orch.spawn("debugger", "four")
         assert fourth.startswith("started")
+        await orch.wait_children()
+        await _wait_idle(session)
+
+    asyncio.run(run())
+
+
+def test_survey_spawn_once_per_user_message(tmp_path):
+    async def run():
+        session = await _bind(tmp_path, FakeProvider())()
+        orch: Orchestrator = session._loop
+        orch._inbox_turn = True
+        first = await orch.spawn("ask", "one")
+        second = await orch.spawn("ask", "two")
+        assert first.startswith("started")
+        assert "already spawned ask" in second
+        r1 = await orch.spawn("researcher", "repo")
+        r2 = await orch.spawn("researcher", "again")
+        assert r1.startswith("started")
+        assert "already spawned researcher" in r2
+        orch.reset_user_message_spawns()
+        third = await orch.spawn("ask", "three")
+        assert third.startswith("started")
+        await orch.wait_children()
+        await _wait_idle(session)
+
+    asyncio.run(run())
+
+
+def test_survey_first_turn_may_fan_out(tmp_path):
+    async def run():
+        session = await _bind(tmp_path, FakeProvider())()
+        orch: Orchestrator = session._loop
+        first = await orch.spawn("ask", "one")
+        second = await orch.spawn("ask", "two")
+        assert first.startswith("started")
+        assert second.startswith("started")
         await orch.wait_children()
         await _wait_idle(session)
 
@@ -437,7 +473,7 @@ class _AskThenDone(FakeProvider):
         super().__init__()
         self.orch_turns = 0
 
-    async def complete(self, messages, tools=None, *, on_delta=None):
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
         if _is_orch(tools):
             self.orch_turns += 1
             if self.orch_turns == 1:
@@ -463,7 +499,7 @@ class _TwoAsks(FakeProvider):
         self.hang = hang
         self.orch_spawned = False
 
-    async def complete(self, messages, tools=None, *, on_delta=None):
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
         if _is_orch(tools):
             if not self.orch_spawned:
                 self.orch_spawned = True
@@ -486,7 +522,7 @@ class _AskHangThenDone(FakeProvider):
         self.hang_orch = hang_orch
         self.orch_spawned = False
 
-    async def complete(self, messages, tools=None, *, on_delta=None):
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
         if _is_orch(tools):
             if not self.orch_spawned:
                 self.orch_spawned = True
@@ -508,7 +544,7 @@ class _HangChild(FakeProvider):
         super().__init__()
         self.hang = hang
 
-    async def complete(self, messages, tools=None, *, on_delta=None):
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
         if _is_orch(tools):
             return LLMResult(text="ok")
         await self.hang.wait()

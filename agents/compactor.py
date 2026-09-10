@@ -443,6 +443,17 @@ def _paths_from_history(messages: list[dict]) -> list[str]:
     return paths
 
 
+def _looks_like_briefing(text: str) -> bool:
+    keys: set[str] = set()
+    for line in (text or "").splitlines():
+        if ":" not in line:
+            continue
+        key = line.split(":", 1)[0].strip().lower().replace(" ", "")
+        if key in {"what", "paths", "facts", "verdict", "leftover"}:
+            keys.add(key)
+    return "what" in keys and ("facts" in keys or "verdict" in keys)
+
+
 def _last_assistant_text(messages: list[dict]) -> str:
     for message in reversed(messages):
         if message.get("role") == "assistant" and not (message.get("tool_calls") or []):
@@ -481,7 +492,7 @@ async def compress_for_parent(
     leftover = _leftover_from_text(closer)
     summary = _clip_labeled(outcome, SUMMARY_CLIP)
     work = [item for item in messages if item.get("role") != "system"]
-    if complete is not None and len(work) > 4:
+    if complete is not None and len(work) > 4 and not _looks_like_briefing(closer):
         prompt = [
             {
                 "role": "system",

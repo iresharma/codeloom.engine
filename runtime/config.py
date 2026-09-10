@@ -7,7 +7,9 @@ from pathlib import Path
 from llm.openrouter import load_env_sh
 
 EXEC_APPROVALS = ("auto", "always", "never")
-CHILD_COMPACT_TRIGGER = 0.9
+# 2.0 never fires in-loop; overflow still force-compacts. Must ship with
+# github_file windows or surveys hit the 120k fuse.
+CHILD_COMPACT_TRIGGER = 2.0
 CHILD_KEEP_FULL_TOOLS = 10
 
 
@@ -23,6 +25,7 @@ class EngineConfig:
     context_budget: int = 120_000
     compact_trigger: float = 0.7
     keep_full_tools: int = 3
+    child_model: str = ""
     max_spawns_per_turn: int = 8
     subscriber_capacity: int = 4096
     subscriber_bytes: int = 1 << 20
@@ -50,6 +53,9 @@ class EngineConfig:
         config.context_budget = _env_int(
             "ENGINE_CONTEXT_BUDGET", config.context_budget, warnings
         )
+        config.child_model = (
+            os.environ.get("OPENROUTER_CHILD_MODEL") or ""
+        ).strip()
         config.max_spawns_per_turn = _env_int(
             "ENGINE_MAX_SPAWNS_PER_TURN", config.max_spawns_per_turn, warnings
         )

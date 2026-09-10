@@ -14,7 +14,14 @@ class Subagent(AgentLoop):
         base = kwargs.pop("system_prompt", profile.system_prompt)
         kwargs["system_prompt"] = f"{(base or '').rstrip()}\n\n{REPORT_TO_ORCH}"
         kwargs.setdefault("write_globs", profile.write_globs)
-        kwargs.setdefault("concurrent_tools", False)
+        # Orch already runs tools in parallel; children were False only because
+        # AgentLoop defaulted that way. gather keeps tool_call order; writers
+        # serialize via write_lock.
+        kwargs.setdefault("concurrent_tools", True)
+        # Freeze system (prompt + memory + skills) on first build so cache
+        # prefixes stay identical. remember() during this run is in the tool
+        # result, not a rewritten system prompt. Siblings' notes wait for orch.
+        kwargs.setdefault("freeze_system", True)
         super().__init__(**kwargs)
         self._profile = profile
         if profile.max_turns:
@@ -22,7 +29,8 @@ class Subagent(AgentLoop):
 
     async def finish(self, status: str) -> AgentResult:
         async def complete(payload):
-            return await self._llm.complete(payload)
+            extra = {"model": self._model} if self._model else {}
+            return await self._llm.complete(payload, **extra)
 
         try:
             return await compress_for_parent(

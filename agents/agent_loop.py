@@ -95,6 +95,8 @@ class AgentLoop:
         skills=None,
         unlocked_skills=None,
         on_skill_activated=None,
+        model: str | None = None,
+        freeze_system: bool = False,
     ):
         self._llm = llm
         self._tools = tools or ToolRegistry()
@@ -148,6 +150,9 @@ class AgentLoop:
         self._sticky_skills: set[str] = set()
         self._catalog_query = ""
         self._on_skill_activated = on_skill_activated
+        self._model = model
+        self._freeze_system = freeze_system
+        self._frozen_system: str | None = None
         self._ctx.skills = skills
         self._ctx.unlocked_skills = self._unlocked_skills
         self._ctx.activate_skill = self.activate_skill
@@ -193,6 +198,10 @@ class AgentLoop:
         return skill.body + extra
 
     def _build_messages(self) -> list[dict]:
+        if self._freeze_system and self._frozen_system is not None:
+            return [{"role": "system", "content": self._frozen_system}] + list(
+                self._history
+            )
         system = self._system_prompt
         notes = render_memory(self._ctx.workspace)
         if notes:
@@ -208,6 +217,8 @@ class AgentLoop:
             )
             if catalog:
                 system = f"{system}\n\n## Skills\n{catalog}"
+        if self._freeze_system:
+            self._frozen_system = system
         return [{"role": "system", "content": system}] + list(self._history)
 
     def context_dump(self) -> str:
@@ -293,7 +304,10 @@ class AgentLoop:
 
         try:
             result = await self._llm.complete(
-                messages, tools=schemas or None, on_delta=on_delta
+                messages,
+                tools=schemas or None,
+                on_delta=on_delta,
+                **({"model": self._model} if self._model else {}),
             )
         except Exception as exc:
             if (
