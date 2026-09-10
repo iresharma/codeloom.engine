@@ -33,6 +33,7 @@ class ChatMessageAdded(ProtocolMessage):
     role: str
     text: str
     ts: str
+    agent_id: str = ""
 
 
 @event
@@ -122,6 +123,7 @@ class ChatMessageStarted(ProtocolMessage):
     id: str
     role: str
     ts: str
+    agent_id: str = ""
 
 
 @event
@@ -130,6 +132,7 @@ class ChatMessageDelta(ProtocolMessage):
     id: str
     channel: str
     text: str
+    agent_id: str = ""
 
 
 @event

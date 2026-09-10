@@ -101,6 +101,8 @@ class PromptBroker:
             )
         )
         try:
+            if timeout is None or timeout <= 0:
+                return await future
             return await asyncio.wait_for(future, timeout)
         except asyncio.TimeoutError:
             if kind == "confirm":

@@ -6,14 +6,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llm.provider import LLMResult
-from protocol.commands import AnswerPrompt
+from protocol.commands import AnswerPrompt, SubmitUserMessage
 from protocol.events import UserPromptRequested, WorktreeSettled
 from tests.fakes import FakeProvider
 from runtime.tools.git import (
     add_agent_worktree,
     apply_worktree,
+    commit_if_dirty,
     drop_empty_worktree,
+    list_engine_worktrees,
     normalize_settle_action,
+    parse_settle_intent,
     worktree_has_changes,
 )
 from tests.test_orchestrator import (
@@ -29,12 +32,17 @@ from tests.test_orchestrator import (
 def test_normalize_settle_action():
     assert normalize_settle_action("merge") == "merge"
     assert normalize_settle_action("Merge the worktree") == "merge"
+    assert normalize_settle_action("please merge it") == "merge"
+    assert normalize_settle_action("no my bad please merge it") == "merge"
     assert normalize_settle_action("pr") == "pr"
     assert normalize_settle_action("create a branch and PR") == "pr"
     assert normalize_settle_action("open a pull request") == "pr"
     assert normalize_settle_action("keep") == "keep"
+    assert normalize_settle_action("don't merge") == "keep"
     assert normalize_settle_action("discard") == "discard"
     assert normalize_settle_action("") == "keep"
+    assert parse_settle_intent("what's in the diff?") is None
+    assert parse_settle_intent("please merge it") == "merge"
 
 
 def test_apply_worktree_merge(tmp_path):
@@ -87,7 +95,7 @@ def test_apply_worktree_pr_uses_gh(tmp_path):
     (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
     real_exec = __import__("runtime.tools.git", fromlist=["_exec"])._exec
 
-    def fake_exec(workspace, args, timeout=60):
+    def fake_exec(workspace, args, timeout=60, env=None):
         if args[:2] == ["git", "push"] or args[:1] == ["gh"]:
             stdout = "https://example.com/pr/1\n" if args[0] == "gh" else ""
             return subprocess.CompletedProcess(args, 0, stdout, "")
@@ -218,5 +226,130 @@ def test_reviewer_joins_writer_then_prompts(tmp_path):
         await session.handle(AnswerPrompt(prompt_id=pending.prompt_id, text="keep"))
         await orch.wait_settle()
         assert dest.exists()
+        assert (dest / "flag.py").read_text(encoding="utf-8") == "x = 1\n"
+        log = subprocess.run(
+            ["git", "log", "--oneline", "engine/coder/" + dest.name],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert log.returncode == 0
+        assert log.stdout.strip()
 
     asyncio.run(run())
+
+
+def test_worktree_behind_main_without_unique_commits(tmp_path):
+    _init_git(tmp_path)
+    path, branch, err = add_agent_worktree(tmp_path, "behind01", "coder")
+    assert not err
+    dest = Path(path)
+    (tmp_path / "later.txt").write_text("y\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "advance"], cwd=tmp_path, check=True, capture_output=True
+    )
+    assert not worktree_has_changes(tmp_path, dest)
+    assert drop_empty_worktree(tmp_path, dest, branch) == ""
+    assert not dest.exists()
+
+
+def test_keep_commits_then_settle_tool_merges(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        hang = asyncio.Event()
+        session = await _bind(tmp_path, _HangChild(hang))()
+        orch = session._loop
+        await orch.spawn("coder", "add a flag")
+        dest = next(iter(orch._worktrees.values()))
+        (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
+        hang.set()
+        await orch.wait_children()
+        await _wait_idle(session)
+        pending = await _wait_prompt(session)
+        await session.handle(AnswerPrompt(prompt_id=pending.prompt_id, text="keep"))
+        await orch.wait_settle()
+        assert dest.exists()
+        result = await orch.apply_named_worktree("merge")
+        assert result.startswith("ok merge")
+        assert (tmp_path / "flag.py").read_text(encoding="utf-8") == "x = 1\n"
+        assert not dest.exists()
+
+    asyncio.run(run())
+
+
+def test_recover_leftover_worktree_then_merge(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        path, branch, err = add_agent_worktree(tmp_path, "deadbeefcafebabe", "coder")
+        assert not err
+        dest = Path(path)
+        (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
+        session = await _bind(tmp_path, FakeProvider())()
+        orch = session._loop
+        listed = orch.describe_worktrees()
+        assert "deadbeefcafebabe" in listed
+        result = await orch.apply_named_worktree("merge", agent_id="deadbeef")
+        assert "merged" in result
+        assert (tmp_path / "flag.py").read_text(encoding="utf-8") == "x = 1\n"
+        assert not dest.exists()
+
+    asyncio.run(run())
+
+
+def test_please_merge_it_answers_settle_prompt(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        hang = asyncio.Event()
+        session = await _bind(tmp_path, _HangChild(hang))()
+        orch = session._loop
+        await orch.spawn("coder", "add a flag")
+        dest = next(iter(orch._worktrees.values()))
+        (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
+        hang.set()
+        await orch.wait_children()
+        await _wait_idle(session)
+        await _wait_prompt(session)
+        await session.handle(SubmitUserMessage(text="no my bad please merge it"))
+        await orch.wait_settle()
+        assert (tmp_path / "flag.py").read_text(encoding="utf-8") == "x = 1\n"
+        assert not dest.exists()
+
+    asyncio.run(run())
+
+
+def test_unrelated_chat_leaves_settle_prompt(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        hang = asyncio.Event()
+        session = await _bind(tmp_path, _HangChild(hang))()
+        orch = session._loop
+        await orch.spawn("coder", "add a flag")
+        dest = next(iter(orch._worktrees.values()))
+        (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
+        hang.set()
+        await orch.wait_children()
+        await _wait_idle(session)
+        pending = await _wait_prompt(session)
+        await session.handle(SubmitUserMessage(text="what files changed?"))
+        assert session._prompts.pending() is not None
+        assert session._prompts.pending().prompt_id == pending.prompt_id
+        await session.handle(AnswerPrompt(prompt_id=pending.prompt_id, text="discard"))
+        await orch.wait_settle()
+        await _wait_idle(session)
+        assert not dest.exists()
+        assert not (tmp_path / "flag.py").exists()
+
+    asyncio.run(run())
+
+
+def test_list_engine_worktrees(tmp_path):
+    _init_git(tmp_path)
+    path, branch, err = add_agent_worktree(tmp_path, "listme123", "coder")
+    assert not err
+    rows = list_engine_worktrees(tmp_path)
+    assert any(item[0] == "listme123" and item[1] == branch for item in rows)
+    (Path(path) / "flag.py").write_text("x = 1\n", encoding="utf-8")
+    assert not commit_if_dirty(Path(path), "engine(coder): list")
+    assert worktree_has_changes(tmp_path, Path(path))

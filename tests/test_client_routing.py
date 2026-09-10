@@ -52,6 +52,34 @@ def test_route_chat_events():
     )
     assert (
         route_event(
+            ChatMessageStarted(
+                id="m1", role="assistant", ts="t", agent_id="a1"
+            )
+        )
+        == "agents"
+    )
+    assert (
+        route_event(
+            ChatMessageDelta(
+                id="m1", channel="text", text="hi", agent_id="a1"
+            )
+        )
+        == "agents"
+    )
+    assert (
+        route_event(
+            ChatMessageAdded(
+                id="m1",
+                role="assistant",
+                text="hi",
+                ts="t",
+                agent_id="a1",
+            )
+        )
+        == "agents"
+    )
+    assert (
+        route_event(
             ChatHistoryAdded(
                 id="h1",
                 role="user",
@@ -193,6 +221,19 @@ def test_format_event_delta_returns_text_without_reprint():
     assert (
         format_event(ChatMessageAdded(id="m1", role="assistant", text="hi", ts="t"))
         == ""
+    )
+    dummy_client._STREAM_ID = ""
+    assert (
+        format_event(
+            ChatMessageAdded(
+                id="c1",
+                role="assistant",
+                text="child",
+                ts="t",
+                agent_id="aaaaaaaa",
+            )
+        )
+        == "assistant [aaaaaaaa]: child"
     )
 
 

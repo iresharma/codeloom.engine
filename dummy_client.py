@@ -46,10 +46,12 @@ from protocol.events import (
     WorktreeSettled,
 )
 from protocol.snapshot import FileTreeNode, GitState
+from runtime.tools.git import is_settle_prompt, parse_settle_intent
 
 CLIENT_EXIT = object()
 _COMMANDS_BY_NAME = {name.lower(): cls for name, cls in COMMANDS.items()}
 _LAST_PROMPT_ID = ""
+_LAST_PROMPT_CHOICES: list[str] = []
 _STREAM_ID = ""
 _NOTES: list[str] = []
 
@@ -77,6 +79,10 @@ def drain_notes() -> list[str]:
 def route_event(event) -> str:
     if isinstance(event, _TOOL_EVENTS):
         return "tools"
+    if isinstance(
+        event, (ChatMessageStarted, ChatMessageDelta, ChatMessageAdded)
+    ) and getattr(event, "agent_id", ""):
+        return "agents"
     if isinstance(event, _AGENT_EVENTS):
         return "agents"
     if isinstance(event, OrchContext):
@@ -134,8 +140,11 @@ def _help_text() -> str:
     lines.append("are a 400-char preview. Open a file first to also see FileContent")
     lines.append("refresh after each edit. undo restores the last journal batch.")
     lines.append("Live agents: AgentsUpdated / SnapshotReady.agents show count,")
-    lines.append("batch, profile, task, status, and current_tool. abort <id> kills one child.")
-    lines.append("When a writer finishes, answer merge / pr / keep / discard to settle its worktree.")
+    lines.append("batch, profile, task, status, and current_tool. Child tokens")
+    lines.append("stream as ChatMessageDelta with agent_id. abort <id> kills one child.")
+    lines.append("When a writer finishes, answer merge / pr / keep / discard")
+    lines.append("(or 'please merge it' / 'open a PR'). After keep, tell the orch")
+    lines.append("to merge or open a PR — do not spawn another coder.")
     return "\n".join(lines) + "\n"
 
 
@@ -212,14 +221,20 @@ def command_from_line(line: str, workspace: Path):
         _note(f"unknown command: {line.split()[0]}  (try help)")
         return None
     if _LAST_PROMPT_ID:
+        if is_settle_prompt(_LAST_PROMPT_CHOICES):
+            intent = parse_settle_intent(line)
+            if intent is None:
+                return SubmitUserMessage(text=line)
+            return _take_answer(intent)
         return _take_answer(line)
     return SubmitUserMessage(text=line)
 
 
 def _take_answer(text: str) -> AnswerPrompt:
-    global _LAST_PROMPT_ID
+    global _LAST_PROMPT_ID, _LAST_PROMPT_CHOICES
     prompt_id = _LAST_PROMPT_ID
     _LAST_PROMPT_ID = ""
+    _LAST_PROMPT_CHOICES = []
     return AnswerPrompt(prompt_id=prompt_id, text=text)
 
 
@@ -331,16 +346,20 @@ def format_event(event) -> str:
     if isinstance(event, ChatHistoryComplete):
         return f"chat history complete ({event.count})"
     if isinstance(event, ChatMessageStarted):
+        if event.agent_id:
+            return f"agent {event.agent_id[:8]} streaming"
         return ""
     if isinstance(event, ChatMessageDelta):
         global _STREAM_ID
         prefix = "" if not _STREAM_ID or _STREAM_ID == event.id else "\n"
         _STREAM_ID = event.id
-        return f"{prefix}{event.text}"
+        who = f"[{event.agent_id[:8]}] " if event.agent_id and prefix else ""
+        return f"{prefix}{who}{event.text}"
     if isinstance(event, ChatMessageAdded):
         if event.id == _STREAM_ID:
             return ""
-        return f"{event.role}: {event.text}"
+        who = f" [{event.agent_id[:8]}]" if event.agent_id else ""
+        return f"{event.role}{who}: {event.text}"
     if isinstance(event, ToolCallStarted):
         who = f" [{event.agent_id}]" if event.agent_id else ""
         return f"tool {event.name} started{who}"
@@ -386,8 +405,9 @@ def format_event(event) -> str:
             f"· ${s.cost:.3f} · {s.elapsed_s:.1f}s · turn {s.turns}"
         )
     if isinstance(event, UserPromptRequested):
-        global _LAST_PROMPT_ID
+        global _LAST_PROMPT_ID, _LAST_PROMPT_CHOICES
         _LAST_PROMPT_ID = event.prompt_id
+        _LAST_PROMPT_CHOICES = list(event.choices or [])
         extra = f"  choices={event.choices}" if event.choices else ""
         who = f" agent={event.agent_id}" if event.agent_id else ""
         return (
