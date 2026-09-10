@@ -7,7 +7,7 @@ picks it up on the next `StartSession`. There is no registry file to edit.
 The orchestrator sees each profile as a **tool named after the profile**. Calling
 `ask` / `coder` / `tester` / … starts that child and returns immediately with
 `agent_id` (and `worktree` / `branch` when the profile writes). The child runs in
-the background. When it finishes, its transcript is compacted into an
+the background. Tokens stream to the client tagged with `agent_id`. When it finishes, its transcript is compacted into an
 `AgentResult` string and delivered to the orch as a follow-up message (not as
 the original tool result). The child never chats with the user.
 

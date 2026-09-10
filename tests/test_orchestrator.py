@@ -14,6 +14,8 @@ from protocol.events import (
     AgentStarted,
     AgentsUpdated,
     ChatMessageAdded,
+    ChatMessageDelta,
+    ChatMessageStarted,
     ErrorOccurred,
 )
 from runtime.config import EngineConfig
@@ -100,22 +102,42 @@ def test_ask_spawn_only_orch_chat(tmp_path):
         started = []
         finished = []
         engine = []
+        child_deltas = []
+        child_added = []
+        child_started = []
         while not queue.empty():
             item = queue.get_nowait()
             if isinstance(item, ChatMessageAdded) and item.role == "assistant":
-                added.append(item)
+                if item.agent_id:
+                    child_added.append(item)
+                else:
+                    added.append(item)
             elif isinstance(item, ChatMessageAdded) and item.role == "engine":
                 engine.append(item)
             elif isinstance(item, AgentStarted):
                 started.append(item)
             elif isinstance(item, AgentFinished):
                 finished.append(item)
+            elif isinstance(item, ChatMessageDelta) and item.agent_id:
+                child_deltas.append(item)
+            elif isinstance(item, ChatMessageStarted) and item.agent_id:
+                child_started.append(item)
         assert started and started[0].profile == "ask"
         assert not started[0].worktree
         assert finished
         assert added
         assert engine
         assert all("retry is in server.py" != item.text for item in added)
+        assert child_started and child_deltas
+        assert all(item.agent_id == started[0].agent_id for item in child_deltas)
+        assert child_added
+        assert child_added[-1].text == "retry is in server.py"
+        assert child_added[-1].agent_id == started[0].agent_id
+        assert all(
+            "retry is in server.py" != m.text
+            for m in session._state.messages
+            if m.role == "assistant"
+        )
 
     asyncio.run(run())
 
@@ -430,6 +452,8 @@ class _AskThenDone(FakeProvider):
             if self.orch_turns == 2:
                 return LLMResult(text="spawned, waiting")
             return LLMResult(text="ask found retry")
+        if on_delta:
+            on_delta("text", "retry is in server.py")
         return LLMResult(text="retry is in server.py")
 
 

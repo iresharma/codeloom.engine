@@ -262,7 +262,7 @@ booted with — one process serves exactly one workspace.
 | Event | Fields | Meaning |
 |---|---|---|
 | `SnapshotReady` | `snapshot` | Full session state, with chat history stripped and streamed separately. |
-| `ChatMessageAdded` | `id`, `role`, `text`, `ts` | A new message. `role` is `user`, `assistant`, `engine` (child report), or `tool`. |
+| `ChatMessageAdded` | `id`, `role`, `text`, `ts`, `agent_id?` | A new message. `role` is `user`, `assistant`, `engine` (child report), or `tool`. Child assistant lines set `agent_id` and are not stored in orch history. |
 | `ChatHistoryAdded` | `id`, `role`, `text`, `ts`, `index`, `total` | One replayed historical message, so clients can show progress. |
 | `ChatHistoryComplete` | `count` | Replay finished. |
 | `SessionList` | `sessions` | Result of `ListSessions`. |
@@ -271,8 +271,8 @@ booted with — one process serves exactly one workspace.
 | `FileClosed` | `path` | A file left the open set. |
 | `FileTreeUpdated` | `file_tree` | Workspace tree. Arrives after `SnapshotReady` (which no longer packs the tree) and after creates/undos. |
 | `GitStateUpdated` | `git` | Branch, dirty flag, staged/unstaged/untracked lists, diffs. |
-| `ChatMessageStarted` | `id`, `role`, `ts` | An assistant message is about to stream. |
-| `ChatMessageDelta` | `id`, `channel`, `text` | Incremental text or reasoning. The following `ChatMessageAdded` is canonical. |
+| `ChatMessageStarted` | `id`, `role`, `ts`, `agent_id?` | An assistant message is about to stream. Empty `agent_id` is the orchestrator. |
+| `ChatMessageDelta` | `id`, `channel`, `text`, `agent_id?` | Incremental text or reasoning. The following `ChatMessageAdded` is canonical. |
 | `ToolCallStarted` / `ToolCallFinished` | `call_id`, `name`, … | A tool began or finished. Replaces `role=tool` chat lines. |
 | `CommandOutputChunk` | `call_id`, `stream`, `text` | Live stdout/stderr from `run_command`. |
 | `AgentStateChanged` | `state`, `turn`, `max_turns`, `agent_id?` | idle / thinking / calling_tool / waiting_for_user / aborting / compacting. Empty `agent_id` is the orchestrator. `waiting_for_user` means **this** agent's prompt is on screen; another child queued on PromptBroker still shows `calling_tool`. |
@@ -324,7 +324,7 @@ generation and stops rather than interleaving two histories.
 
 The user talks only to the **orchestrator** (`agents/orchestrator.py`), which is an `AgentLoop` with no filesystem tools — only one tool per subagent personality (`ask`, `coder`, `tester`, `researcher`, `debugger`, `reviewer`) plus `write_context` and `settle_worktree`. Personalities are discovered from `agents/profiles/` the same way tools are discovered from `tools/`.
 
-A spawn is fire-and-forget. The personality tool returns immediately with `agent_id` (and `worktree` / `branch` for writers). The child runs in the background with a fresh history and an allowlisted tool set. When it finishes, `compress_for_parent` turns its transcript into an `AgentResult` (`status`, `summary`, `outcome`, `files_touched`, `leftover_questions`, `missing_checks`). That string is posted to the orch as an `engine` chat line and, if the orch is idle, starts a follow-up orch turn so it can brief the user or spawn the next step. Child tokens never become assistant `ChatMessageAdded`.
+A spawn is fire-and-forget. The personality tool returns immediately with `agent_id` (and `worktree` / `branch` for writers). The child runs in the background with a fresh history and an allowlisted tool set. When it finishes, `compress_for_parent` turns its transcript into an `AgentResult` (`status`, `summary`, `outcome`, `files_touched`, `leftover_questions`, `missing_checks`). That string is posted to the orch as an `engine` chat line and, if the orch is idle, starts a follow-up orch turn so it can brief the user or spawn the next step. Child tokens stream live as `ChatMessageStarted` / `ChatMessageDelta` / `ChatMessageAdded` with `agent_id` set; they never persist in orch chat history.
 
 `AgentLoop` is still an OpenAI-style tool-calling loop, capped at `EngineConfig.max_turns` (default 16). The orch may emit several personality calls in one model turn; those children run concurrently. A child's own tools stay sequential so read-before-write cannot race. `EngineConfig.max_spawns_per_turn` (default 8) caps how many children may be live at once.
 
@@ -789,8 +789,9 @@ before writing your own client.
 - **Chat** — user, assistant, and `engine` (child reports) messages, streamed
   deltas, history replay, and outstanding prompts.
 - **Agents** — live subagents grouped by batch nickname (`batch_name`) plus a
-  short `batch_id`: count, profile, task, status, current tool, worktree. Fed
-  by `AgentsUpdated` and `SnapshotReady`.
+  short `batch_id`: count, profile, task, status, current tool, worktree, and
+  streamed child tokens (`ChatMessageStarted` / `Delta` / `Added` with
+  `agent_id`). Fed by `AgentsUpdated`, `SnapshotReady`, and those chat events.
 - **Protocol** — every command this client sends, plus inbound events that are
   not chat, tools, the agents panel, or an inspect popup (files, git, stats,
   errors, `AgentStarted` / `AgentFinished`).

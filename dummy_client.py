@@ -79,6 +79,10 @@ def drain_notes() -> list[str]:
 def route_event(event) -> str:
     if isinstance(event, _TOOL_EVENTS):
         return "tools"
+    if isinstance(
+        event, (ChatMessageStarted, ChatMessageDelta, ChatMessageAdded)
+    ) and getattr(event, "agent_id", ""):
+        return "agents"
     if isinstance(event, _AGENT_EVENTS):
         return "agents"
     if isinstance(event, OrchContext):
@@ -136,7 +140,8 @@ def _help_text() -> str:
     lines.append("are a 400-char preview. Open a file first to also see FileContent")
     lines.append("refresh after each edit. undo restores the last journal batch.")
     lines.append("Live agents: AgentsUpdated / SnapshotReady.agents show count,")
-    lines.append("batch, profile, task, status, and current_tool. abort <id> kills one child.")
+    lines.append("batch, profile, task, status, and current_tool. Child tokens")
+    lines.append("stream as ChatMessageDelta with agent_id. abort <id> kills one child.")
     lines.append("When a writer finishes, answer merge / pr / keep / discard")
     lines.append("(or 'please merge it' / 'open a PR'). After keep, tell the orch")
     lines.append("to merge or open a PR — do not spawn another coder.")
@@ -341,16 +346,20 @@ def format_event(event) -> str:
     if isinstance(event, ChatHistoryComplete):
         return f"chat history complete ({event.count})"
     if isinstance(event, ChatMessageStarted):
+        if event.agent_id:
+            return f"agent {event.agent_id[:8]} streaming"
         return ""
     if isinstance(event, ChatMessageDelta):
         global _STREAM_ID
         prefix = "" if not _STREAM_ID or _STREAM_ID == event.id else "\n"
         _STREAM_ID = event.id
-        return f"{prefix}{event.text}"
+        who = f"[{event.agent_id[:8]}] " if event.agent_id and prefix else ""
+        return f"{prefix}{who}{event.text}"
     if isinstance(event, ChatMessageAdded):
         if event.id == _STREAM_ID:
             return ""
-        return f"{event.role}: {event.text}"
+        who = f" [{event.agent_id[:8]}]" if event.agent_id else ""
+        return f"{event.role}{who}: {event.text}"
     if isinstance(event, ToolCallStarted):
         who = f" [{event.agent_id}]" if event.agent_id else ""
         return f"tool {event.name} started{who}"

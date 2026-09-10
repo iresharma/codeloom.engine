@@ -323,10 +323,10 @@ class EngineSession:
         self._start_lsp()
         self._files = FileTracker()
         self._state.agents = []
-        orch_hooks = self._hooks_for("", stream_chat=True)
+        orch_hooks = self._hooks_for("")
 
         def child_hooks(agent_id: str, profile: str) -> AgentHooks:
-            return self._hooks_for(agent_id, stream_chat=False)
+            return self._hooks_for(agent_id)
 
         self._loop = Orchestrator(
             self._llm,
@@ -527,7 +527,7 @@ class EngineSession:
             return False
         return self._loop.unlock_skill(name)
 
-    def _hooks_for(self, agent_id: str, *, stream_chat: bool) -> AgentHooks:
+    def _hooks_for(self, agent_id: str) -> AgentHooks:
         return AgentHooks(
             on_tool=lambda call_id, name, arguments, result: self._on_tool(
                 call_id, name, arguments, result, agent_id=agent_id
@@ -535,8 +535,21 @@ class EngineSession:
             on_tool_start=lambda call_id, name, arguments: self._on_tool_start(
                 call_id, name, arguments, agent_id=agent_id
             ),
-            on_delta=self._on_delta if stream_chat else None,
-            on_message_start=self._on_message_start if stream_chat else None,
+            on_delta=lambda message_id, channel, text: self._on_delta(
+                message_id, channel, text, agent_id=agent_id
+            ),
+            on_message_start=lambda message_id: self._on_message_start(
+                message_id, agent_id=agent_id
+            ),
+            on_message=(
+                (
+                    lambda message_id, text: self._on_child_message(
+                        message_id, text, agent_id=agent_id
+                    )
+                )
+                if agent_id
+                else None
+            ),
             on_usage=self._on_usage,
             on_state=lambda state, turn, max_turns: self._on_state(
                 state, turn, max_turns, agent_id=agent_id
@@ -654,20 +667,46 @@ class EngineSession:
         self._state.stats.tool_calls += 1
         self._touch_agent(agent_id, current_tool="")
 
-    def _on_message_start(self, message_id: str) -> None:
-        self._stream_id = message_id
+    def _on_message_start(self, message_id: str, agent_id: str = "") -> None:
+        if not agent_id:
+            self._stream_id = message_id
 
-    def _on_delta(self, message_id: str, channel: str, text: str) -> None:
+    def _on_delta(
+        self, message_id: str, channel: str, text: str, agent_id: str = ""
+    ) -> None:
         if channel == "text" and message_id not in self._streamed_ids:
             self._emit(
                 ChatMessageStarted(
                     id=message_id,
                     role="assistant",
                     ts=datetime.now(timezone.utc).isoformat(),
+                    agent_id=agent_id,
                 )
             )
             self._streamed_ids.add(message_id)
-        self._emit(ChatMessageDelta(id=message_id, channel=channel, text=text))
+        self._emit(
+            ChatMessageDelta(
+                id=message_id,
+                channel=channel,
+                text=text,
+                agent_id=agent_id,
+            )
+        )
+
+    def _on_child_message(
+        self, message_id: str, text: str, agent_id: str = ""
+    ) -> None:
+        if not agent_id or not (text or "").strip():
+            return
+        self._emit(
+            ChatMessageAdded(
+                id=message_id,
+                role="assistant",
+                text=text,
+                ts=datetime.now(timezone.utc).isoformat(),
+                agent_id=agent_id,
+            )
+        )
 
     def _on_usage(self, usage: Usage) -> None:
         stats = self._state.stats

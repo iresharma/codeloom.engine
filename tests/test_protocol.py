@@ -76,6 +76,32 @@ def test_new_commands_and_events_round_trip():
         )
     )
     assert prompt.choices == ["yes", "no"]
+    from protocol.events import ChatMessageAdded, ChatMessageDelta, ChatMessageStarted
+
+    delta = decode_event(
+        encode(
+            ChatMessageDelta(
+                id="m1", channel="text", text="hi", agent_id="a1"
+            )
+        )
+    )
+    assert delta.agent_id == "a1"
+    started_chat = decode_event(
+        encode(ChatMessageStarted(id="m1", role="assistant", ts="t", agent_id="a1"))
+    )
+    assert started_chat.agent_id == "a1"
+    added = decode_event(
+        encode(
+            ChatMessageAdded(
+                id="m1",
+                role="assistant",
+                text="hi",
+                ts="t",
+                agent_id="a1",
+            )
+        )
+    )
+    assert added.agent_id == "a1"
     stats = decode_event(encode(StatsUpdated(stats=Stats(prompt_tokens=3))))
     assert stats.stats.prompt_tokens == 3
     started = decode_event(

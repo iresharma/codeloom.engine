@@ -232,6 +232,10 @@ class AgentLoop:
         if self._hooks.on_state is not None:
             self._hooks.on_state(state, turn, self._config.max_turns)
 
+    def _emit_message(self, text: str) -> None:
+        if self._hooks.on_message is not None:
+            self._hooks.on_message(self._message_id, text)
+
     async def run(self, task: str) -> str:
         marker = len(self._history)
         self._history.append({"role": "user", "content": task})
@@ -248,6 +252,7 @@ class AgentLoop:
                     continue
                 last_text = result.text
                 self._history.append({"role": "assistant", "content": last_text})
+                self._emit_message(last_text or "")
                 return last_text
         except asyncio.CancelledError:
             del self._history[marker:]
@@ -259,7 +264,9 @@ class AgentLoop:
         except Exception:
             del self._history[marker:]
             raise
-        return last_text or f"stopped after {self._config.max_turns} tool turns"
+        final = last_text or f"stopped after {self._config.max_turns} tool turns"
+        self._emit_message(final)
+        return final
 
     async def _complete(self, messages: list[dict], schemas):
         self._message_id = uuid4().hex

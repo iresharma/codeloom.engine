@@ -222,6 +222,14 @@ def test_tool_only_complete_does_not_start_chat(tmp_path):
     asyncio.run(run())
 
 
+def test_child_stream_does_not_steal_orch_id(tmp_path):
+    session = EngineSession(tmp_path, tmp_path / "session.db")
+    session._on_message_start("orch-msg")
+    assert session._stream_id == "orch-msg"
+    session._on_message_start("child-msg", agent_id="abc")
+    assert session._stream_id == "orch-msg"
+
+
 def test_added_reuses_stream_id(tmp_path):
     async def run():
         provider = FakeProvider(

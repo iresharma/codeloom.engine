@@ -164,10 +164,17 @@ class ProtocolLog(RichLog):
 
 
 class ToolCard(Static):
-    def __init__(self, call_id: str, name: str, arguments_json: str) -> None:
+    def __init__(
+        self,
+        call_id: str,
+        name: str,
+        arguments_json: str,
+        agent_id: str = "",
+    ) -> None:
         self.call_id = call_id
         self.tool_name = name
         self.arguments_json = arguments_json
+        self.agent_id = agent_id
         self.chunks: list[str] = []
         self.ok: bool | None = None
         self.duration_ms: int | None = None
@@ -198,6 +205,8 @@ class ToolCard(Static):
         else:
             status = f"[#e07a7a]error[/]  {self.duration_ms}ms"
         lines = [f"[b]{escape(self.tool_name)}[/b]  {status}"]
+        if self.agent_id:
+            lines[0] += f"  [dim]{escape(self.agent_id[:8])}[/dim]"
         args = _pretty_args(self.arguments_json)
         if args:
             lines.append(escape(args))
@@ -215,7 +224,9 @@ class ToolsPanel(VerticalScroll):
         self._last_shell: ToolCard | None = None
 
     def start_call(self, event: ToolCallStarted) -> None:
-        card = ToolCard(event.call_id, event.name, event.arguments_json)
+        card = ToolCard(
+            event.call_id, event.name, event.arguments_json, event.agent_id
+        )
         if event.call_id:
             self._cards[event.call_id] = card
         if event.name == "run_command":
@@ -236,7 +247,9 @@ class ToolsPanel(VerticalScroll):
     def finish_call(self, event: ToolCallFinished) -> None:
         card = self._cards.get(event.call_id)
         if card is None:
-            card = ToolCard(event.call_id, event.name, "{}")
+            card = ToolCard(
+                event.call_id, event.name, "{}", event.agent_id
+            )
             if event.call_id:
                 self._cards[event.call_id] = card
             self._mount_card(card)
@@ -254,9 +267,50 @@ class AgentsPanel(Static):
     def __init__(self, **kwargs) -> None:
         super().__init__(self._markup([]), markup=True, **kwargs)
         self._rows = []
+        self._streams: dict[str, dict[str, str]] = {}
 
     def set_agents(self, rows) -> None:
         self._rows = list(rows or [])
+        live = {row.id for row in self._rows}
+        self._streams = {
+            agent_id: buf
+            for agent_id, buf in self._streams.items()
+            if agent_id in live
+        }
+        self._refresh()
+
+    def start_stream(self, event: ChatMessageStarted) -> None:
+        if not event.agent_id:
+            return
+        self._streams[event.agent_id] = {"id": event.id, "text": "", "reasoning": ""}
+        self._refresh()
+
+    def append_delta(self, event: ChatMessageDelta) -> None:
+        if not event.agent_id or not event.text:
+            return
+        buf = self._streams.setdefault(
+            event.agent_id, {"id": event.id, "text": "", "reasoning": ""}
+        )
+        if buf["id"] != event.id:
+            buf["id"] = event.id
+            buf["text"] = ""
+            buf["reasoning"] = ""
+        key = "reasoning" if event.channel == "reasoning" else "text"
+        buf[key] += event.text
+        self._refresh()
+
+    def finish_stream(self, event: ChatMessageAdded) -> None:
+        if not event.agent_id:
+            return
+        buf = self._streams.setdefault(
+            event.agent_id, {"id": event.id, "text": "", "reasoning": ""}
+        )
+        buf["id"] = event.id
+        if event.text:
+            buf["text"] = event.text
+        self._refresh()
+
+    def _refresh(self) -> None:
         count = len(self._rows)
         self.border_title = f"agents · {count}"
         self.update(self._markup(self._rows))
@@ -287,7 +341,20 @@ class AgentsPanel(Static):
                 )
                 if task:
                     lines.append(f"[dim]{escape(task)}[/dim]")
+                stream = self._clip_stream(self._streams.get(row.id))
+                if stream:
+                    lines.append(f"[italic]{escape(stream)}[/italic]")
         return "\n".join(lines)
+
+    def _clip_stream(self, buf) -> str:
+        if not buf:
+            return ""
+        text = (buf.get("text") or "").replace("\n", " ").strip()
+        if not text:
+            text = (buf.get("reasoning") or "").replace("\n", " ").strip()
+        if len(text) > 160:
+            text = "…" + text[-157:]
+        return text
 
 
 class InspectModal(ModalScreen):
@@ -402,7 +469,7 @@ class DummyClientApp(App):
 
     #agents {
         height: auto;
-        max-height: 18;
+        max-height: 24;
         border: tall #3a4a2f;
         border-title-color: #a8c47a;
         border-title-style: bold;
@@ -752,8 +819,15 @@ class DummyClientApp(App):
             tools.finish_call(event)
 
     def _dispatch_agents(self, event) -> None:
+        panel = self.query_one("#agents", AgentsPanel)
         if isinstance(event, AgentsUpdated):
-            self.query_one("#agents", AgentsPanel).set_agents(event.agents)
+            panel.set_agents(event.agents)
+        elif isinstance(event, ChatMessageStarted):
+            panel.start_stream(event)
+        elif isinstance(event, ChatMessageDelta):
+            panel.append_delta(event)
+        elif isinstance(event, ChatMessageAdded):
+            panel.finish_stream(event)
 
     def _dispatch_context(self, event) -> None:
         if not isinstance(event, OrchContext):
