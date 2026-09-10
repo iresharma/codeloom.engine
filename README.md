@@ -88,6 +88,7 @@ pure `str -> str` function and inherits all of it.
 | An OpenRouter API key | Required for the agent loop; the engine boots without one but chat is disabled |
 | `rg` (ripgrep) | Required by the `search` tool |
 | `git` | Optional; enables git state reporting and improves language detection |
+| `gh` (GitHub CLI) | Optional; GitHub tools (`gh_pr_*`, `github_search_code`, …). Authenticate with `gh auth login`. |
 | Node.js / `npx` | Optional; needed for the Python and TypeScript language servers |
 | `gopls` | Optional; needed for Go language server support |
 
@@ -371,7 +372,7 @@ can edit a tool and pick it up by restarting the session — no server restart.
 
 ### The full tool catalogue
 
-32 tools across navigation, tree-sitter, LSP, editing, execution, git, web, and browser.
+63 tools across navigation, tree-sitter, LSP, editing, execution, git, GitHub, docs, HTTP, and browser.
 
 **Navigation** — no language server needed.
 
@@ -438,6 +439,48 @@ can edit a tool and pick it up by restarting the session — no server restart.
 |---|---|
 | `git_status` | Branch, dirty flag, staged/unstaged/untracked paths. |
 | `git_diff` | Worktree or staged (cached) diff. |
+| `git_log` | Recent commits (`hash subject`). Optional path filter. |
+| `git_show` | One revision: metadata, stat, clipped patch. |
+| `git_blame` | Blame a file, optional 1-based line window. |
+| `git_range` | Commits and diffstat for `base...head`. |
+
+**GitHub.** Requires `gh` (authenticated). Read tools go to reviewer/researcher/debugger. Writes ask the user. `gh_pr_create` exists but is not given to any profile — worktree settle still opens writer PRs.
+
+| Tool | Purpose |
+|---|---|
+| `gh_pr_list` / `gh_pr_view` / `gh_pr_comments` / `gh_pr_checks` | PRs, conversation, CI. |
+| `gh_issue_list` / `gh_issue_view` | Issues. |
+| `gh_run_list` / `gh_run_view` | Actions runs plus a clipped failed log. |
+| `gh_release_list` / `gh_release_view` | Release notes / changelog. |
+| `github_compare` | Ahead/behind, commits, files between two refs. |
+| `github_search_code` | GitHub code search. `this_repo` scopes to the workspace remote. |
+| `github_file` | Raw file from `owner/name` @ ref. 50k cap. |
+| `gh_pr_comment` / `gh_issue_create` | Approval-gated writes (researcher, debugger). |
+| `gh_pr_create` | Implemented, unassigned. Settle still owns writer PRs. |
+
+**Docs, packages, advisories.**
+
+| Tool | Purpose |
+|---|---|
+| `pkg_info` | Registry metadata: pypi, npm, crates, go, maven, nuget, rubygems. |
+| `docs_lookup` | Official docs: mdn, pypi, npm, crates, go. |
+| `tldr` | CLI cheat sheet from tldr-pages. |
+| `osv_query` | OSV.dev vulnerabilities for a package/version. |
+| `dep_why` | `npm ls` / `go mod why` / `pip show` / `cargo tree`. |
+
+**HTTP.**
+
+| Tool | Purpose |
+|---|---|
+| `http_request` | http/https only. GET/HEAD free; other methods ask the user. 50k cap. |
+| `openapi_ops` | List METHOD path — summary from a Swagger/OpenAPI URL. |
+
+**Repo hygiene.**
+
+| Tool | Purpose |
+|---|---|
+| `todo_scan` | TODO/FIXME/XXX/HACK as `path:line:text`. Skips `.git` / `node_modules`. |
+| `runtime_info` | Local python, node, go, git, gh, rg versions. |
 
 **Web.** Used by the `researcher` personality.
 
@@ -894,7 +937,11 @@ runtime/
     sitter.py             tree-sitter parsing, queries, symbol edits, syntax gate
     lsp.py                LSPClient + LSPManager: JSON-RPC, lifecycle, diagnostics, rename
     search.py             ripgrep wrapper
-    git.py                git state and tracked paths
+    git.py                git state, log/show/blame/range, tracked paths
+    github.py             gh wrappers: PRs, issues, Actions, code search
+    pkg.py docs.py osv.py registries, official docs, OSV advisories
+    httpx.py              structured HTTP + OpenAPI list
+    scan.py envinfo.py depwhy.py  TODOs, local versions, lockfile why
     shell.py              asyncio subprocess executor for run_command
     web.py                HTTP fetch and Brave search
     browser.py            Playwright headless browser (optional)
@@ -906,7 +953,8 @@ tools/                  LLM-facing tool definitions — thin wrappers over runti
   read_file.py list_files.py search.py sitter.py lsp.py
   edit_file.py edit_symbol.py apply_patch.py undo.py
   shell.py              run_command
-  git.py web.py browser.py skills.py
+  git.py github.py web.py browser.py skills.py
+  pkg.py docs.py osv.py http.py scan.py runtime_info.py dep_why.py
 
 agents/
   agent_loop.py         shared tool-calling loop

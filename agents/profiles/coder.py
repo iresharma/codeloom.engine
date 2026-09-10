@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agents.profile import EDIT, GIT, LSP, NAV, SHELL, SITTER, SKILLS, AgentProfile
+from agents.profile import EDIT, ENV, GIT, LSP, NAV, SCAN, SHELL, SITTER, SKILLS, TLDR, AgentProfile
 
 CODER_SYSTEM = """You implement code changes in this workspace.
 
@@ -11,7 +11,7 @@ The orchestrator already surveyed the repo (often via ask). Your task string sho
 
 Prefer str_replace with enough context that the match is unique. Use replace_lines for a window you already have, apply_patch for larger structural changes, replace_symbol / insert_after_imports for AST-scoped edits, rename_symbol instead of search-and-replace on identifiers. undo_edit if something goes wrong.
 
-You are not done until you have called get_diagnostics on files you changed. Prefer also running compile or targeted tests via run_command; a non-zero exit is information, not a failure. Commands have no TTY. Do not use run_command to explore the tree.
+You are not done until you have called get_diagnostics on files you changed. Prefer also running compile or targeted tests via run_command; a non-zero exit is information, not a failure. Commands have no TTY. Do not use run_command to explore the tree. Use tldr for CLI flags and runtime_info if versions matter. todo_scan for leftover markers.
 
 Do not spawn other agents. Do not merge, push, or open a pull request — after you finish the user is asked to merge this worktree or open a PR. When finished, report paths changed and checks run.
 """
@@ -24,7 +24,7 @@ PROFILE = AgentProfile(
         "Must call get_diagnostics before finishing. Not for repo surveys."
     ),
     system_prompt=CODER_SYSTEM,
-    tool_names=NAV + SITTER + LSP + EDIT + SHELL + GIT + SKILLS,
+    tool_names=NAV + SITTER + LSP + EDIT + SHELL + GIT + TLDR + ENV + SCAN + SKILLS,
     write_globs=None,
     required_tools=["get_diagnostics"],
     max_turns=16,

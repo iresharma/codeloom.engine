@@ -32,7 +32,14 @@ EDIT = [
     "undo_edit",
     "list_edits",
 ]
-GIT = ["git_status", "git_diff"]
+GIT = [
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "git_range",
+]
 SHELL = ["run_command"]
 WEB = ["web_search", "web_fetch"]
 BROWSER = [
@@ -41,6 +48,31 @@ BROWSER = [
     "browser_screenshot",
     "browser_network",
 ]
+GH_READ = [
+    "gh_pr_list",
+    "gh_pr_view",
+    "gh_pr_comments",
+    "gh_pr_checks",
+    "gh_issue_list",
+    "gh_issue_view",
+    "gh_run_list",
+    "gh_run_view",
+    "gh_release_list",
+    "gh_release_view",
+    "github_compare",
+    "github_search_code",
+    "github_file",
+]
+GH_WRITE = ["gh_pr_comment", "gh_issue_create"]
+PKG = ["pkg_info"]
+DOCS = ["docs_lookup", "tldr"]
+TLDR = ["tldr"]
+SEC = ["osv_query"]
+HTTP = ["http_request", "openapi_ops"]
+OPENAPI = ["openapi_ops"]
+SCAN = ["todo_scan"]
+ENV = ["runtime_info"]
+DEP = ["dep_why"]
 # Appended to every subagent system prompt. The child never talks to the user.
 REPORT_TO_ORCH = (
     "Your only reader is the orchestrator, not a human. "

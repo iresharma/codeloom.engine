@@ -495,6 +495,20 @@ def test_discover_tools_includes_new_families():
     names = registry.names()
     assert {"git_status", "git_diff", "web_fetch", "web_search"} <= names
     assert {"browser_open", "browser_console", "browser_screenshot", "browser_network"} <= names
+    assert {
+        "git_log",
+        "gh_pr_view",
+        "gh_pr_create",
+        "github_search_code",
+        "pkg_info",
+        "docs_lookup",
+        "tldr",
+        "osv_query",
+        "http_request",
+        "todo_scan",
+        "runtime_info",
+        "dep_why",
+    } <= names
     assert not registry.errors
 
 
