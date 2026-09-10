@@ -217,10 +217,11 @@ PROFILE = AgentProfile(
 - `name` — tool name the orch calls. Must be unique.
 - `description` — shown to the orch so it can choose. Be specific about what
 this personality will not do.
-- `system_prompt` — the child's only system prompt (plus workspace notes from
-`.engine/context.md`).
+- `system_prompt` — the child's only system prompt (plus workspace memory rendered from
+`.engine/memory.json`).
 - `tool_names` — allowlist from `discover_tools()`. Unknown names become
-registry errors, not a crash. Never include other personality names.
+registry errors, not a crash. Never include other personality names. Include
+`MEMORY` (`remember`) unless the personality truly has nothing to persist.
 - `write_globs` — `None` means any workspace path the write funnel already
 allows; `[]` means no writes even if an edit tool was wired by mistake; a
 list is matched against the relative path (`**/tests/**`, `**/*.md`, …).

@@ -1,3 +1,4 @@
+from runtime.store.memory import touch
 from runtime.tools.fileid import read_source
 from runtime.tools.fs import DEFAULT_READ_LIMIT, format_window
 from tools.base import ToolContext, tool
@@ -37,6 +38,10 @@ def read_file(ctx: ToolContext, path: str, offset=1, limit=DEFAULT_READ_LIMIT) -
     src = read_source(ctx.workspace, path)
     if ctx.files is not None:
         ctx.files.mark(src.rel, src.raw_sha256)
+    try:
+        touch(ctx.workspace, src.rel, src.raw_sha256, "read")
+    except OSError:
+        pass
     return format_window(
         src.rel,
         src.text,

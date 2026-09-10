@@ -49,6 +49,7 @@ socket is a dataclass with a `type` field.
 - [Project layout](#project-layout)
 - [Operational limits](#operational-limits)
 - [Extending the engine](#extending-the-engine)
+- [Implementation plans](#implementation-plans)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -322,7 +323,7 @@ generation and stops rather than interleaving two histories.
 
 ## The agent loop
 
-The user talks only to the **orchestrator** (`agents/orchestrator.py`), which is an `AgentLoop` with no filesystem tools — only one tool per subagent personality (`ask`, `coder`, `tester`, `researcher`, `debugger`, `reviewer`) plus `write_context` and `settle_worktree`. Personalities are discovered from `agents/profiles/` the same way tools are discovered from `tools/`.
+The user talks only to the **orchestrator** (`agents/orchestrator.py`), which is an `AgentLoop` with no filesystem tools — only one tool per subagent personality (`ask`, `coder`, `tester`, `researcher`, `debugger`, `reviewer`) plus `remember` and `settle_worktree`. Personalities are discovered from `agents/profiles/` the same way tools are discovered from `tools/`.
 
 A spawn is fire-and-forget. The personality tool returns immediately with `agent_id` (and `worktree` / `branch` for writers). The child runs in the background with a fresh history and an allowlisted tool set. When it finishes, `compress_for_parent` turns its transcript into an `AgentResult` (`status`, `summary`, `outcome`, `files_touched`, `leftover_questions`, `missing_checks`). `files_touched` is successful edits, not reads. `leftover_questions` is parsed from labeled `leftover:` / `leftover_questions:` lines in the LLM report (or the child's closer). That string is posted to the orch as an `engine` chat line and, if the orch is idle, starts a follow-up orch turn so it can brief the user or spawn the next step. Child tokens stream live as `ChatMessageStarted` / `ChatMessageDelta` / `ChatMessageAdded` with `agent_id` set; they never persist in orch chat history.
 
@@ -372,7 +373,7 @@ can edit a tool and pick it up by restarting the session — no server restart.
 
 ### The full tool catalogue
 
-63 tools across navigation, tree-sitter, LSP, editing, execution, git, GitHub, docs, HTTP, and browser.
+64 tools across navigation, tree-sitter, LSP, editing, execution, git, GitHub, docs, HTTP, browser, and memory.
 
 **Navigation** — no language server needed.
 
@@ -490,6 +491,12 @@ can edit a tool and pick it up by restarting the session — no server restart.
 |---|---|
 | `web_fetch` | HTTP GET. HTML becomes markdown (main/article, chrome dropped). `github.com` URLs are refused. SPA pages hint at debugger `browser_open`. |
 | `web_search` | Brave Search if `BRAVE_API_KEY` is set; otherwise an error. |
+
+**Memory.** Every personality (and the orch) can record lasting workspace facts. Reads and edits auto-touch path + SHA; `remember` stores notes and decisions. Stale file notes are flagged when the on-disk hash no longer matches.
+
+| Tool | Purpose |
+|---|---|
+| `remember` | Upsert a file blurb (`section=files` + `path`) or append an engineering / product / CI/CD / other decision. |
 
 **Skills.** Every personality (and the orch) can load a `SKILL.md` body.
 
@@ -725,7 +732,7 @@ Everything lives in `{workspace}/.engine/`:
 |---|---|
 | `engine.sock` | Unix domain socket. Removed on clean shutdown. |
 | `session.db` | SQLite: `sessions` and `edits` tables. |
-| `context.md` | Long-term agent memory, appended across sessions. |
+| `memory.json` | Structured workspace memory: file notes keyed by SHA-256, plus engineering / product / CI/CD / other decisions. Injected into every agent prompt. |
 
 The `sessions` table holds `id`, `json`, `created_at`, `saved_at`. Saves are
 upserts. Only durable state is persisted — the file tree, git state, and
@@ -733,7 +740,10 @@ detected language are stripped before writing, since all three are recomputed
 from disk on load. Sessions are listed newest-saved-first.
 
 State is persisted after every user message, agent reply, file open, file
-close, and on shutdown.
+close, and on shutdown. File memory is updated on `read_file` and successful
+edits (`touch`); richer notes and decisions are written only when an agent
+calls `remember`. A file note is marked `STALE` when the current disk hash
+does not match the hash stored with the note.
 
 ---
 
@@ -932,6 +942,7 @@ runtime/
     sqlite.py             sessions table: init, save, load, list
     state.py              SessionState in-memory model
     edits.py              edits table: record, recent, last_batch
+    memory.py             structured workspace memory (files + decisions)
   tools/                implementation layer — no LLM schemas here
     edits.py              THE WRITE FUNNEL: primitives, patches, atomic writes, journal, undo
     fileid.py             FileSource, newline/BOM/indent detection, guard_write_path
@@ -956,7 +967,7 @@ tools/                  LLM-facing tool definitions — thin wrappers over runti
   read_file.py list_files.py search.py sitter.py lsp.py
   edit_file.py edit_symbol.py apply_patch.py undo.py
   shell.py              run_command
-  git.py github.py web.py browser.py skills.py
+  git.py github.py web.py browser.py skills.py remember.py
   pkg.py docs.py osv.py http.py scan.py runtime_info.py dep_why.py
 
 agents/
@@ -966,7 +977,7 @@ agents/
   profile.py            AgentProfile, ProfileRegistry, discover_profiles
   profiles/             ask, coder, tester, reviewer, researcher, debugger
   hooks.py              AgentHooks callbacks
-  compactor.py          mid-loop compact + compress_for_parent + context.md
+  compactor.py          mid-loop compact + compress_for_parent
 
 runtime/skills/         SKILL.md discovery + lexical catalog
 runtime/mcp/            mcp.json client, tool bridge, token store
@@ -976,6 +987,10 @@ llm/
   openrouter.py         OpenRouterLLM streaming client, env.sh loading
 
 tests/                  unit tests (write path, runtime, skills, MCP fakes)
+
+docs/
+  adding-a-*.md         how to add a tool, command, profile, skill, MCP server
+  impl-plans/           historical design plans, in build order
 ```
 
 The split between `runtime/tools/` and `tools/` is deliberate.
@@ -1056,6 +1071,15 @@ implementing the same three calls needs no changes to the core.
 **A different LLM provider.** `AgentLoop` needs one method:
 `complete(messages, tools) -> LLMResult`. Implement that against any
 tool-calling API and pass it in place of `OpenRouterLLM`.
+
+---
+
+## Implementation plans
+
+Design notes for how the engine was built, in order, live in
+[docs/impl-plans/](docs/impl-plans/README.md). They are historical — the
+how-to guides above are the source of truth for extending the running
+system.
 
 ---
 

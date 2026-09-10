@@ -4,11 +4,9 @@ import asyncio
 import json
 
 from agents.compactor import (
-    CONTEXT_MD_CAP,
     OUTCOME_CLIP,
     SUMMARY_CLIP,
     compress_for_parent,
-    write_context_md,
 )
 from agents.profile import REPORT_TO_ORCH, TEST_GLOBS, discover_profiles
 from llm.provider import LLMResult
@@ -25,6 +23,7 @@ def test_discover_builtin_profiles():
         tools = registry.get(name).tool_names
         assert "activate_skill" in tools
         assert "read_skill" in tools
+        assert "remember" in tools
     assert "mcp" in registry.get("researcher").tool_names
     assert "mcp" in registry.get("debugger").tool_names
     assert "mcp" not in registry.get("coder").tool_names
@@ -292,17 +291,6 @@ def test_compress_prompt_keeps_facts():
 def test_report_to_orch_is_defined():
     assert "orchestrator" in REPORT_TO_ORCH
     assert "markdown" in REPORT_TO_ORCH
-
-
-def test_write_context_trims(tmp_path):
-    note = "n" * (CONTEXT_MD_CAP + 50)
-    write_context_md(tmp_path, note)
-    text = (tmp_path / ".engine" / "context.md").read_text()
-    assert len(text) <= CONTEXT_MD_CAP
-    write_context_md(tmp_path, "tail-unique")
-    text = (tmp_path / ".engine" / "context.md").read_text()
-    assert "tail-unique" in text
-    assert len(text) <= CONTEXT_MD_CAP
 
 
 def _attempted_required(name="get_diagnostics", path="a.py"):

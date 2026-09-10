@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agents.profile import LSP, NAV, SCAN, SITTER, SKILLS, AgentProfile
+from agents.profile import LSP, MEMORY, NAV, SCAN, SITTER, SKILLS, AgentProfile
 
 ASK_SYSTEM = """You are a read-only codebase Q&A agent. You never edit files and never run shell commands.
 
@@ -14,6 +14,8 @@ How to look:
 - todo_scan only after you know which files matter.
 
 Keep going until the briefing is enough for a coder to edit without re-exploring. Do not guess file contents. If LSP is missing, fall back to sitter tools and read_file. No web or GitHub.
+
+After you understand a source file, remember(section=files, path=..., note=...) with a short factual blurb (purpose, entry points, constraints) — not a transcript.
 """
 
 PROFILE = AgentProfile(
@@ -24,7 +26,7 @@ PROFILE = AgentProfile(
         "Cannot edit files or run commands."
     ),
     system_prompt=ASK_SYSTEM,
-    tool_names=NAV + SITTER + LSP + SCAN + SKILLS,
+    tool_names=NAV + SITTER + LSP + SCAN + SKILLS + MEMORY,
     write_globs=[],
     required_tools=[],
     max_turns=32,

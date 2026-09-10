@@ -7,12 +7,13 @@ from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
-from agents.compactor import compact, looks_like_overflow, read_context_md, validate_history
+from agents.compactor import compact, looks_like_overflow, validate_history
 from agents.hooks import AgentHooks
 from llm.openrouter import OpenRouterLLM
 from llm.provider import Usage
 from runtime.config import EngineConfig
 from runtime.skills.catalog import render_catalog
+from runtime.store.memory import render_memory
 from tools.base import ToolContext
 from tools.registry import ToolRegistry
 
@@ -193,9 +194,9 @@ class AgentLoop:
 
     def _build_messages(self) -> list[dict]:
         system = self._system_prompt
-        notes = read_context_md(self._ctx.workspace)
+        notes = render_memory(self._ctx.workspace)
         if notes:
-            system = f"{system}\n\n## Workspace notes\n{notes}"
+            system = f"{system}\n\n{notes}"
         if self._skills is not None:
             catalog = render_catalog(
                 self._skills,

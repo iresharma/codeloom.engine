@@ -6,6 +6,7 @@ from agents.profile import (
     GH_READ,
     GH_WRITE,
     MCP,
+    MEMORY,
     NAV,
     OPENAPI,
     PKG,
@@ -36,7 +37,7 @@ PROFILE = AgentProfile(
         "do not fetch GitHub HTML. Cannot edit the workspace."
     ),
     system_prompt=RESEARCHER_SYSTEM,
-    tool_names=WEB + NAV + GH_READ + GH_WRITE + PKG + DOCS + SEC + OPENAPI + DEP + SKILLS + MCP,
+    tool_names=WEB + NAV + GH_READ + GH_WRITE + PKG + DOCS + SEC + OPENAPI + DEP + SKILLS + MEMORY + MCP,
     write_globs=[],
     required_tools=[],
     max_turns=32,

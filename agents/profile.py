@@ -11,6 +11,7 @@ SpawnFn = Callable[[str, str], Awaitable[str]]
 
 NAV = ["list_files", "read_file", "search"]
 SKILLS = ["activate_skill", "read_skill"]
+MEMORY = ["remember"]
 MCP = ["mcp"]
 SITTER = ["list_symbols", "find_symbol", "get_node_at", "query_tree", "parse_file"]
 LSP = [

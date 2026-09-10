@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from agents.profile import GH_READ, GIT, LSP, NAV, SCAN, SITTER, SKILLS, AgentProfile
+from agents.profile import (
+    GH_READ,
+    GIT,
+    LSP,
+    MEMORY,
+    NAV,
+    SCAN,
+    SITTER,
+    SKILLS,
+    AgentProfile,
+)
 
 REVIEWER_SYSTEM = """You review the current diff. You do not edit files or run shell commands.
 
@@ -16,7 +26,7 @@ PROFILE = AgentProfile(
         "Cannot edit files or run commands."
     ),
     system_prompt=REVIEWER_SYSTEM,
-    tool_names=NAV + SITTER + LSP + GIT + GH_READ + SCAN + SKILLS,
+    tool_names=NAV + SITTER + LSP + GIT + GH_READ + SCAN + SKILLS + MEMORY,
     write_globs=[],
     required_tools=[],
     max_turns=32,

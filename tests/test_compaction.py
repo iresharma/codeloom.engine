@@ -2,19 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 
 from agents.compactor import (
     CONTEXT_ERROR_MARKERS,
-    CONTEXT_MD_CAP,
     _bounded_transcript,
     compact,
     estimate_tokens,
     looks_like_overflow,
-    read_context_md,
     trim_tool_results,
     validate_history,
-    write_context_md,
 )
 from llm.provider import LLMResult
 from protocol.codec import encode
@@ -112,14 +108,6 @@ def test_context_compacted_clipped():
     event.summary = event.summary[:400]
     assert len(encode(event)) < EVENT_SOFT_LIMIT
     assert approx_size(event) >= 400
-
-
-def test_context_md(tmp_path):
-    assert read_context_md(tmp_path) == ""
-    engine = tmp_path / ".engine"
-    engine.mkdir()
-    (engine / "context.md").write_text("note\n")
-    assert "note" in read_context_md(tmp_path)
 
 
 def test_trim_list_content():
@@ -225,15 +213,6 @@ def test_truncate_when_tail_still_over():
     asyncio.run(run())
 
 
-def test_context_md_reports_encoding_replacement(tmp_path):
-    engine = tmp_path / ".engine"
-    engine.mkdir()
-    (engine / "context.md").write_bytes(b"ok \xff broken")
-    text = read_context_md(tmp_path)
-    assert "encoding errors replaced" in text
-    assert "ok" in text
-
-
 def test_bounded_transcript_keeps_head_and_tail():
     items = [
         {"role": "user", "content": "head-marker"},
@@ -279,27 +258,6 @@ def test_summarize_prompt_keeps_tail():
     assert "head-marker" in payload
     assert "second" in payload
     assert "middle omitted" in payload
-
-
-def test_write_context_concurrent(tmp_path):
-    errors = []
-
-    def write(n):
-        try:
-            write_context_md(tmp_path, f"note-{n}-unique")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(exc)
-
-    threads = [threading.Thread(target=write, args=(i,)) for i in range(20)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    text = (tmp_path / ".engine" / "context.md").read_text()
-    assert not errors
-    for i in range(20):
-        assert f"note-{i}-unique" in text
-    assert len(text) <= CONTEXT_MD_CAP + 80
 
 
 def test_higher_trigger_is_noop_at_eighty_percent():

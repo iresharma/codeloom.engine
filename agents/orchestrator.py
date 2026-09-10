@@ -8,9 +8,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from agents.agent_loop import AgentLoop
-from agents.compactor import AgentResult, write_context_md
+from agents.compactor import AgentResult
 from agents.hooks import AgentHooks
-from agents.profile import SKILLS, ProfileRegistry
+from agents.profile import MEMORY, SKILLS, ProfileRegistry
 from agents.subagent import Subagent
 from runtime.config import CHILD_COMPACT_TRIGGER, CHILD_KEEP_FULL_TOOLS
 from runtime.prompts import PromptTimeout
@@ -52,8 +52,10 @@ For code questions, spawn ask. For edits, spawn coder. For verification, spawn t
 A coder/tester task must include: concrete paths, the change or check required, and any facts already learned (quote ask's report; do not say "see above"). If you do not have those yet, spawn ask first instead of coder.
 
 Answer directly only when:
-- the reply is already in this conversation or workspace notes
+- the reply is already in this conversation or workspace memory (fresh file notes or decision sections)
 - the user asked a meta question (status, what just happened, which agents exist)
+
+If a file note is STALE, spawn ask rather than quoting it. Use remember for lasting engineering, product, or CI/CD decisions — not play-by-play or subagent transcripts.
 
 If a child returns status=incomplete, respawn once with a tighter task or tell the user. If spawn returns "spawn budget exhausted", too many children are already live — stop spawning and report what is running. leftover_questions: ask the user, then respawn if needed.
 
@@ -146,7 +148,7 @@ class Orchestrator(AgentLoop):
         self._skills = kwargs.get("skills")
         self._on_skill_activated = kwargs.get("on_skill_activated")
 
-        kwargs.setdefault("tools", all_tools.subset(SKILLS))
+        kwargs.setdefault("tools", all_tools.subset(SKILLS + MEMORY))
         kwargs.setdefault("system_prompt", ORCH_SYSTEM)
         kwargs.setdefault("role", "orchestrator")
         kwargs.setdefault("concurrent_tools", True)
@@ -154,7 +156,6 @@ class Orchestrator(AgentLoop):
         super().__init__(llm, **kwargs)
         for spec in profiles.as_tools(self.spawn):
             self._tools.register(spec)
-        self._tools.register(_write_context_tool(self._ctx.workspace))
         self._tools.register(_settle_worktree_tool(self))
         self._recover_worktrees()
 
@@ -472,16 +473,6 @@ class Orchestrator(AgentLoop):
         except Exception as exc:  # noqa: BLE001
             result = AgentResult(status="failed", outcome=f"error: {exc}")
         _apply_run_status(result, status, outcome)
-        note = (
-            f"subagent {agent_id} ({profile.name}): {result.status} — "
-            f"{(result.summary or result.outcome)[:200]}"
-        )
-        if worktree:
-            note += f" worktree={worktree} branch={branch}"
-        try:
-            write_context_md(self._ctx.workspace, note)
-        except OSError:
-            pass
         self._shutdown_child_lsp(agent_id)
         owns_worktree = agent_id in self._worktrees
         should_settle = owns_worktree and status != "aborted" and not self._aborting_all
@@ -671,28 +662,6 @@ def batch_nickname(task: str, *, limit: int = 48) -> str:
     if len(text) > limit:
         return text[: limit - 3] + "..."
     return text
-
-
-def _write_context_tool(workspace) -> Tool:
-    async def execute(ctx: ToolContext, note: str) -> str:
-        write_context_md(ctx.workspace if ctx is not None else workspace, note)
-        return "ok"
-
-    return Tool(
-        name="write_context",
-        description="Append a short lasting note to workspace memory (.engine/context.md).",
-        parameters={
-            "type": "object",
-            "properties": {
-                "note": {
-                    "type": "string",
-                    "description": "A short fact or decision to remember.",
-                }
-            },
-            "required": ["note"],
-        },
-        fn=execute,
-    )
 
 
 def _settle_worktree_tool(orch: Orchestrator) -> Tool:

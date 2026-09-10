@@ -11,6 +11,7 @@ from agents.profile import (
     HTTP,
     LSP,
     MCP,
+    MEMORY,
     NAV,
     SCAN,
     SEC,
@@ -49,6 +50,7 @@ PROFILE = AgentProfile(
     + DEP
     + BROWSER
     + SKILLS
+    + MEMORY
     + MCP,
     write_globs=[],
     required_tools=[],

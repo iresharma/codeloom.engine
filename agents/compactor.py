@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -25,11 +24,9 @@ TRIGGER_RATIO = 0.7
 STRUCTURAL_RATIO = 0.8
 SUMMARY_CLIP = 400
 OUTCOME_CLIP = 2000
-CONTEXT_MD_CAP = 4000
 TRANSCRIPT_BOUND = 20_000
 TRIM_KEEP = 400
 TRIM_NOTICE = "\n... (trimmed; re-run the tool if you need this again)"
-_CONTEXT_MD_LOCK = threading.Lock()
 _PATH_KEYS = ("path", "file", "target", "dest")
 _LEFTOVER_LABELS = (
     "leftover_questions:",
@@ -389,28 +386,6 @@ def _last_exchange_start(messages: list[dict]) -> int:
     return max(1, len(messages) - 1)
 
 
-def read_context_md(workspace, cap: int = CONTEXT_MD_CAP) -> str:
-    path = workspace / ".engine" / "context.md"
-    if not path.is_file():
-        return ""
-    raw = path.read_bytes()
-    try:
-        raw.decode("utf-8")
-        replaced = False
-    except UnicodeDecodeError:
-        replaced = True
-    text = raw.decode("utf-8", errors="replace")
-    notes = []
-    if len(text) > cap:
-        text = text[:cap]
-        notes.append("truncated")
-    if replaced:
-        notes.append("encoding errors replaced")
-    if notes:
-        text = text + "\n... (" + "; ".join(notes) + ")"
-    return text
-
-
 @dataclass
 class AgentResult:
     status: str
@@ -434,25 +409,6 @@ class AgentResult:
         if self.missing_checks:
             lines.append("missing_checks: " + ", ".join(self.missing_checks))
         return "\n".join(lines)
-
-
-def write_context_md(workspace, note: str, cap: int = CONTEXT_MD_CAP) -> None:
-    path = workspace / ".engine" / "context.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _CONTEXT_MD_LOCK:
-        existing = ""
-        if path.is_file():
-            existing = path.read_text(encoding="utf-8", errors="replace")
-        body = existing
-        if body and not body.endswith("\n"):
-            body += "\n"
-        body += note.rstrip() + "\n"
-        if len(body) > cap:
-            body = body[-cap:]
-            nl = body.find("\n")
-            if 0 <= nl < len(body) - 1:
-                body = body[nl + 1 :]
-        path.write_text(body, encoding="utf-8")
 
 
 def _tools_from_history(messages: list[dict]) -> set[str]:

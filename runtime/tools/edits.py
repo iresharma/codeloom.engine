@@ -19,6 +19,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from runtime.store import edits as journal
+from runtime.store.memory import touch
 from runtime.tools.fileid import (
     FileSource,
     guard_write_path,
@@ -559,6 +560,10 @@ def _commit(
         )
     if ctx.files is not None:
         ctx.files.mark(prepared.src.rel, prepared.after_sha)
+    try:
+        touch(ctx.workspace, prepared.src.rel, prepared.after_sha, "edit")
+    except OSError:
+        pass
     return ApplyResult(
         ok=True,
         message="",

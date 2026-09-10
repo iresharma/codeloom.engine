@@ -5,6 +5,7 @@ from agents.profile import (
     ENV,
     GIT,
     LSP,
+    MEMORY,
     NAV,
     SCAN,
     SHELL,
@@ -26,6 +27,8 @@ Prefer str_replace with enough context that the match is unique. Use replace_lin
 You are not done until you have called get_diagnostics on files you changed. Prefer also running compile or targeted tests via run_command; a non-zero exit is information, not a failure. Commands have no TTY. Do not use run_command to explore the tree. Use tldr for CLI flags and runtime_info if versions matter. todo_scan for leftover markers.
 
 Do not spawn other agents. Do not merge, push, or open a pull request — after you finish the user is asked to merge this worktree or open a PR. When finished, report paths changed, what you did in each, and checks run.
+
+After you change a file, remember(section=files, path=..., note=...) with what the file now does, entry points, and constraints — not a transcript.
 """
 
 PROFILE = AgentProfile(
@@ -36,7 +39,7 @@ PROFILE = AgentProfile(
         "Must call get_diagnostics before finishing. Not for repo surveys."
     ),
     system_prompt=CODER_SYSTEM,
-    tool_names=NAV + SITTER + LSP + EDIT + SHELL + GIT + TLDR + ENV + SCAN + SKILLS,
+    tool_names=NAV + SITTER + LSP + EDIT + SHELL + GIT + TLDR + ENV + SCAN + SKILLS + MEMORY,
     write_globs=None,
     required_tools=["get_diagnostics"],
     max_turns=32,

@@ -4,6 +4,7 @@ from agents.profile import (
     EDIT,
     ENV,
     HTTP,
+    MEMORY,
     NAV,
     SHELL,
     SKILLS,
@@ -28,7 +29,7 @@ PROFILE = AgentProfile(
         "Cannot edit production code. Must run_command at least once."
     ),
     system_prompt=TESTER_SYSTEM,
-    tool_names=NAV + EDIT + SHELL + HTTP + TLDR + ENV + SKILLS,
+    tool_names=NAV + EDIT + SHELL + HTTP + TLDR + ENV + SKILLS + MEMORY,
     write_globs=list(TEST_GLOBS),
     required_tools=["run_command"],
     max_turns=32,

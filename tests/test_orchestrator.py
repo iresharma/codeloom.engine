@@ -40,7 +40,7 @@ def _tool_names(tools) -> set[str]:
 
 def _is_orch(tools) -> bool:
     names = _tool_names(tools)
-    return bool(names & _PERSONALITIES) or "write_context" in names or "settle_worktree" in names
+    return bool(names & _PERSONALITIES) or "settle_worktree" in names
 
 
 def _bind(tmp_path, provider, **config_kw):
@@ -147,7 +147,7 @@ def test_orch_has_no_read_tools(tmp_path):
         session = await _bind(tmp_path, FakeProvider())()
         names = session._loop._tools.names()
         assert "ask" in names
-        assert "write_context" in names
+        assert "remember" in names
         assert "settle_worktree" in names
         assert "list_files" not in names
         assert "read_file" not in names
