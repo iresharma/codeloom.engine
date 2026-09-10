@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 from runtime.tools import httpx as http_impl
-from runtime.tools.httpx import http_request, openapi_ops
+from runtime.tools.httpx import blocked_host, http_request, openapi_ops
 from tools import http as http_tool
 from tools.http import http_request as http_request_tool
 
@@ -13,6 +13,19 @@ def test_http_request_rejects_file():
     result = http_request("GET", "file:///etc/passwd")
     assert result.startswith("error:")
     assert "http" in result
+
+
+def test_http_request_blocks_metadata():
+    result = http_request("GET", "http://169.254.169.254/latest/meta-data")
+    assert result.startswith("error: blocked host")
+    result = http_request("GET", "http://metadata.google.internal/")
+    assert result.startswith("error: blocked host")
+
+
+def test_blocked_host_allows_loopback():
+    assert not blocked_host("127.0.0.1")
+    assert not blocked_host("localhost:8000")
+    assert blocked_host("169.254.169.254:80")
 
 
 def test_http_request_get(monkeypatch):

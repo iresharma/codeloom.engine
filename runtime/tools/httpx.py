@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,8 +13,60 @@ METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
 SAFE_METHODS = {"GET", "HEAD"}
 OPENAPI_CAP = 80
 BODY_CAP = 50_000
+BLOCKED_HOSTS = {
+    "metadata.google.internal",
+    "metadata.gce.internal",
+    "169.254.169.254",
+}
 
-urlopen = urllib.request.urlopen
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlparse(newurl)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise urllib.error.URLError("redirect must be http or https")
+        if blocked_host(parsed.netloc):
+            raise urllib.error.URLError("blocked host")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def urlopen(request, timeout=20.0):
+    opener = urllib.request.build_opener(_SafeRedirect)
+    return opener.open(request, timeout=timeout)
+
+
+def blocked_host(netloc: str) -> bool:
+    """True for cloud metadata / link-local. Loopback and LAN stay allowed."""
+    host = _hostname(netloc)
+    if not host or host in BLOCKED_HOSTS:
+        return bool(host)
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except socket.gaierror:
+            return False
+        return any(_ip_blocked(ipaddress.ip_address(info[4][0])) for info in infos)
+    return _ip_blocked(ip)
+
+
+def _hostname(netloc: str) -> str:
+    host = (netloc or "").strip()
+    if "@" in host:
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end].lower() if end != -1 else host.lower()
+    if host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    return host.lower()
+
+
+def _ip_blocked(ip: ipaddress._BaseAddress) -> bool:
+    if ip.is_loopback:
+        return False
+    return bool(ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved)
 
 
 def raw_request(
@@ -28,6 +82,8 @@ def raw_request(
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return 0, {}, "", "error: url must be http or https"
+    if blocked_host(parsed.netloc):
+        return 0, {}, "", "error: blocked host"
     method = (method or "GET").upper()
     if method not in METHODS:
         return 0, {}, "", f"error: method must be one of {', '.join(METHODS)}"

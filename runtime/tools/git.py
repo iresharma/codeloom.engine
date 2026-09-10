@@ -249,7 +249,11 @@ def git_log(workspace: Path, *, max_count: int = 20, path: str = "") -> str:
     workspace = Path(workspace).resolve()
     if not _is_repo(workspace):
         return "not a git repository"
-    take = max(1, min(int(max_count or 20), LOG_MAX))
+    try:
+        requested = int(max_count)
+    except (TypeError, ValueError):
+        requested = 20
+    take = max(1, min(requested, LOG_MAX))
     args = ["log", "--oneline", f"-n{take}"]
     if path.strip():
         try:
@@ -274,6 +278,8 @@ def git_show(workspace: Path, rev: str) -> str:
     if result.returncode != 0:
         return f"error: {(result.stderr or result.stdout or 'git show failed').strip()}"
     patch = exec_cmd(workspace, ["git", "show", "--format=", rev], timeout=20)
+    if patch.returncode != 0:
+        return f"error: {(patch.stderr or patch.stdout or 'git show failed').strip()}"
     text = (result.stdout or "") + ("\n" + (patch.stdout or "") if patch.stdout else "")
     return _clip(text.strip() or "(empty)", SHOW_CAP)
 

@@ -117,3 +117,22 @@ def test_require_approval_always_without_ask():
         )
 
     assert asyncio.run(run()) == "error: user denied"
+
+
+def test_require_approval_unknown_prompts():
+    called = []
+
+    async def ask(question, kind="text"):
+        called.append(question)
+        return "yes"
+
+    async def run():
+        return await require_approval(
+            SimpleNamespace(
+                config=SimpleNamespace(exec_approval="nver"), ask_user=ask
+            ),
+            "Allow?",
+        )
+
+    assert asyncio.run(run()) == ""
+    assert called == ["Allow?"]

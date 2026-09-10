@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
+from runtime.tools import git as git_impl
 from runtime.tools.git import git_blame, git_log, git_range, git_show
 
 
@@ -54,3 +56,32 @@ def test_git_blame_outside_workspace(tmp_path):
     _init_git(tmp_path)
     result = git_blame(tmp_path, "../outside.py")
     assert result.startswith("error:")
+
+
+def test_git_log_zero_clamps_to_one(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_exec(workspace, args, timeout=20):
+        seen.append(args)
+        return SimpleNamespace(returncode=0, stdout="abc first\n", stderr="")
+
+    monkeypatch.setattr(git_impl, "exec_cmd", fake_exec)
+    monkeypatch.setattr(git_impl, "_is_repo", lambda workspace: True)
+    git_log(tmp_path, max_count=0)
+    assert any(arg == "-n1" for args in seen for arg in args)
+
+
+def test_git_show_reports_patch_failure(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_exec(workspace, args, timeout=20):
+        calls.append(args)
+        if "--format=" in args:
+            return SimpleNamespace(returncode=1, stdout="", stderr="patch failed")
+        return SimpleNamespace(returncode=0, stdout="stat\n", stderr="")
+
+    monkeypatch.setattr(git_impl, "exec_cmd", fake_exec)
+    monkeypatch.setattr(git_impl, "_is_repo", lambda workspace: True)
+    result = git_show(tmp_path, "HEAD")
+    assert result.startswith("error:")
+    assert "patch failed" in result

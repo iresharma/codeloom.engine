@@ -18,8 +18,7 @@ async def require_approval(ctx, question: str) -> str:
         if approval == "always":
             return "error: user denied"
         return ""
-    if approval not in {"always", "auto"}:
-        return ""
+    # Unknown values prompt (same as auto). Do not fail open.
     answer = await ask(question, kind="confirm")
     if str(answer).strip().lower() not in {"yes", "y"}:
         return "error: user denied"
