@@ -291,3 +291,63 @@ def test_snapshot_without_replay_is_base_only(tmp_path):
         assert not any(isinstance(item, ChatHistoryComplete) for item in events)
 
     asyncio.run(run())
+
+
+def test_mcp_and_skill_protocol_round_trip():
+    from protocol.commands import (
+        ActivateSkill,
+        CompleteMcpAuth,
+        ReloadIntegrations,
+        SetMcpEnabled,
+    )
+    from protocol.events import (
+        McpAuthRequired,
+        McpServersUpdated,
+        SkillActivated,
+        SkillCatalogUpdated,
+    )
+    from protocol.redact import redact_command
+    from protocol.snapshot import EngineSnapshot, GitState, McpServerRow, SkillRow
+
+    assert isinstance(decode_command(encode(ReloadIntegrations())), ReloadIntegrations)
+    enabled = decode_command(encode(SetMcpEnabled(name="gh", enabled=False)))
+    assert enabled.name == "gh" and enabled.enabled is False
+    assert decode_command(encode(ActivateSkill(name="docs"))).name == "docs"
+    auth = CompleteMcpAuth(server="slack", token="sekrit")
+    parsed = decode_command(encode(auth))
+    assert parsed.token == "sekrit"
+    assert redact_command(auth)["token"] == "<redacted>"
+    servers = decode_event(
+        encode(
+            McpServersUpdated(
+                servers=[McpServerRow(name="gh", status="ready", tool_count=2)]
+            )
+        )
+    )
+    assert servers.servers[0].name == "gh"
+    skills = decode_event(
+        encode(
+            SkillCatalogUpdated(
+                skills=[SkillRow(name="docs", description="d", source="engine", auto=True)]
+            )
+        )
+    )
+    assert skills.skills[0].name == "docs"
+    assert decode_event(encode(SkillActivated(name="docs", agent_id=""))).name == "docs"
+    req = decode_event(
+        encode(McpAuthRequired(server="slack", url="https://x", prompt_id="p"))
+    )
+    assert req.prompt_id == "p"
+    snap = EngineSnapshot.from_json(
+        {
+            "session_id": "s",
+            "workspace": "/tmp",
+            "messages": [],
+            "ended": False,
+            "open_files": [],
+            "file_tree": [],
+            "git": GitState.empty().to_json(),
+        }
+    )
+    assert snap.mcp_servers == []
+    assert snap.skills == []

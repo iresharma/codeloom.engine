@@ -33,7 +33,11 @@ from protocol.events import (
     FileContent,
     FileEdited,
     FileTreeUpdated,
+    McpAuthRequired,
+    McpServersUpdated,
     SessionEnded,
+    SkillActivated,
+    SkillCatalogUpdated,
     SnapshotReady,
     StatsUpdated,
     ToolCallFinished,
@@ -54,6 +58,11 @@ from runtime.subscriber import EVENT_SOFT_LIMIT, Subscriber, clip_text
 from runtime.tools.fs import WorkspacePathError, list_tree, read_text
 from runtime.tools.git import read_state as read_git
 from runtime.tools.lsp import LSPManager, LSPTimeoutError
+from runtime.mcp.config import load_mcp_config, load_trust, save_trust
+from runtime.mcp.manager import McpManager
+from runtime.mcp.tokens import apply_tokens, load_tokens, save_token
+from runtime.skills.catalog import SkillCatalog
+from runtime.skills.discover import discover_skills
 from runtime.tools.tracker import FileTracker
 from tools.registry import discover_tools
 
@@ -86,6 +95,13 @@ class EngineSession:
         self._stream_id = ""
         self._streamed_ids: set[str] = set()
         self.language: LanguageInfo = detect_language(self._workspace)
+        self._mcp: McpManager | None = None
+        self._skills: SkillCatalog | None = None
+        self._mcp_connect = None
+        self._mcp_backoff = (2.0, 4.0, 8.0)
+        self._mcp_cool_s = 30.0
+        self._auth_tasks: list[asyncio.Task] = []
+        self._registry = None
         try:
             self._llm = OpenRouterLLM.from_env(self._workspace, config=self._config)
         except RuntimeError:
@@ -128,6 +144,10 @@ class EngineSession:
             language=self.language.name,
             language_supported=self.language.supported,
         )
+        if self._mcp is not None:
+            snap.mcp_servers = self._mcp.rows()
+        if self._skills is not None:
+            snap.skills = self._skills.rows()
         return snap
 
     def shutdown(self) -> None:
@@ -141,11 +161,19 @@ class EngineSession:
             await asyncio.gather(task, return_exceptions=True)
         if isinstance(self._loop, Orchestrator):
             self._loop.abort_all_children()
-            self._prompts.cancel_all()
             self._kill_live_procs()
             await self._loop.wait_children()
             await self._loop.wait_settle()
             self._loop.cleanup_worktrees()
+        self._prompts.cancel_all()
+        for task in list(self._auth_tasks):
+            task.cancel()
+        if self._auth_tasks:
+            await asyncio.gather(*self._auth_tasks, return_exceptions=True)
+        self._auth_tasks.clear()
+        if self._mcp is not None:
+            await self._mcp.aclose()
+            self._mcp = None
         self.close_session()
 
     def close_session(self) -> bool:
@@ -165,6 +193,12 @@ class EngineSession:
         self._pending_user = []
         self._inbox = []
         self._stop_lsp()
+        mcp = self._mcp
+        self._mcp = None
+        if mcp is not None:
+            with suppress(RuntimeError):
+                loop = asyncio.get_running_loop()
+                loop.create_task(mcp.aclose())
         return True
 
     def emit_error(self, message: str) -> None:
@@ -173,6 +207,8 @@ class EngineSession:
     def start_turn(self, text: str) -> None:
         self._add_message(role="user", text=text)
         self._persist()
+        if self._loop is not None:
+            self._loop.set_catalog_query(text)
         if self._turn_task is not None and not self._turn_task.done():
             self._pending_user.append(text)
             return
@@ -268,10 +304,7 @@ class EngineSession:
             self._write_lock = asyncio.Lock()
         return self._write_lock
 
-    def _bind_loop(self) -> None:
-        if self._llm is None:
-            self._loop = None
-            return
+    async def _bind_loop(self) -> None:
         registry = discover_tools()
         for message in registry.errors:
             self._emit(ErrorOccurred(message=message))
@@ -280,6 +313,13 @@ class EngineSession:
             self._emit(ErrorOccurred(message=message))
         for warning in self._config.warnings:
             self._emit(WarningOccurred(message=warning))
+        self._skills = SkillCatalog(discover_skills(self._workspace))
+        self._emit(SkillCatalogUpdated(skills=self._skills.rows()))
+        await self._start_mcp(registry)
+        self._registry = registry
+        if self._llm is None:
+            self._loop = None
+            return
         self._start_lsp()
         self._files = FileTracker()
         self._state.agents = []
@@ -316,8 +356,176 @@ class EngineSession:
             ask_user=self._prompts.ask,
             on_output=self._on_command_output,
             on_proc=self._on_proc,
+            skills=self._skills,
+            on_skill_activated=self._on_skill_activated,
         )
         self._loop.hydrate(self._state.messages)
+
+    async def _start_mcp(self, registry) -> None:
+        if self._mcp is not None:
+            await self._mcp.aclose()
+        trust = load_trust(self._workspace)
+        configs, warnings, untrusted = load_mcp_config(self._workspace)
+        for message in warnings:
+            self._emit(WarningOccurred(message=message))
+        if untrusted:
+            names = ", ".join(untrusted)
+            self._emit(
+                WarningOccurred(
+                    message=f"imported MCP servers from .cursor/mcp.json: {names}"
+                )
+            )
+            answer = await self._prompts.ask(
+                f"Start imported Cursor MCP servers ({names})?",
+                kind="confirm",
+                choices=["yes", "no"],
+                default="no",
+            )
+            if str(answer).strip().lower() in {"yes", "y"}:
+                trusted = list(dict.fromkeys(list(trust.get("cursor") or []) + untrusted))
+                save_trust(self._workspace, trusted, trust.get("refused") or [])
+                configs, _, _ = load_mcp_config(
+                    self._workspace, trust_cursor=trusted
+                )
+            else:
+                refused = list(dict.fromkeys(list(trust.get("refused") or []) + untrusted))
+                save_trust(self._workspace, list(trust.get("cursor") or []), refused)
+        apply_tokens(configs, load_tokens(self._workspace))
+        manager = McpManager(
+            self._workspace,
+            connect=self._mcp_connect,
+            backoff_s=self._mcp_backoff,
+            cool_s=self._mcp_cool_s,
+            ask_user=self._prompts.ask,
+            on_update=lambda rows: self._emit(McpServersUpdated(servers=rows)),
+            on_auth=self._on_mcp_auth,
+            on_warning=lambda message: self._emit(WarningOccurred(message=message)),
+            approval=self._config.exec_approval,
+        )
+        self._mcp = manager
+        await manager.start(configs)
+        self._install_mcp_tools(registry)
+
+    def _install_mcp_tools(self, registry) -> None:
+        if registry is None or self._mcp is None:
+            return
+        registry.drop_family("mcp")
+        for spec in self._mcp.tools():
+            registry.register(spec)
+        for message in self._mcp.warnings:
+            if "collision" in message:
+                self._emit(WarningOccurred(message=message))
+
+    async def _on_mcp_auth(self, server: str, url: str, first: bool, token_env: str | None):
+        cfg = None
+        if self._mcp is not None and server in self._mcp.servers:
+            cfg = self._mcp.servers[server].config
+            token_env = token_env or cfg.token_env
+        if not token_env:
+            self._emit(McpAuthRequired(server=server, url=url or "", prompt_id=""))
+            self._emit(
+                WarningOccurred(
+                    message=(
+                        f"add tokenEnv to mcp.json for {server} or set the secret "
+                        "in env.sh and ReloadIntegrations"
+                    )
+                )
+            )
+            return
+        question = (
+            f"Open {url} and paste the token for MCP server {server}"
+            if url
+            else (
+                f"Paste a token for MCP server {server} (CompleteMcpAuth). "
+                + ("never authed" if first else "token rejected; CompleteMcpAuth")
+            )
+        )
+
+        def _created(prompt_id: str) -> None:
+            self._emit(
+                McpAuthRequired(server=server, url=url or "", prompt_id=prompt_id)
+            )
+
+        async def _ask() -> None:
+            token = await self._prompts.ask(
+                question,
+                kind="mcp_auth",
+                on_created=_created,
+            )
+            await self.complete_mcp_auth(server, token)
+
+        try:
+            loop = asyncio.get_running_loop()
+            self._auth_tasks.append(loop.create_task(_ask()))
+        except RuntimeError:
+            self._emit(McpAuthRequired(server=server, url=url or "", prompt_id=""))
+
+    def _on_skill_activated(self, name: str, agent_id: str) -> None:
+        self._emit(SkillActivated(name=name, agent_id=agent_id or ""))
+
+    async def reload_integrations(self) -> None:
+        if self._mcp is not None:
+            self._mcp.clear_cooling()
+            await self._mcp.stop()
+        registry = self._registry
+        if registry is None:
+            registry = discover_tools()
+            self._registry = registry
+        self._skills = SkillCatalog(discover_skills(self._workspace))
+        self._emit(SkillCatalogUpdated(skills=self._skills.rows()))
+        if self._loop is not None:
+            self._loop._skills = self._skills
+            self._loop._ctx.skills = self._skills
+        await self._start_mcp(registry)
+        if isinstance(self._loop, Orchestrator):
+            self._loop._all_tools = registry
+
+    async def complete_mcp_auth(self, server: str, token: str) -> None:
+        token_env = ""
+        if self._mcp is not None and server in self._mcp.servers:
+            token_env = self._mcp.servers[server].config.token_env or ""
+        if not token_env:
+            self._emit(
+                WarningOccurred(
+                    message=f"add tokenEnv to mcp.json for {server} before pasting a token"
+                )
+            )
+            return
+        save_token(self._workspace, server, token, token_env)
+        if self._mcp is not None and server in self._mcp.servers:
+            self._mcp.servers[server].config.env[token_env] = token
+            self._mcp.servers[server].config.token_env = token_env
+            await self._mcp.restart(server)
+            self._install_mcp_tools(self._registry)
+            self._emit(McpServersUpdated(servers=self._mcp.rows()))
+
+    def set_mcp_enabled(self, name: str, enabled: bool) -> None:
+        import json
+
+        path = self._workspace / ".engine" / "mcp.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                data = {}
+        servers = data.setdefault("mcpServers", {})
+        entry = servers.get(name) or {}
+        if not isinstance(entry, dict):
+            entry = {}
+        entry["enabled"] = bool(enabled)
+        servers[name] = entry
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        if self._mcp is not None and name in self._mcp.servers:
+            self._mcp.servers[name].config.enabled = bool(enabled)
+
+    def unlock_skill(self, name: str) -> bool:
+        if self._loop is None or self._skills is None:
+            return False
+        if self._skills.get(name) is None:
+            return False
+        return self._loop.unlock_skill(name)
 
     def _hooks_for(self, agent_id: str, *, stream_chat: bool) -> AgentHooks:
         return AgentHooks(

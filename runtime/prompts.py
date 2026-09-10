@@ -37,6 +37,7 @@ class PromptBroker:
         timeout: float = 300.0,
         agent_id: str = "",
         profile: str = "",
+        on_created=None,
     ) -> str:
         async with self._lock():
             return await self._ask_one(
@@ -47,6 +48,7 @@ class PromptBroker:
                 timeout=timeout,
                 agent_id=agent_id,
                 profile=profile,
+                on_created=on_created,
             )
 
     def _lock(self) -> asyncio.Lock:
@@ -64,8 +66,11 @@ class PromptBroker:
         timeout: float,
         agent_id: str,
         profile: str,
+        on_created=None,
     ) -> str:
         prompt_id = uuid4().hex
+        if on_created is not None:
+            on_created(prompt_id)
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[prompt_id] = future
         tagged = question

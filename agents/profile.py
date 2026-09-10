@@ -10,6 +10,8 @@ from tools.base import Tool
 SpawnFn = Callable[[str, str], Awaitable[str]]
 
 NAV = ["list_files", "read_file", "search"]
+SKILLS = ["activate_skill", "read_skill"]
+MCP = ["mcp"]
 SITTER = ["list_symbols", "find_symbol", "get_node_at", "query_tree", "parse_file"]
 LSP = [
     "goto_definition",

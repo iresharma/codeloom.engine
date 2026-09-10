@@ -2,13 +2,16 @@ from protocol.codec import ProtocolError, decode_command, decode_event, encode
 from protocol.commands import COMMANDS, Command
 from protocol.events import EVENTS, Event
 from protocol.message import ProtocolMessage
+from protocol.redact import redact_command
 from protocol.snapshot import (
     ChatMessage,
     EngineSnapshot,
     FileTreeNode,
     GitState,
+    McpServerRow,
     PendingPrompt,
     SessionSummary,
+    SkillRow,
     Stats,
 )
 
@@ -24,7 +27,10 @@ __all__ = [
     "Event",
     "FileTreeNode",
     "GitState",
+    "McpServerRow",
     "PendingPrompt",
+    "SkillRow",
+    "redact_command",
     "ProtocolError",
     "ProtocolMessage",
     "SessionSummary",

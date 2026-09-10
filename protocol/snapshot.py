@@ -278,6 +278,61 @@ class PendingPrompt:
 
 
 @dataclass
+class McpServerRow:
+    name: str
+    status: str
+    transport: str = "stdio"
+    tool_count: int = 0
+    error: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "name": self.name,
+            "status": self.status,
+            "transport": self.transport,
+            "tool_count": self.tool_count,
+        }
+        if self.error:
+            payload["error"] = self.error
+        return payload
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> McpServerRow:
+        return cls(
+            name=data.get("name") or "",
+            status=data.get("status") or "error",
+            transport=data.get("transport") or "stdio",
+            tool_count=int(data.get("tool_count") or 0),
+            error=data.get("error") or "",
+        )
+
+
+@dataclass
+class SkillRow:
+    name: str
+    description: str
+    source: str
+    auto: bool = True
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "source": self.source,
+            "auto": self.auto,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> SkillRow:
+        return cls(
+            name=data.get("name") or "",
+            description=data.get("description") or "",
+            source=data.get("source") or "",
+            auto=bool(data.get("auto", True)),
+        )
+
+
+@dataclass
 class EngineSnapshot:
     session_id: str
     workspace: str
@@ -293,6 +348,8 @@ class EngineSnapshot:
     stats: Stats | None = None
     pending_prompt: PendingPrompt | None = None
     agents: list[AgentRow] | None = None
+    mcp_servers: list[McpServerRow] | None = None
+    skills: list[SkillRow] | None = None
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -310,6 +367,8 @@ class EngineSnapshot:
             "file_tree_count": self.file_tree_count,
             "stats": (self.stats or Stats()).to_json(),
             "agents": [row.to_json() for row in (self.agents or [])],
+            "mcp_servers": [row.to_json() for row in (self.mcp_servers or [])],
+            "skills": [row.to_json() for row in (self.skills or [])],
         }
         if self.pending_prompt is not None:
             payload["pending_prompt"] = self.pending_prompt.to_json()
@@ -341,5 +400,13 @@ class EngineSnapshot:
             agents=[
                 item if isinstance(item, AgentRow) else AgentRow.from_json(item)
                 for item in data.get("agents") or []
+            ],
+            mcp_servers=[
+                item if isinstance(item, McpServerRow) else McpServerRow.from_json(item)
+                for item in data.get("mcp_servers") or []
+            ],
+            skills=[
+                item if isinstance(item, SkillRow) else SkillRow.from_json(item)
+                for item in data.get("skills") or []
             ],
         )

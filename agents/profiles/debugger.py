@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agents.profile import BROWSER, GIT, LSP, NAV, SHELL, SITTER, AgentProfile
+from agents.profile import BROWSER, GIT, LSP, MCP, NAV, SHELL, SITTER, SKILLS, AgentProfile
 
 DEBUGGER_SYSTEM = """You find bugs. You do not fix them. Do not edit files.
 
@@ -16,7 +16,7 @@ PROFILE = AgentProfile(
         "Does not edit files."
     ),
     system_prompt=DEBUGGER_SYSTEM,
-    tool_names=NAV + SITTER + LSP + SHELL + GIT + BROWSER,
+    tool_names=NAV + SITTER + LSP + SHELL + GIT + BROWSER + SKILLS + MCP,
     write_globs=[],
     required_tools=[],
     max_turns=16,

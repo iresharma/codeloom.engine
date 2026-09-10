@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agents.profile import LSP, NAV, SITTER, AgentProfile
+from agents.profile import LSP, NAV, SITTER, SKILLS, AgentProfile
 
 ASK_SYSTEM = """You are a read-only codebase Q&A agent. You answer questions about this repository. You never edit files and you never run shell commands.
 
@@ -25,7 +25,7 @@ PROFILE = AgentProfile(
         "Cannot edit files or run commands."
     ),
     system_prompt=ASK_SYSTEM,
-    tool_names=NAV + SITTER + LSP,
+    tool_names=NAV + SITTER + LSP + SKILLS,
     write_globs=[],
     required_tools=[],
     max_turns=12,

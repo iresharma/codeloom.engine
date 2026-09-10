@@ -82,3 +82,88 @@ def tool_delta(index, *, call_id="", name="", arguments=""):
         id=call_id or None,
         function=SimpleNamespace(name=name or None, arguments=arguments),
     )
+
+
+class FakeMcpSession:
+    def __init__(
+        self,
+        *,
+        tools=None,
+        resources=None,
+        fail_init=None,
+        stdout="",
+        stderr="",
+        dead=False,
+        call_error=None,
+        call_result=None,
+        elicit="",
+    ):
+        self.tools = list(tools or [{"name": "search", "description": "search"}])
+        self.resources = list(resources or [])
+        self.fail_init = fail_init
+        self.stdout = stdout
+        self.stderr = stderr
+        self.dead = dead
+        self.call_error = call_error
+        self.call_result = call_result
+        self.elicit = elicit
+        self.closed = False
+        self.calls = []
+
+    async def initialize(self):
+        if self.fail_init is not None:
+            if isinstance(self.fail_init, BaseException):
+                raise self.fail_init
+            raise RuntimeError(str(self.fail_init))
+
+    async def list_tools(self):
+        return SimpleNamespace(tools=self.tools)
+
+    async def list_resources(self):
+        return SimpleNamespace(resources=self.resources)
+
+    async def read_resource(self, uri):
+        if self.dead:
+            raise ConnectionError("disconnected")
+        return SimpleNamespace(content=[{"type": "text", "text": f"resource {uri}"}])
+
+    async def call_tool(self, name, arguments=None):
+        self.calls.append((name, arguments or {}))
+        if self.elicit:
+            callback = getattr(self, "_engine_elicit", None) or getattr(
+                self, "elicitation_callback", None
+            )
+            if callback is not None:
+                await callback(None, SimpleNamespace(message=self.elicit))
+        if self.dead:
+            raise ConnectionError("disconnected")
+        if self.call_error is not None:
+            if isinstance(self.call_error, BaseException):
+                raise self.call_error
+            raise RuntimeError(str(self.call_error))
+        if self.call_result is not None:
+            return self.call_result
+        return SimpleNamespace(content=[{"type": "text", "text": f"ok {name}"}])
+
+    async def aclose(self):
+        self.closed = True
+
+
+def fake_mcp_connect(factory=None, *, per_name=None):
+    calls: list[str] = []
+
+    async def connect(cfg):
+        calls.append(cfg.name)
+        if per_name and cfg.name in per_name:
+            item = per_name[cfg.name]
+            if isinstance(item, list):
+                return item.pop(0)
+            if callable(item):
+                return item()
+            return item
+        if factory is not None:
+            return factory()
+        return FakeMcpSession()
+
+    connect.calls = calls
+    return connect

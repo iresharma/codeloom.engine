@@ -446,6 +446,17 @@ can edit a tool and pick it up by restarting the session — no server restart.
 | `web_fetch` | HTTP GET, HTML stripped, 50k cap. http/https only. |
 | `web_search` | Brave Search if `BRAVE_API_KEY` is set; otherwise an error. |
 
+**Skills.** Every personality (and the orch) can load a `SKILL.md` body.
+
+| Tool | Purpose |
+|---|---|
+| `activate_skill` | Load one skill body into this agent. |
+| `read_skill` | Read a file inside that skill directory only. |
+
+**MCP.** Live tools from configured servers, namespaced `mcp_{server}_{tool}`.
+Default profiles: `researcher`, `debugger`. Also `mcp_list_resources` and
+`mcp_read_resource` (`file://` rejected).
+
 **Browser.** Used by the `debugger` personality. Requires Playwright; otherwise the tools return `error: browser tools unavailable`.
 
 | Tool | Purpose |
@@ -895,7 +906,7 @@ tools/                  LLM-facing tool definitions — thin wrappers over runti
   read_file.py list_files.py search.py sitter.py lsp.py
   edit_file.py edit_symbol.py apply_patch.py undo.py
   shell.py              run_command
-  git.py web.py browser.py
+  git.py web.py browser.py skills.py
 
 agents/
   agent_loop.py         shared tool-calling loop
@@ -906,11 +917,14 @@ agents/
   hooks.py              AgentHooks callbacks
   compactor.py          mid-loop compact + compress_for_parent + context.md
 
+runtime/skills/         SKILL.md discovery + lexical catalog
+runtime/mcp/            mcp.json client, tool bridge, token store
+
 llm/
   provider.py           LLMProvider Protocol, Usage, LLMResult, ToolCall
   openrouter.py         OpenRouterLLM streaming client, env.sh loading
 
-tests/                  18 modules (write path + runtime foundation)
+tests/                  unit tests (write path, runtime, skills, MCP fakes)
 ```
 
 The split between `runtime/tools/` and `tools/` is deliberate.
@@ -960,6 +974,13 @@ session. See [Writing a new tool](#writing-a-new-tool).
 **A new subagent personality.** Drop a module in `agents/profiles/` that
 exports `PROFILE = AgentProfile(...)`. The orch sees it as a tool. See
 [docs/adding-a-profile.md](docs/adding-a-profile.md).
+
+**A skill.** Drop `{name}/SKILL.md` under `.engine/skills/` (or `.cursor/skills/`).
+See [docs/adding-a-skill.md](docs/adding-a-skill.md).
+
+**An MCP server.** Add an entry to `.engine/mcp.json`. The engine is the MCP
+client; agents see `mcp_{server}_{tool}`. See
+[docs/adding-an-mcp-server.md](docs/adding-an-mcp-server.md).
 
 **A new command.** Add a `@command` dataclass to `protocol/commands.py`, write
 a `@handles(YourCommand)` function in `runtime/commands/`, and import it from

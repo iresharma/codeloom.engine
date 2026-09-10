@@ -13,6 +13,14 @@ def test_discover_builtin_profiles():
     registry = discover_profiles()
     assert {"ask", "coder", "tester", "researcher", "debugger", "reviewer"} <= registry.names()
     assert not registry.errors
+    for name in registry.names():
+        tools = registry.get(name).tool_names
+        assert "activate_skill" in tools
+        assert "read_skill" in tools
+    assert "mcp" in registry.get("researcher").tool_names
+    assert "mcp" in registry.get("debugger").tool_names
+    assert "mcp" not in registry.get("coder").tool_names
+    assert "mcp" not in registry.get("ask").tool_names
 
 
 def test_duplicate_profile_recorded():

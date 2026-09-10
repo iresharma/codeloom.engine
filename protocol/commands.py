@@ -87,3 +87,29 @@ class AnswerPrompt(ProtocolMessage):
 @dataclass
 class Shutdown(ProtocolMessage):
     pass
+
+
+@command
+@dataclass
+class ReloadIntegrations(ProtocolMessage):
+    pass
+
+
+@command
+@dataclass
+class SetMcpEnabled(ProtocolMessage):
+    name: str
+    enabled: bool
+
+
+@command
+@dataclass
+class ActivateSkill(ProtocolMessage):
+    name: str
+
+
+@command
+@dataclass
+class CompleteMcpAuth(ProtocolMessage):
+    server: str
+    token: str

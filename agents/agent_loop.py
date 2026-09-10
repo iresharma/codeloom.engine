@@ -12,6 +12,7 @@ from agents.hooks import AgentHooks
 from llm.openrouter import OpenRouterLLM
 from llm.provider import Usage
 from runtime.config import EngineConfig
+from runtime.skills.catalog import render_catalog
 from tools.base import ToolContext
 from tools.registry import ToolRegistry
 
@@ -77,6 +78,9 @@ class AgentLoop:
         write_globs: list[str] | None = None,
         write_lock=None,
         concurrent_tools: bool = False,
+        skills=None,
+        unlocked_skills=None,
+        on_skill_activated=None,
     ):
         self._llm = llm
         self._tools = tools or ToolRegistry()
@@ -124,6 +128,15 @@ class AgentLoop:
         self._estimate_ratio = 1.0
         self._overflow_retried = False
         self._message_id = ""
+        self._skills = skills
+        self._unlocked_skills: set[str] = set(unlocked_skills or ())
+        self._activated_bodies: dict[str, str] = {}
+        self._sticky_skills: set[str] = set()
+        self._catalog_query = ""
+        self._on_skill_activated = on_skill_activated
+        self._ctx.skills = skills
+        self._ctx.unlocked_skills = self._unlocked_skills
+        self._ctx.activate_skill = self.activate_skill
 
     def hydrate(self, messages) -> None:
         self._history = []
@@ -135,11 +148,52 @@ class AgentLoop:
             elif message.role == "assistant":
                 self._history.append({"role": "assistant", "content": message.text})
 
+    def set_catalog_query(self, text: str) -> None:
+        self._catalog_query = text
+
+    def unlock_skill(self, name: str) -> bool:
+        catalog = self._skills
+        if catalog is None or catalog.get(name) is None:
+            return False
+        self._unlocked_skills.add(name)
+        return True
+
+    def activate_skill(self, name: str) -> str:
+        catalog = self._skills
+        if catalog is None:
+            return "error: skills are not available"
+        skill = catalog.get(name)
+        if skill is None:
+            return f"error: unknown skill {name}"
+        self._activated_bodies[name] = skill.body
+        siblings = []
+        try:
+            for child in sorted(skill.directory.iterdir()):
+                if child.name != "SKILL.md":
+                    siblings.append(child.name + ("/" if child.is_dir() else ""))
+        except OSError:
+            pass
+        extra = f"\nSibling files: {', '.join(siblings)}" if siblings else ""
+        if self._on_skill_activated is not None:
+            self._on_skill_activated(name, self.agent_id)
+        return skill.body + extra
+
     def _build_messages(self) -> list[dict]:
         system = self._system_prompt
         notes = read_context_md(self._ctx.workspace)
         if notes:
             system = f"{system}\n\n## Workspace notes\n{notes}"
+        if self._skills is not None:
+            catalog = render_catalog(
+                self._skills,
+                self._catalog_query,
+                self._sticky_skills,
+                unlocked=self._unlocked_skills,
+                activated=set(self._activated_bodies),
+                bodies=self._activated_bodies,
+            )
+            if catalog:
+                system = f"{system}\n\n## Skills\n{catalog}"
         return [{"role": "system", "content": system}] + list(self._history)
 
     def context_dump(self) -> str:

@@ -8,8 +8,10 @@ from protocol.snapshot import (
     EngineSnapshot,
     FileTreeNode,
     GitState,
+    McpServerRow,
     PendingPrompt,
     SessionSummary,
+    SkillRow,
     Stats,
 )
 
@@ -240,3 +242,30 @@ class WorktreeSettled(ProtocolMessage):
     branch: str
     pr_url: str = ""
     ok: bool = True
+
+
+@event
+@dataclass
+class McpServersUpdated(ProtocolMessage):
+    servers: list[McpServerRow]
+
+
+@event
+@dataclass
+class SkillCatalogUpdated(ProtocolMessage):
+    skills: list[SkillRow]
+
+
+@event
+@dataclass
+class SkillActivated(ProtocolMessage):
+    name: str
+    agent_id: str = ""
+
+
+@event
+@dataclass
+class McpAuthRequired(ProtocolMessage):
+    server: str
+    url: str = ""
+    prompt_id: str = ""
