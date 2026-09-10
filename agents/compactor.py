@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -24,8 +25,17 @@ TRIGGER_RATIO = 0.7
 STRUCTURAL_RATIO = 0.8
 SUMMARY_CLIP = 400
 CONTEXT_MD_CAP = 4000
+TRANSCRIPT_BOUND = 20_000
 TRIM_KEEP = 400
 TRIM_NOTICE = "\n... (trimmed; re-run the tool if you need this again)"
+_CONTEXT_MD_LOCK = threading.Lock()
+_PATH_KEYS = ("path", "file", "target", "dest")
+_LEFTOVER_LABELS = (
+    "leftover_questions:",
+    "leftover questions:",
+    "leftover:",
+)
+_OMITTED_MIDDLE = {"role": "system", "content": "(middle omitted)"}
 
 
 def estimate_tokens(messages: list[dict]) -> int:
@@ -123,6 +133,62 @@ def _content_as_text(content) -> str:
                 parts.append(str(block))
         return "\n".join(parts)
     return json.dumps(content, default=str)
+
+
+def _bounded_transcript(items: list[dict], limit: int = TRANSCRIPT_BOUND) -> str:
+    """JSON of items, dropping whole middle messages so the tail still fits."""
+    raw = json.dumps(items, default=str)
+    if len(raw) <= limit:
+        return raw
+    if not items:
+        return "[]"
+    n = len(items)
+    for tail_len in range(n - 1, 0, -1):
+        tail_start = n - tail_len
+        if tail_start <= 1:
+            continue
+        dumped = json.dumps(
+            [items[0], _OMITTED_MIDDLE, *items[tail_start:]], default=str
+        )
+        if len(dumped) <= limit:
+            return dumped
+    for tail_len in range(n, 0, -1):
+        tail = items[-tail_len:]
+        dumped = json.dumps([_OMITTED_MIDDLE, *tail], default=str)
+        if len(dumped) <= limit:
+            return dumped
+        dumped = json.dumps(tail, default=str)
+        if len(dumped) <= limit:
+            return dumped
+    stub = {"role": items[-1].get("role") or "user", "content": "(truncated)"}
+    return json.dumps([stub], default=str)
+
+
+def _clip_labeled(text: str, limit: int = SUMMARY_CLIP) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    nl = cut.rfind("\n")
+    if nl >= limit // 2:
+        return cut[:nl].rstrip()
+    return cut
+
+
+def _leftover_from_text(text: str) -> list[str]:
+    leftover: list[str] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        matched = next(
+            (label for label in _LEFTOVER_LABELS if lower.startswith(label)),
+            None,
+        )
+        if matched is None:
+            continue
+        value = stripped[len(matched) :].strip()
+        leftover.extend(part.strip() for part in value.split(";") if part.strip())
+    return leftover
 
 
 def trim_tool_results(
@@ -294,7 +360,7 @@ async def _summarize(messages: list[dict], complete) -> tuple[list[dict], int, s
                 "Keep file paths, decisions, and unfinished work. No preamble."
             ),
         },
-        {"role": "user", "content": json.dumps(to_summarize)[:20_000]},
+        {"role": "user", "content": _bounded_transcript(to_summarize)},
     ]
     result = await complete(prompt)
     text = getattr(result, "text", "") or ""
@@ -349,8 +415,9 @@ class AgentResult:
         lines = [
             f"status: {self.status}",
             f"summary: {self.summary}",
-            f"outcome: {self.outcome}",
         ]
+        if self.outcome and self.outcome != self.summary:
+            lines.append(f"outcome: {self.outcome}")
         if self.files_touched:
             lines.append("files_touched: " + ", ".join(self.files_touched))
         if self.leftover_questions:
@@ -363,19 +430,20 @@ class AgentResult:
 def write_context_md(workspace, note: str, cap: int = CONTEXT_MD_CAP) -> None:
     path = workspace / ".engine" / "context.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing = ""
-    if path.is_file():
-        existing = path.read_text(encoding="utf-8", errors="replace")
-    body = existing
-    if body and not body.endswith("\n"):
-        body += "\n"
-    body += note.rstrip() + "\n"
-    if len(body) > cap:
-        body = body[-cap:]
-        nl = body.find("\n")
-        if 0 <= nl < len(body) - 1:
-            body = body[nl + 1 :]
-    path.write_text(body, encoding="utf-8")
+    with _CONTEXT_MD_LOCK:
+        existing = ""
+        if path.is_file():
+            existing = path.read_text(encoding="utf-8", errors="replace")
+        body = existing
+        if body and not body.endswith("\n"):
+            body += "\n"
+        body += note.rstrip() + "\n"
+        if len(body) > cap:
+            body = body[-cap:]
+            nl = body.find("\n")
+            if 0 <= nl < len(body) - 1:
+                body = body[nl + 1 :]
+        path.write_text(body, encoding="utf-8")
 
 
 def _tools_from_history(messages: list[dict]) -> set[str]:
@@ -402,10 +470,11 @@ def _paths_from_history(messages: list[dict]) -> list[str]:
                 data = {}
             if not isinstance(data, dict):
                 continue
-            path = data.get("path")
-            if isinstance(path, str) and path not in seen:
-                seen.add(path)
-                paths.append(path)
+            for key in _PATH_KEYS:
+                value = data.get(key)
+                if isinstance(value, str) and value and value not in seen:
+                    seen.add(value)
+                    paths.append(value)
     return paths
 
 
@@ -425,14 +494,27 @@ async def compress_for_parent(
     files_touched: list[str] | None = None,
     tools_called: set[str] | None = None,
 ) -> AgentResult:
-    called = tools_called or _tools_from_history(messages)
+    """Turn a child transcript into the orch-facing AgentResult.
+
+    When ``files_touched`` is supplied (Subagent.finish always passes it), the
+    list is successful edits via ``record_edit``, not reads. History-path
+    fallback runs only when ``files_touched`` is None.
+    """
+    called = (
+        tools_called if tools_called is not None else _tools_from_history(messages)
+    )
     missing = [name for name in (required_tools or []) if name not in called]
     if status == "ok" and missing:
         status = "incomplete"
-    outcome = _last_assistant_text(messages)[:SUMMARY_CLIP]
-    files = list(files_touched or _paths_from_history(messages))
-    leftover: list[str] = []
-    summary = outcome[:SUMMARY_CLIP]
+    closer = _last_assistant_text(messages)
+    outcome = _clip_labeled(closer)
+    files = (
+        list(files_touched)
+        if files_touched is not None
+        else _paths_from_history(messages)
+    )
+    leftover = _leftover_from_text(closer)
+    summary = outcome
     work = [item for item in messages if item.get("role") != "system"]
     if complete is not None and len(work) > 4:
         prompt = [
@@ -445,20 +527,20 @@ async def compress_for_parent(
                     "Omit empty fields. No preamble."
                 ),
             },
-            {"role": "user", "content": json.dumps(work, default=str)[:20_000]},
+            {"role": "user", "content": _bounded_transcript(work)},
         ]
         try:
             result = await complete(prompt)
             text = getattr(result, "text", "") or ""
             if text.strip():
-                summary = text.strip()[:SUMMARY_CLIP]
-                outcome = summary
-        except Exception:  # noqa: BLE001
-            pass
+                leftover = _leftover_from_text(text) or leftover
+                summary = _clip_labeled(text)
+        except Exception as exc:  # noqa: BLE001
+            summary = f"summarize failed: {exc.__class__.__name__}"
     return AgentResult(
         status=status,
         summary=summary,
-        outcome=outcome or summary,
+        outcome=outcome,
         files_touched=files,
         leftover_questions=leftover,
         missing_checks=missing,
