@@ -342,7 +342,7 @@ def github_file(
     *,
     ref: str = "",
     offset: int = 0,
-    limit: int = 0,
+    limit: int = FILE_WINDOW,
 ) -> str:
     repo = (repo or "").strip()
     path = (path or "").strip().lstrip("/")
@@ -366,6 +366,7 @@ def github_file(
         return DIR_HINT
     text = raw or "(empty)"
     start = max(0, _as_int(offset, 0))
+    # 0 / omitted / junk from tool JSON all mean "use the default window".
     window = _as_int(limit, FILE_WINDOW)
     if window <= 0:
         window = FILE_WINDOW

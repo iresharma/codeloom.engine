@@ -384,6 +384,9 @@ class Orchestrator(AgentLoop):
         if self._spawn_lock is None:
             self._spawn_lock = asyncio.Lock()
         async with self._spawn_lock:
+            # First user turn (_inbox_turn False) may fan out ask+researcher
+            # in parallel. Only leftover inbox turns after "[agent … finished]"
+            # are blocked from respawning the same survey profile.
             if (
                 profile_name in _SURVEY_ONCE
                 and profile_name in self._user_survey_spawns

@@ -451,8 +451,6 @@ def _looks_like_briefing(text: str) -> bool:
         key = line.split(":", 1)[0].strip().lower().replace(" ", "")
         if key in {"what", "paths", "facts", "verdict", "leftover"}:
             keys.add(key)
-        elif key.startswith("what"):
-            keys.add("what")
     return "what" in keys and ("facts" in keys or "verdict" in keys)
 
 

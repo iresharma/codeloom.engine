@@ -325,6 +325,36 @@ def test_compress_skips_llm_when_labeled():
     assert "surveyed" in result.summary
 
 
+def test_compress_runs_when_what_prefix_is_not_a_label():
+    called = []
+
+    async def complete(prompt):
+        called.append(prompt)
+        return LLMResult(text="what: ok\nfacts: recovered")
+
+    closer = "\n".join(
+        [
+            "what_if_we_try_this: maybe",
+            "facts: leftover prose",
+        ]
+    )
+    messages = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"},
+        {"role": "user", "content": "c"},
+        {"role": "assistant", "content": "d"},
+        {"role": "user", "content": "e"},
+        {"role": "assistant", "content": closer},
+    ]
+
+    async def run():
+        return await compress_for_parent(messages, complete=complete)
+
+    result = asyncio.run(run())
+    assert called
+    assert "recovered" in result.summary
+
+
 def test_report_to_orch_is_defined():
     assert "orchestrator" in REPORT_TO_ORCH
     assert "markdown" in REPORT_TO_ORCH

@@ -261,7 +261,7 @@ def github_file(
     repo: str = "",
     ref: str = "",
     offset: int = 0,
-    limit: int = 0,
+    limit: int = impl.FILE_WINDOW,
 ) -> str:
     return impl.github_file(
         ctx.workspace, repo, path, ref=ref, offset=offset, limit=limit

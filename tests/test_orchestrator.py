@@ -338,6 +338,20 @@ def test_survey_spawn_once_per_user_message(tmp_path):
     asyncio.run(run())
 
 
+def test_survey_first_turn_may_fan_out(tmp_path):
+    async def run():
+        session = await _bind(tmp_path, FakeProvider())()
+        orch: Orchestrator = session._loop
+        first = await orch.spawn("ask", "one")
+        second = await orch.spawn("ask", "two")
+        assert first.startswith("started")
+        assert second.startswith("started")
+        await orch.wait_children()
+        await _wait_idle(session)
+
+    asyncio.run(run())
+
+
 def test_abort_turn_leaves_children(tmp_path):
     async def run():
         hang = asyncio.Event()
