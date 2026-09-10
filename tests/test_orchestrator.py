@@ -525,6 +525,8 @@ def test_discover_tools_includes_new_families():
         "gh_pr_view",
         "gh_pr_create",
         "github_search_code",
+        "github_repo",
+        "github_tree",
         "pkg_info",
         "docs_lookup",
         "tldr",

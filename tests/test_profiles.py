@@ -5,6 +5,7 @@ import json
 
 from agents.compactor import (
     CONTEXT_MD_CAP,
+    OUTCOME_CLIP,
     SUMMARY_CLIP,
     compress_for_parent,
     write_context_md,
@@ -66,15 +67,40 @@ def test_orch_and_profile_allowlists():
     assert "gh_pr_create" not in coder.names()
     reviewer = tools.subset(profiles.get("reviewer").tool_names)
     assert "gh_pr_view" in reviewer.names()
+    assert "github_repo" in reviewer.names()
+    assert "github_tree" in reviewer.names()
     assert "gh_pr_create" not in reviewer.names()
     assert "gh_pr_comment" not in reviewer.names()
     researcher = tools.subset(profiles.get("researcher").tool_names)
     assert "gh_pr_comment" in researcher.names()
     assert "docs_lookup" in researcher.names()
+    assert "github_repo" in researcher.names()
+    assert "github_tree" in researcher.names()
+    assert "web_fetch" in researcher.names()
+    assert "web_search" in researcher.names()
     assert "gh_pr_create" not in researcher.names()
+    assert "run_command" not in researcher.names()
+    assert "str_replace" not in researcher.names()
+    assert "get_diagnostics" not in researcher.names()
+    assert "browser_open" not in researcher.names()
+    researcher_profile = profiles.get("researcher")
+    assert researcher_profile.write_globs == []
+    prompt = researcher_profile.system_prompt
+    assert "github_repo" in prompt
+    assert "github_tree" in prompt
+    assert "Do not web_fetch github.com HTML" in prompt
+    assert "docs_lookup" in prompt
+    assert "A README title is not a survey" in prompt
+    assert "fetch a known URL" not in prompt
+    assert "GitHub repo" in researcher_profile.description
+    from agents.orchestrator import ORCH_SYSTEM
+
+    assert "GitHub repo" in ORCH_SYSTEM
+    assert "For external docs, spawn researcher" not in ORCH_SYSTEM
     debugger = tools.subset(profiles.get("debugger").tool_names)
     assert "gh_pr_comment" in debugger.names()
     assert "http_request" in debugger.names()
+    assert "github_tree" in debugger.names()
     tester_tools = tools.subset(profiles.get("tester").tool_names)
     assert "http_request" in tester_tools.names()
     assert "gh_pr_view" not in tester_tools.names()
@@ -88,6 +114,12 @@ def test_orch_and_profile_allowlists():
     assert profiles.get("debugger").needs_worktree is False
     assert profiles.get("reviewer").needs_worktree is False
     assert profiles.get("reviewer").join_worktree is True
+    assert profiles.get("ask").max_turns == 32
+    assert profiles.get("coder").max_turns == 32
+    assert profiles.get("tester").max_turns == 32
+    assert profiles.get("debugger").max_turns == 32
+    assert profiles.get("reviewer").max_turns == 32
+    assert profiles.get("researcher").max_turns == 32
 
 
 async def _spawn(name: str, task: str) -> str:
@@ -198,8 +230,63 @@ def test_compress_clips_long_closer():
         )
 
     result = asyncio.run(run())
-    assert len(result.outcome) <= SUMMARY_CLIP
+    assert len(result.outcome) <= OUTCOME_CLIP
     assert len(result.summary) <= SUMMARY_CLIP
+
+
+def test_outcome_keeps_long_facts():
+    facts = "facts: " + ("src/app.py Foo.bar retries 3 times using tenacity; " * 20)
+    closer = "\n".join(
+        [
+            "what: surveyed acme/engine",
+            "paths: README.md, src/app.py",
+            facts,
+            "verdict: retry lives in Foo.bar",
+            "leftover: confirm v2 API",
+        ]
+    )
+    assert len(closer) > SUMMARY_CLIP
+
+    async def run():
+        return await compress_for_parent(
+            [
+                {"role": "user", "content": "x"},
+                {"role": "assistant", "content": closer},
+            ]
+        )
+
+    result = asyncio.run(run())
+    assert len(result.outcome) > SUMMARY_CLIP
+    assert len(result.outcome) <= OUTCOME_CLIP
+    assert "retries 3 times" in result.outcome
+    assert len(result.summary) <= SUMMARY_CLIP
+
+
+def test_compress_prompt_keeps_facts():
+    captured = []
+
+    async def complete(prompt):
+        captured.append(prompt[0]["content"])
+        return LLMResult(text="what: ok\nfacts: Foo.bar retries")
+
+    async def run():
+        messages = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+            {"role": "user", "content": "c"},
+            {"role": "assistant", "content": "d"},
+            {"role": "user", "content": "e"},
+            {"role": "assistant", "content": "done"},
+        ]
+        return await compress_for_parent(messages, complete=complete)
+
+    result = asyncio.run(run())
+    assert captured
+    text = captured[0]
+    assert "facts must be specific" in text
+    assert "Do not collapse a survey into a one-liner" in text
+    assert "6 short labeled lines" not in text
+    assert "Foo.bar retries" in result.summary
 
 
 def test_report_to_orch_is_defined():

@@ -7,7 +7,8 @@ from runtime.tools.web import web_search as search_impl
 
 @tool(
     description=(
-        "HTTP GET a URL and return text (HTML stripped). Cap 50k chars. "
+        "HTTP GET a URL and return an LLM-readable document (HTML to markdown). "
+        "GitHub.com URLs are refused — use github_repo / github_tree / github_file. "
         "http/https only."
     ),
     parameters={

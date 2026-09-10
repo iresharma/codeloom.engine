@@ -55,6 +55,18 @@ def test_trim_keeps_last_three():
     assert len(tools[-1]["content"]) == 1000
 
 
+def test_trim_keeps_last_ten():
+    messages = [{"role": "system", "content": "s"}]
+    for i in range(12):
+        messages.extend(_tool_group(str(i), result="x" * 1000))
+    trimmed, saved = trim_tool_results(messages, keep=10)
+    assert saved > 0
+    tools = [m for m in trimmed if m["role"] == "tool"]
+    assert len(tools) == 12
+    assert all(len(item["content"]) < 1000 for item in tools[:-10])
+    assert all(len(item["content"]) == 1000 for item in tools[-10:])
+
+
 def test_validate_detects_orphan():
     assert validate_history([{"role": "tool", "tool_call_id": "x", "content": "a"}])
 
@@ -288,3 +300,63 @@ def test_write_context_concurrent(tmp_path):
     for i in range(20):
         assert f"note-{i}-unique" in text
     assert len(text) <= CONTEXT_MD_CAP + 80
+
+
+def test_higher_trigger_is_noop_at_eighty_percent():
+    async def run():
+        messages = [
+            {"role": "system", "content": "pad " * 80},
+            {"role": "user", "content": "hi"},
+        ]
+        est = estimate_tokens(messages)
+        budget = int(est / 0.8)
+        high, high_info = await compact(messages, budget, trigger_ratio=0.9)
+        low, low_info = await compact(messages, budget, trigger_ratio=0.7)
+        assert high_info["strategy"] == "noop"
+        assert high == messages
+        assert low_info["strategy"] != "noop"
+
+    asyncio.run(run())
+
+
+def test_child_compact_defaults():
+    from runtime.config import (
+        CHILD_COMPACT_TRIGGER,
+        CHILD_KEEP_FULL_TOOLS,
+        EngineConfig,
+    )
+
+    orch = EngineConfig()
+    assert orch.compact_trigger == 0.7
+    assert orch.keep_full_tools == 3
+    assert CHILD_COMPACT_TRIGGER == 0.9
+    assert CHILD_KEEP_FULL_TOOLS == 10
+
+
+def test_make_subagent_uses_child_compact(tmp_path):
+    from agents.orchestrator import Orchestrator
+    from agents.profile import discover_profiles
+    from runtime.config import (
+        CHILD_COMPACT_TRIGGER,
+        CHILD_KEEP_FULL_TOOLS,
+        EngineConfig,
+    )
+    from tests.fakes import FakeProvider
+    from tools.registry import ToolRegistry
+
+    orch_config = EngineConfig(compact_trigger=0.7, keep_full_tools=3)
+    orch = Orchestrator(
+        FakeProvider(),
+        all_tools=ToolRegistry(),
+        profiles=discover_profiles(),
+        workspace=tmp_path,
+        config=orch_config,
+    )
+    child = orch._make_subagent(
+        discover_profiles().get("researcher"), "abc123", tmp_path, isolated=False
+    )
+    assert orch._config.compact_trigger == 0.7
+    assert orch._config.keep_full_tools == 3
+    assert child._config.compact_trigger == CHILD_COMPACT_TRIGGER
+    assert child._config.keep_full_tools == CHILD_KEEP_FULL_TOOLS
+    assert child._config is not orch._config

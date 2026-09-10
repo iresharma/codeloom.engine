@@ -315,14 +315,18 @@ class AgentLoop:
         return result
 
     async def _maybe_compact(self, force: bool = False) -> None:
-        messages = self._build_messages()
-        if not force:
-            from agents.compactor import estimate_tokens, TRIGGER_RATIO
+        from agents.compactor import KEEP_FULL_TOOL_RESULTS, TRIGGER_RATIO, estimate_tokens
 
+        messages = self._build_messages()
+        trigger = getattr(self._config, "compact_trigger", None) or TRIGGER_RATIO
+        keep_full = getattr(self._config, "keep_full_tools", None)
+        if keep_full is None:
+            keep_full = KEEP_FULL_TOOL_RESULTS
+        if not force:
             estimated = int(estimate_tokens(messages) * (self._estimate_ratio or 1.0))
             if self._last_prompt_tokens:
                 estimated = max(estimated, self._last_prompt_tokens)
-            if estimated < int(self._config.context_budget * TRIGGER_RATIO):
+            if estimated < int(self._config.context_budget * trigger):
                 return
         self._state("compacting")
 
@@ -335,6 +339,8 @@ class AgentLoop:
             complete=complete,
             last_prompt_tokens=self._last_prompt_tokens,
             ratio=self._estimate_ratio,
+            trigger_ratio=trigger,
+            keep_full=keep_full,
         )
         if info.get("strategy") == "noop":
             return

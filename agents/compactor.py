@@ -24,6 +24,7 @@ CHARS_PER_TOKEN = 4
 TRIGGER_RATIO = 0.7
 STRUCTURAL_RATIO = 0.8
 SUMMARY_CLIP = 400
+OUTCOME_CLIP = 2000
 CONTEXT_MD_CAP = 4000
 TRANSCRIPT_BOUND = 20_000
 TRIM_KEEP = 400
@@ -57,8 +58,14 @@ def _scaled_tokens(messages: list[dict], ratio: float, floor: int = 0) -> int:
     return estimated
 
 
-def _over_budget(messages: list[dict], budget: int, ratio: float, floor: int = 0) -> bool:
-    return _scaled_tokens(messages, ratio, floor) >= int(budget * TRIGGER_RATIO)
+def _over_budget(
+    messages: list[dict],
+    budget: int,
+    ratio: float,
+    floor: int = 0,
+    trigger: float = TRIGGER_RATIO,
+) -> bool:
+    return _scaled_tokens(messages, ratio, floor) >= int(budget * trigger)
 
 
 def validate_history(messages: list[dict]) -> list[str]:
@@ -232,7 +239,7 @@ def group_boundary(messages: list[dict], cut: int) -> int:
 
 
 def _drop_oldest(
-    messages: list[dict], budget: int, ratio: float
+    messages: list[dict], budget: int, ratio: float, trigger: float = TRIGGER_RATIO
 ) -> tuple[list[dict], int]:
     """Drop oldest complete groups until under budget, keeping system + last exchange."""
     if len(messages) < 2:
@@ -254,7 +261,7 @@ def _drop_oldest(
             continue
         saved = sum(len(json.dumps(item)) for item in messages[prefix:nxt])
         best = candidate
-        if not _over_budget(candidate, budget, ratio):
+        if not _over_budget(candidate, budget, ratio, trigger=trigger):
             return candidate, saved
         cut = nxt
     return best, saved
@@ -286,9 +293,11 @@ async def compact(
     complete: Callable | None = None,
     last_prompt_tokens: int = 0,
     ratio: float = 1.0,
+    trigger_ratio: float = TRIGGER_RATIO,
+    keep_full: int = KEEP_FULL_TOOL_RESULTS,
 ) -> tuple[list[dict], dict]:
     estimated = _scaled_tokens(messages, ratio, last_prompt_tokens)
-    if estimated < int(budget * TRIGGER_RATIO):
+    if estimated < int(budget * trigger_ratio):
         return messages, _info(
             "noop",
             before=len(messages),
@@ -297,11 +306,11 @@ async def compact(
             tokens_after=estimated,
         )
     before = len(messages)
-    trimmed, saved = trim_tool_results(messages)
+    trimmed, saved = trim_tool_results(messages, keep=keep_full)
     estimated = _scaled_tokens(trimmed, ratio)
     strategy = "trim"
     summary = ""
-    if _over_budget(trimmed, budget, ratio) and complete is not None:
+    if _over_budget(trimmed, budget, ratio, trigger=trigger_ratio) and complete is not None:
         try:
             trimmed, extra, summary = await _summarize(trimmed, complete)
             saved += extra
@@ -310,15 +319,15 @@ async def compact(
         except Exception as exc:  # noqa: BLE001
             # Keep the trim and fall through to harder reduction.
             summary = f"(summarize failed: {exc.__class__.__name__})"
-    if _over_budget(trimmed, budget, ratio):
+    if _over_budget(trimmed, budget, ratio, trigger=trigger_ratio):
         harder, extra = trim_tool_results(trimmed, keep=0)
         if extra:
             trimmed = harder
             saved += extra
             strategy = "truncate"
             estimated = _scaled_tokens(trimmed, ratio)
-    if _over_budget(trimmed, budget, ratio):
-        dropped, extra = _drop_oldest(trimmed, budget, ratio)
+    if _over_budget(trimmed, budget, ratio, trigger=trigger_ratio):
+        dropped, extra = _drop_oldest(trimmed, budget, ratio, trigger=trigger_ratio)
         if dropped is not trimmed:
             trimmed = dropped
             saved += extra
@@ -507,14 +516,14 @@ async def compress_for_parent(
     if status == "ok" and missing:
         status = "incomplete"
     closer = _last_assistant_text(messages)
-    outcome = _clip_labeled(closer)
+    outcome = _clip_labeled(closer, OUTCOME_CLIP)
     files = (
         list(files_touched)
         if files_touched is not None
         else _paths_from_history(messages)
     )
     leftover = _leftover_from_text(closer)
-    summary = outcome
+    summary = _clip_labeled(outcome, SUMMARY_CLIP)
     work = [item for item in messages if item.get("role") != "system"]
     if complete is not None and len(work) > 4:
         prompt = [
@@ -523,7 +532,9 @@ async def compress_for_parent(
                 "content": (
                     "This transcript is from a subagent. Report to the orchestrator, "
                     "not a human. No markdown, headings, bullets, or filler. "
-                    "At most 6 short labeled lines (what / paths / verdict / leftover). "
+                    "Labeled lines for what / paths / facts / verdict / leftover. "
+                    "facts must be specific (paths, versions, quoted APIs). "
+                    "Do not collapse a survey into a one-liner. "
                     "Omit empty fields. No preamble."
                 ),
             },
@@ -534,7 +545,7 @@ async def compress_for_parent(
             text = getattr(result, "text", "") or ""
             if text.strip():
                 leftover = _leftover_from_text(text) or leftover
-                summary = _clip_labeled(text)
+                summary = _clip_labeled(text, SUMMARY_CLIP)
         except Exception as exc:  # noqa: BLE001
             summary = f"summarize failed: {exc.__class__.__name__}"
     return AgentResult(

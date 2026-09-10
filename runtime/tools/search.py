@@ -9,6 +9,7 @@ from runtime.tools.fs import (
     WorkspacePathError,
     relative_posix,
     resolve_in_workspace,
+    should_skip_name,
 )
 
 DEFAULT_MAX_MATCHES = 80
@@ -47,6 +48,16 @@ def search(
     for name in sorted(SKIP_NAMES):
         command.extend(["--glob", f"!{name}/**"])
         command.extend(["--glob", f"!{name}"])
+    command.extend(
+        [
+            "--glob",
+            "!.*cache*/**",
+            "--glob",
+            "!*.egg-info/**",
+            "--glob",
+            "!*.dist-info/**",
+        ]
+    )
     if glob:
         command.extend(["--glob", glob])
     command.append("--")
@@ -88,5 +99,7 @@ def _rewrite_path(workspace: Path, line: str) -> str | None:
     try:
         rel = relative_posix(workspace, Path(raw_path).resolve())
     except (ValueError, WorkspacePathError):
+        return None
+    if any(should_skip_name(part) for part in Path(rel).parts):
         return None
     return f"{rel}:{rest}"

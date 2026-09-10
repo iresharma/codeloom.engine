@@ -227,7 +227,7 @@ list is matched against the relative path (`**/tests/**`, `**/*.md`, …).
 - `required_tools` — if these names never appear in the child's tool trace,
 `AgentResult.status` is `incomplete` (the child still exits). Used by `coder`
 (`get_diagnostics`) and `tester` (`run_command`).
-- `max_turns` — child's own cap, independent of the orch.
+- `max_turns` — child's own cap, independent of the orch. Built-in profiles use 32.
 - `needs_worktree` — if true, the child runs in a git worktree on a new branch
 under `.engine/worktrees/` so writers do not collide. `coder` and `tester`
 set this. When the child finishes with changes, those edits are committed on

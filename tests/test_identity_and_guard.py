@@ -49,8 +49,11 @@ def test_guard_denylist(ctx):
         "package-lock.json",
         "node_modules/pkg.js",
         ".env.local",
+        ".ruff_cache/x",
     ]
     (ctx.workspace / ".env.local").write_text("x=1\n")
+    (ctx.workspace / ".ruff_cache").mkdir()
+    (ctx.workspace / ".ruff_cache" / "x").write_text("x\n")
     for path in cases:
         try:
             guard_write_path(ctx.workspace, path)

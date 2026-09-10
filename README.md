@@ -326,7 +326,7 @@ The user talks only to the **orchestrator** (`agents/orchestrator.py`), which is
 
 A spawn is fire-and-forget. The personality tool returns immediately with `agent_id` (and `worktree` / `branch` for writers). The child runs in the background with a fresh history and an allowlisted tool set. When it finishes, `compress_for_parent` turns its transcript into an `AgentResult` (`status`, `summary`, `outcome`, `files_touched`, `leftover_questions`, `missing_checks`). `files_touched` is successful edits, not reads. `leftover_questions` is parsed from labeled `leftover:` / `leftover_questions:` lines in the LLM report (or the child's closer). That string is posted to the orch as an `engine` chat line and, if the orch is idle, starts a follow-up orch turn so it can brief the user or spawn the next step. Child tokens stream live as `ChatMessageStarted` / `ChatMessageDelta` / `ChatMessageAdded` with `agent_id` set; they never persist in orch chat history.
 
-`AgentLoop` is still an OpenAI-style tool-calling loop, capped at `EngineConfig.max_turns` (default 16). The orch may emit several personality calls in one model turn; those children run concurrently. A child's own tools stay sequential so read-before-write cannot race. `EngineConfig.max_spawns_per_turn` (default 8) caps how many children may be live at once.
+`AgentLoop` is still an OpenAI-style tool-calling loop. The orch is capped at `EngineConfig.max_turns` (default 16). Each child uses its profile `max_turns` (default 32) so a survey or edit can finish instead of cutting off mid-investigation. The orch may emit several personality calls in one model turn; those children run concurrently. A child's own tools stay sequential so read-before-write cannot race. `EngineConfig.max_spawns_per_turn` (default 8) caps how many children may be live at once.
 
 `coder` and `tester` run in a git worktree (`workspace/.engine/worktrees/<agent_id>` on branch `engine/<profile>/<agent_id>`) so two writers — or a writer and your dirty checkout — do not collide. `reviewer` joins that worktree so `git_diff` sees the writer's changes. When the writer finishes, uncommitted edits are committed on that branch, then the engine prompts to **merge**, **open a PR**, **keep**, or **discard**. Natural-language replies such as "please merge it" count. A `WorktreeSettled` event and an `engine` chat line report what happened. Empty worktrees (no unique commits and a clean tree) are removed without asking. After a keep — or if the prompt was missed — the orch must call `settle_worktree` rather than spawn another coder; writers cannot check out the user's branch. Leftover engine worktrees are recovered on session start so a later merge/PR still finds them. `ask`, `researcher`, and `debugger` use the main workspace. If the workspace is not a git repo, spawn still starts on the main tree.
 
@@ -454,7 +454,9 @@ can edit a tool and pick it up by restarting the session — no server restart.
 | `gh_release_list` / `gh_release_view` | Release notes / changelog. |
 | `github_compare` | Ahead/behind, commits, files between two refs. |
 | `github_search_code` | GitHub code search. `this_repo` scopes to the workspace remote. |
-| `github_file` | Raw file from `owner/name` @ ref. 50k cap. |
+| `github_file` | Raw file from `owner/name` @ ref. 50k cap. Directories tell you to use `github_tree`. |
+| `github_repo` | Repo metadata: description, default branch, language, license, topics, stars. |
+| `github_tree` | Files and dirs at a path (optional recursive, capped). Skips vendor/cache dirs. |
 | `gh_pr_comment` / `gh_issue_create` | Approval-gated writes (researcher, debugger). |
 | `gh_pr_create` | Implemented, unassigned. Settle still owns writer PRs. |
 
@@ -482,11 +484,11 @@ can edit a tool and pick it up by restarting the session — no server restart.
 | `todo_scan` | TODO/FIXME/XXX/HACK as `path:line:text`. Skips `.git` / `node_modules`. |
 | `runtime_info` | Local python, node, go, git, gh, rg versions. |
 
-**Web.** Used by the `researcher` personality.
+**Web.** Used by the `researcher` personality. Survey a GitHub repo with `github_repo` / `github_tree` / `github_file` — do not fetch GitHub HTML.
 
 | Tool | Purpose |
 |---|---|
-| `web_fetch` | HTTP GET, HTML stripped, 50k cap. http/https only. |
+| `web_fetch` | HTTP GET. HTML becomes markdown (main/article, chrome dropped). `github.com` URLs are refused. SPA pages hint at debugger `browser_open`. |
 | `web_search` | Brave Search if `BRAVE_API_KEY` is set; otherwise an error. |
 
 **Skills.** Every personality (and the orch) can load a `SKILL.md` body.
@@ -583,7 +585,7 @@ with no assumptions about what is on disk.
   `relative_to(workspace)` check, so `../` traversal and symlink escapes both
   fail.
 - Anything inside `.git`, `.engine`, `.cursor`, `__pycache__`, `node_modules`,
-  `.venv`, or `venv`.
+  `.venv`, `venv`, `.ruff_cache`, and other cache/build dirs.
 - Lockfiles: `package-lock.json`, `uv.lock`, `poetry.lock`, `Cargo.lock`,
   `go.sum`.
 - Secrets: `env.sh`, `.env`, and any `.env.*`.
@@ -989,7 +991,7 @@ describe those implementations to a model. The suite exercises
 | Limit | Value | Where |
 |---|---|---|
 | NDJSON line | 8 MiB | `protocol/codec.py` |
-| Agent tool turns | 16 | `EngineConfig.max_turns` |
+| Agent tool turns | orch 16, children 32 | `EngineConfig.max_turns` / `AgentProfile.max_turns` |
 | Live subagents | 8 | `EngineConfig.max_spawns_per_turn` |
 | Subscriber buffer | 4096 items / 1 MiB | `runtime/subscriber.py` |
 | Per-event soft limit | 512 KiB | `EVENT_SOFT_LIMIT` |
@@ -997,6 +999,8 @@ describe those implementations to a model. The suite exercises
 | Command timeout | 120s default, 600s max | `runtime/tools/shell.py` |
 | Command output | 30k / stream, 60k total | `runtime/tools/shell.py` |
 | Context budget | 120,000 tokens | `EngineConfig.context_budget` |
+| Compact trigger / keep full tools | orch 0.7 / 3, children 0.9 / 10 | `EngineConfig.compact_trigger` / `keep_full_tools` |
+| Child report summary / outcome | 400 / 2,000 chars | `SUMMARY_CLIP` / `OUTCOME_CLIP` |
 | Tool result to model | 80,000 chars | `tools/registry.py` |
 | Tool preview in events | 400 chars | `runtime/session.py` |
 | `read_file` window | 200 default, 400 max | `runtime/tools/fs.py` |
@@ -1011,7 +1015,8 @@ describe those implementations to a model. The suite exercises
 | Subprocess timeout (git, rg) | 10s | `runtime/tools/{git,search}.py` |
 
 Ignored everywhere: `.git`, `.engine`, `.cursor`, `__pycache__`,
-`node_modules`, `.venv`, `venv`.
+`node_modules`, `.venv`, `venv`, `.ruff_cache`, and other cache/build dirs
+(see `SKIP_NAMES` / `should_skip_name` in `runtime/tools/fs.py`).
 
 ---
 
