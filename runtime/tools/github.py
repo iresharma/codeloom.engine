@@ -536,6 +536,19 @@ def _skip_tree_path(rel: str) -> bool:
     return any(should_skip_name(part) for part in rel.split("/") if part)
 
 
+_GH_ENTRY_TYPES = frozenset({"file", "dir", "symlink", "submodule"})
+
+
+def _is_github_content_entry(item) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("type") not in _GH_ENTRY_TYPES:
+        return False
+    if not item.get("sha"):
+        return False
+    return bool(item.get("html_url") or item.get("git_url") or item.get("_links"))
+
+
 def _looks_like_dir_listing(raw: str) -> bool:
     text = (raw or "").lstrip()
     if not text.startswith("[") and not text.startswith("{"):
@@ -546,13 +559,11 @@ def _looks_like_dir_listing(raw: str) -> bool:
         return False
     if isinstance(payload, list):
         if not payload:
-            return True
-        first = payload[0]
-        return isinstance(first, dict) and (
-            "type" in first or "path" in first or "name" in first
-        )
+            return False
+        sample = payload[:3]
+        return all(_is_github_content_entry(item) for item in sample)
     if isinstance(payload, dict):
-        return payload.get("type") == "dir"
+        return payload.get("type") == "dir" and _is_github_content_entry(payload)
     return False
 
 

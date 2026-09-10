@@ -9,6 +9,19 @@ from runtime.tools.approve import require_approval
 from tools.github import gh_pr_comment
 
 
+def _gh_entry(**extra):
+    entry = {
+        "type": "file",
+        "name": "README.md",
+        "path": "README.md",
+        "sha": "a" * 40,
+        "size": 12,
+        "html_url": "https://github.com/acme/engine/blob/main/README.md",
+    }
+    entry.update(extra)
+    return entry
+
+
 def test_run_gh_missing_binary(tmp_path, monkeypatch):
     monkeypatch.setattr(gh, "_which", lambda name: None)
     result = gh.run_gh(tmp_path, ["pr", "list"])
@@ -71,9 +84,7 @@ def test_github_file_caps(tmp_path, monkeypatch):
 
 
 def test_github_file_directory_hint(tmp_path, monkeypatch):
-    listing = json.dumps(
-        [{"type": "file", "name": "README.md", "path": "README.md", "size": 12}]
-    )
+    listing = json.dumps([_gh_entry()])
     monkeypatch.setattr(gh, "run_gh", lambda *a, **k: listing)
     text = gh.github_file(tmp_path, "acme/engine", "docs")
     assert text.startswith("error:")
@@ -149,11 +160,44 @@ def test_github_file_leaves_source_alone(tmp_path, monkeypatch):
 
 def test_github_file_dir_object_hint(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        gh, "run_gh", lambda *a, **k: json.dumps({"type": "dir", "name": "src"})
+        gh,
+        "run_gh",
+        lambda *a, **k: json.dumps(
+            _gh_entry(
+                type="dir",
+                name="src",
+                path="src",
+                html_url="https://github.com/acme/engine/tree/main/src",
+            )
+        ),
     )
     text = gh.github_file(tmp_path, "acme/engine", "src")
     assert text.startswith("error:")
     assert "github_tree" in text
+
+
+def test_github_file_keeps_json_config(tmp_path, monkeypatch):
+    payload = json.dumps(
+        [{"name": "en", "type": "string", "path": "locales/en.json"}]
+    )
+    monkeypatch.setattr(gh, "run_gh", lambda *a, **k: payload)
+    text = gh.github_file(tmp_path, "acme/engine", "i18n.json")
+    assert not text.startswith("error:")
+    assert "locales/en.json" in text
+
+
+def test_github_file_keeps_empty_json_array(tmp_path, monkeypatch):
+    monkeypatch.setattr(gh, "run_gh", lambda *a, **k: "[]")
+    text = gh.github_file(tmp_path, "acme/engine", "empty.json")
+    assert text == "[]"
+
+
+def test_github_file_keeps_type_dir_config(tmp_path, monkeypatch):
+    payload = json.dumps({"type": "dir", "name": "output"})
+    monkeypatch.setattr(gh, "run_gh", lambda *a, **k: payload)
+    text = gh.github_file(tmp_path, "acme/engine", "config.json")
+    assert not text.startswith("error:")
+    assert '"type": "dir"' in text
 
 
 def test_github_repo_omits_repo_arg_when_empty(tmp_path, monkeypatch):

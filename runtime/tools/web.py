@@ -186,9 +186,11 @@ def web_search(query: str, *, count: int = 5) -> str:
         extra = f" {reason}" if reason else ""
         return f"error: HTTP {status}{extra}".rstrip()
     try:
-        payload = json.loads(text or "null")
+        payload = json.loads(text) if (text or "").strip() else {}
     except json.JSONDecodeError as exc:
         return f"error: {exc}"
+    if not isinstance(payload, dict):
+        return "(no results)"
     results = ((payload.get("web") or {}).get("results")) or []
     if not results:
         return "(no results)"

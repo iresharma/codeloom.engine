@@ -219,3 +219,25 @@ def test_web_search_empty_and_http_error(monkeypatch):
     text = web_search("python")
     assert text.startswith("error: HTTP 401")
     assert "invalid key" in text
+
+
+def test_web_search_empty_or_non_object_body(monkeypatch):
+    monkeypatch.setenv("BRAVE_API_KEY", "k")
+
+    def blank(method, url, **kwargs):
+        return 200, {}, "", ""
+
+    monkeypatch.setattr("runtime.tools.httpx.raw_request", blank)
+    assert web_search("nothing") == "(no results)"
+
+    def null_body(method, url, **kwargs):
+        return 200, {}, "null", ""
+
+    monkeypatch.setattr("runtime.tools.httpx.raw_request", null_body)
+    assert web_search("nothing") == "(no results)"
+
+    def array_body(method, url, **kwargs):
+        return 200, {}, "[]", ""
+
+    monkeypatch.setattr("runtime.tools.httpx.raw_request", array_body)
+    assert web_search("nothing") == "(no results)"

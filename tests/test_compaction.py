@@ -319,6 +319,24 @@ def test_higher_trigger_is_noop_at_eighty_percent():
     asyncio.run(run())
 
 
+def test_compact_params_keeps_falsy_trigger():
+    from agents.agent_loop import compact_params
+    from agents.compactor import KEEP_FULL_TOOL_RESULTS, TRIGGER_RATIO
+    from runtime.config import EngineConfig
+
+    zero = EngineConfig(compact_trigger=0.0, keep_full_tools=0)
+    trigger, keep_full = compact_params(zero)
+    assert trigger == 0.0
+    assert keep_full == 0
+
+    class Bare:
+        pass
+
+    trigger, keep_full = compact_params(Bare())
+    assert trigger == TRIGGER_RATIO
+    assert keep_full == KEEP_FULL_TOOL_RESULTS
+
+
 def test_child_compact_defaults():
     from runtime.config import (
         CHILD_COMPACT_TRIGGER,
