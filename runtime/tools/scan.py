@@ -3,7 +3,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from runtime.tools.fs import SKIP_NAMES, WorkspacePathError, relative_posix, resolve_in_workspace
+from runtime.tools.fs import (
+    WorkspacePathError,
+    relative_posix,
+    resolve_in_workspace,
+    should_skip_name,
+)
 
 MARKERS = ("TODO", "FIXME", "XXX", "HACK")
 DEFAULT_LIMIT = 80
@@ -61,7 +66,7 @@ def _iter_files(workspace: Path, root: Path):
         except OSError:
             continue
         for entry in entries:
-            if entry.name in SKIP_NAMES:
+            if should_skip_name(entry.name):
                 continue
             if entry.is_dir():
                 stack.append(entry)

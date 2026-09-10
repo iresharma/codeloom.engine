@@ -62,6 +62,8 @@ GH_READ = [
     "github_compare",
     "github_search_code",
     "github_file",
+    "github_repo",
+    "github_tree",
 ]
 GH_WRITE = ["gh_pr_comment", "gh_issue_create"]
 PKG = ["pkg_info"]
@@ -76,9 +78,11 @@ DEP = ["dep_why"]
 # Appended to every subagent system prompt. The child never talks to the user.
 REPORT_TO_ORCH = (
     "Your only reader is the orchestrator, not a human. "
-    "Final reply: no markdown, headings, bullets, or filler. "
-    "A few labeled lines — paths, facts, verdict, leftover questions. "
-    "Omit empty fields. Do not explain yourself."
+    "Do not greet, apologize, or recap the task. No markdown headings or filler. "
+    "End with a complete briefing: labeled lines for what / paths / facts / verdict / leftover. "
+    "Facts must be specific enough that a later coder can work without re-surveying. "
+    "A filename is not an answer. Finish the investigation before you report. "
+    "Omit empty fields."
 )
 
 TEST_GLOBS = [
@@ -101,7 +105,7 @@ class AgentProfile:
     tool_names: list[str]
     write_globs: list[str] | None = None
     required_tools: list[str] = field(default_factory=list)
-    max_turns: int = 16
+    max_turns: int = 32
     model: str | None = None
     temperature: float = 0.2
     needs_worktree: bool = False

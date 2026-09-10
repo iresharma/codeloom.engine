@@ -14,6 +14,8 @@ def test_defaults(monkeypatch, tmp_path):
     assert config.max_turns == 16
     assert config.max_spawns_per_turn == 8
     assert config.exec_approval == "auto"
+    assert config.compact_trigger == 0.7
+    assert config.keep_full_tools == 3
     assert config.subscriber_bytes == 1 << 20
     assert config.warnings == []
 

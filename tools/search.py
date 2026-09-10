@@ -12,7 +12,8 @@ def _as_int(value, default: int) -> int:
 @tool(
     description=(
         "Search the workspace with ripgrep. "
-        "Returns path:line:text. Prefer this over listing files and guessing."
+        "Returns path:line:text. Prefer this over listing files and guessing. "
+        "Skips caches, venvs, and vendor dirs."
     ),
     parameters={
         "type": "object",

@@ -13,10 +13,10 @@ from typing import ClassVar
 from urllib.parse import unquote, urlparse
 
 from runtime.tools.fs import (
-    SKIP_NAMES,
     WorkspacePathError,
     relative_posix,
     resolve_in_workspace,
+    should_skip_name,
 )
 
 INDEX_FILE_CAP = 500
@@ -403,7 +403,7 @@ class LSPManager:
             dirs[:] = [
                 name
                 for name in dirs
-                if name not in SKIP_NAMES and not name.startswith(".")
+                if not should_skip_name(name) and not name.startswith(".")
             ]
             for fname in files:
                 if Path(fname).suffix not in extensions:

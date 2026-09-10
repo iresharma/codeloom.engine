@@ -5,7 +5,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from runtime.tools.fs import SKIP_NAMES, WorkspacePathError, relative_posix, resolve_in_workspace
+from runtime.tools.fs import (
+    WorkspacePathError,
+    relative_posix,
+    resolve_in_workspace,
+    should_skip_name,
+)
 
 LOCKFILE_NAMES = {
     "package-lock.json",
@@ -184,7 +189,7 @@ def guard_write_path(workspace: Path, path: str) -> Path:
     except ValueError:
         raise WorkspacePathError("path is outside the workspace")
     for part in rel.parts:
-        if part in SKIP_NAMES:
+        if should_skip_name(part):
             raise WorkspacePathError(f"writes to {part}/ are not allowed")
     name = resolved.name
     if name in LOCKFILE_NAMES:

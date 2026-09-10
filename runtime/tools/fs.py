@@ -12,7 +12,38 @@ SKIP_NAMES = {
     "node_modules",
     ".venv",
     "venv",
+    ".ruff_cache",
+    "ruff_cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".hypothesis",
+    ".tox",
+    ".nox",
+    ".cache",
+    ".eggs",
+    ".ipynb_checkpoints",
+    ".parcel-cache",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".nyc_output",
+    "htmlcov",
+    "coverage",
+    "site-packages",
+    "dist",
+    "build",
 }
+
+_SKIP_SUFFIXES = (".egg-info", ".dist-info")
+
+
+def should_skip_name(name: str) -> bool:
+    """True for caches, venvs, and other dirs that are not project source."""
+    if name in SKIP_NAMES:
+        return True
+    if name.endswith(_SKIP_SUFFIXES):
+        return True
+    return bool(name.startswith(".") and "cache" in name.lower())
 
 
 class WorkspacePathError(ValueError):
@@ -92,7 +123,7 @@ def _list_dir(workspace: Path, directory: Path) -> list[FileTreeNode]:
     except OSError:
         return []
     for entry in entries:
-        if entry.name in SKIP_NAMES:
+        if should_skip_name(entry.name):
             continue
         rel = relative_posix(workspace, entry)
         if entry.is_dir():

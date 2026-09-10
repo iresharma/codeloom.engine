@@ -4,7 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from runtime.tools.fs import SKIP_NAMES
+from runtime.tools.fs import should_skip_name
 from runtime.tools.git import tracked_paths
 
 SUPPORTED = ("python", "go", "javascript")
@@ -159,7 +159,7 @@ def _walk(workspace: Path) -> list[str]:
             break
         if not entry.is_file():
             continue
-        if any(part in SKIP_NAMES for part in entry.relative_to(workspace).parts):
+        if any(should_skip_name(part) for part in entry.relative_to(workspace).parts):
             continue
         paths.append(entry.relative_to(workspace).as_posix())
     return paths

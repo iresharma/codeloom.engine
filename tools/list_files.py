@@ -3,7 +3,7 @@ from runtime.tools.fs import list_tree
 from tools.base import ToolContext, tool
 
 
-@tool(description="List files in the workspace as relative paths, one per line.")
+@tool(description="List source files in the workspace as relative paths, one per line. Skips caches, venvs, and vendor dirs.")
 def list_files(ctx: ToolContext) -> str:
     paths: list[str] = []
     _collect(list_tree(ctx.workspace), paths)

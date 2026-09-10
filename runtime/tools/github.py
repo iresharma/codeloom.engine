@@ -5,6 +5,7 @@ import shutil
 import urllib.parse
 from pathlib import Path
 
+from runtime.tools.fs import should_skip_name
 from runtime.tools.git import exec_cmd
 
 MISSING_GH = (
@@ -14,6 +15,8 @@ LIST_LIMIT = 20
 BODY_CAP = 20_000
 FILE_CAP = 50_000
 RUN_LOG_CAP = 20_000
+TREE_CAP = 200
+DIR_HINT = "error: path is a directory; use github_tree"
 
 _which = shutil.which
 
@@ -350,7 +353,255 @@ def github_file(workspace: Path, repo: str, path: str, *, ref: str = "") -> str:
     )
     if raw.startswith("error:"):
         return raw
+    if _looks_like_dir_listing(raw):
+        return DIR_HINT
     return _clip(raw or "(empty)", FILE_CAP)
+
+
+_REPO_JSON = (
+    "nameWithOwner,description,url,homepageUrl,defaultBranchRef,"
+    "primaryLanguage,licenseInfo,repositoryTopics,stargazerCount,"
+    "forkCount,updatedAt,isPrivate"
+)
+
+
+def github_repo(workspace: Path, repo: str = "") -> str:
+    repo = (repo or "").strip()
+    args = ["repo", "view"]
+    if repo:
+        args.append(repo)
+    args.extend(["--json", _REPO_JSON])
+    raw = run_gh(workspace, args)
+    if raw.startswith("error:"):
+        return raw
+    try:
+        item = json.loads(raw)
+    except json.JSONDecodeError:
+        return _clip(raw, BODY_CAP)
+    if not isinstance(item, dict):
+        return "error: could not resolve repository"
+    name = item.get("nameWithOwner") or repo or ""
+    branch = _nested_name(item.get("defaultBranchRef"))
+    language = _nested_name(item.get("primaryLanguage"))
+    license_name = _nested_name(item.get("licenseInfo"))
+    topics = _topics(item.get("repositoryTopics"))
+    homepage = (item.get("homepageUrl") or "").strip()
+    private = item.get("isPrivate")
+    lines = [
+        name,
+        f"url: {item.get('url') or ''}".rstrip(),
+        f"description: {(item.get('description') or '').strip() or '(none)'}",
+        f"default_branch: {branch}",
+        f"language: {language}",
+        f"license: {license_name}",
+        f"topics: {', '.join(topics) if topics else '(none)'}",
+        f"stars: {item.get('stargazerCount') if item.get('stargazerCount') is not None else ''} "
+        f"forks: {item.get('forkCount') if item.get('forkCount') is not None else ''}".strip(),
+        f"updated: {item.get('updatedAt') or ''}".rstrip(),
+    ]
+    if homepage:
+        lines.append(f"homepage: {homepage}")
+    if private is True:
+        lines.append("private: true")
+    elif private is False:
+        lines.append("private: false")
+    return "\n".join(line for line in lines if line and not line.endswith(": ")).strip()
+
+
+def github_tree(
+    workspace: Path,
+    repo: str = "",
+    path: str = "",
+    *,
+    ref: str = "",
+    recursive: bool = False,
+) -> str:
+    repo = (repo or "").strip()
+    if not repo:
+        repo = current_repo(workspace)
+        if repo.startswith("error:"):
+            return repo
+    path = (path or "").strip().lstrip("/")
+    ref = (ref or "").strip()
+    if recursive:
+        return _tree_recursive(workspace, repo, path, ref)
+    return _tree_listing(workspace, repo, path, ref)
+
+
+def _tree_listing(workspace: Path, repo: str, path: str, ref: str) -> str:
+    url = f"repos/{repo}/contents"
+    if path:
+        url += "/" + urllib.parse.quote(path, safe="/")
+    if ref:
+        url += "?ref=" + urllib.parse.quote(ref)
+    raw = run_gh(workspace, ["api", url], timeout=60)
+    if raw.startswith("error:"):
+        return raw
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return _clip(raw, BODY_CAP)
+    if isinstance(payload, dict):
+        return "error: path is a file; use github_file"
+    if not isinstance(payload, list):
+        return "error: unexpected contents response"
+    rows = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or ""
+        if should_skip_name(name):
+            continue
+        kind = "dir" if item.get("type") == "dir" else "file"
+        rel = item.get("path") or name
+        size = item.get("size")
+        if kind == "file" and size is not None:
+            rows.append(f"{kind} {rel} {size}")
+        else:
+            rows.append(f"{kind} {rel}")
+        if len(rows) >= TREE_CAP:
+            break
+    if not rows:
+        return "(empty)"
+    text = "\n".join(rows)
+    if len(payload) > len(rows) and len(rows) >= TREE_CAP:
+        text += "\n...[truncated]"
+    return text
+
+
+def _tree_recursive(workspace: Path, repo: str, path: str, ref: str) -> str:
+    sha = ref or _default_branch(workspace, repo)
+    if sha.startswith("error:"):
+        return sha
+    url = f"repos/{repo}/git/trees/{urllib.parse.quote(sha, safe='')}?recursive=1"
+    raw = run_gh(workspace, ["api", url], timeout=60)
+    if raw.startswith("error:"):
+        return raw
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return _clip(raw, BODY_CAP)
+    entries = payload.get("tree") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return "error: unexpected tree response"
+    prefix = path.rstrip("/") + "/" if path else ""
+    rows = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        rel = (item.get("path") or "").strip()
+        if not rel:
+            continue
+        if prefix:
+            if rel != path and not rel.startswith(prefix):
+                continue
+            if rel == path and item.get("type") == "tree":
+                continue
+        if _skip_tree_path(rel):
+            continue
+        kind = "dir" if item.get("type") == "tree" else "file"
+        size = item.get("size")
+        if kind == "file" and size is not None:
+            rows.append(f"{kind} {rel} {size}")
+        else:
+            rows.append(f"{kind} {rel}")
+        if len(rows) >= TREE_CAP:
+            break
+    if not rows:
+        return "(empty)"
+    text = "\n".join(rows)
+    truncated = bool(isinstance(payload, dict) and payload.get("truncated"))
+    if truncated or len(rows) >= TREE_CAP:
+        text += "\n...[truncated]"
+    return text
+
+
+def _default_branch(workspace: Path, repo: str) -> str:
+    raw = run_gh(workspace, ["api", f"repos/{repo}"], timeout=30)
+    if raw.startswith("error:"):
+        return raw
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return "error: could not resolve default branch"
+    branch = ""
+    if isinstance(payload, dict):
+        branch = str(payload.get("default_branch") or "").strip()
+    if not branch:
+        return "error: could not resolve default branch"
+    return branch
+
+
+def _skip_tree_path(rel: str) -> bool:
+    return any(should_skip_name(part) for part in rel.split("/") if part)
+
+
+_GH_ENTRY_TYPES = frozenset({"file", "dir", "symlink", "submodule"})
+
+
+def _is_github_content_entry(item) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("type") not in _GH_ENTRY_TYPES:
+        return False
+    if not item.get("sha"):
+        return False
+    return bool(item.get("html_url") or item.get("git_url") or item.get("_links"))
+
+
+def _looks_like_dir_listing(raw: str) -> bool:
+    text = (raw or "").lstrip()
+    if not text.startswith("[") and not text.startswith("{"):
+        return False
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if isinstance(payload, list):
+        if not payload:
+            return False
+        sample = payload[:3]
+        return all(_is_github_content_entry(item) for item in sample)
+    if isinstance(payload, dict):
+        return payload.get("type") == "dir" and _is_github_content_entry(payload)
+    return False
+
+
+def _nested_name(value) -> str:
+    if isinstance(value, dict):
+        return str(
+            value.get("name")
+            or value.get("key")
+            or value.get("spdxId")
+            or ""
+        )
+    return str(value or "")
+
+
+def _topics(value) -> list[str]:
+    names: list[str] = []
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, dict):
+        items = value.get("nodes") or value.get("edges") or []
+    else:
+        return names
+    for item in items:
+        if isinstance(item, str):
+            if item:
+                names.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        topic = item.get("topic") if isinstance(item.get("topic"), dict) else item
+        name = topic.get("name") if isinstance(topic, dict) else ""
+        node = item.get("node") if isinstance(item.get("node"), dict) else None
+        if not name and node:
+            inner = node.get("topic") if isinstance(node.get("topic"), dict) else node
+            name = inner.get("name") if isinstance(inner, dict) else ""
+        if name:
+            names.append(str(name))
+    return names
 
 
 def pr_comment(workspace: Path, number: int, body: str, *, repo: str = "") -> str:

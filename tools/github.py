@@ -249,6 +249,59 @@ def github_file(ctx: ToolContext, path: str, repo: str = "", ref: str = "") -> s
 
 
 @tool(
+    description=(
+        "Repo metadata: description, default branch, language, license, "
+        "topics, stars. Empty repo uses the workspace remote."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            **_repo_props(),
+        },
+    },
+)
+def github_repo(ctx: ToolContext, repo: str = "") -> str:
+    return impl.github_repo(ctx.workspace, repo)
+
+
+@tool(
+    description=(
+        "List files and dirs in a GitHub repo path (name, type, size). "
+        "Empty path is the repo root. recursive=true walks the tree (capped). "
+        "Skip caches and vendor dirs."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            **_repo_props(),
+            "path": {
+                "type": "string",
+                "description": "Directory inside the repo. Empty is root.",
+            },
+            "ref": {
+                "type": "string",
+                "description": "Branch, tag, or SHA. Empty is the default branch.",
+            },
+            "recursive": {
+                "type": "boolean",
+                "description": "Walk the whole tree. Default false.",
+            },
+        },
+    },
+)
+def github_tree(
+    ctx: ToolContext,
+    repo: str = "",
+    path: str = "",
+    ref: str = "",
+    recursive: bool = False,
+) -> str:
+    return impl.github_tree(
+        ctx.workspace, repo, path, ref=ref, recursive=recursive
+    )
+
+
+@tool(
     description="Comment on a pull request. Asks the user for approval.",
     parameters={
         "type": "object",

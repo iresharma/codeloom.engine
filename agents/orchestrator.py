@@ -12,6 +12,7 @@ from agents.compactor import AgentResult, write_context_md
 from agents.hooks import AgentHooks
 from agents.profile import SKILLS, ProfileRegistry
 from agents.subagent import Subagent
+from runtime.config import CHILD_COMPACT_TRIGGER, CHILD_KEEP_FULL_TOOLS
 from runtime.prompts import PromptTimeout
 from runtime.tools.git import (
     SETTLE_CHOICES,
@@ -46,7 +47,7 @@ Writers (coder, tester) run in a git worktree on a new branch under .engine/work
 
 Never spawn coder or tester to merge, push, check out the user's branch, or open a pull request. Writers cannot leave their worktree and cannot check out a branch already in use. When the user wants those changes applied — including after a keep — call settle_worktree with merge, pr, or discard. Use action=status if you need the agent_id or branch.
 
-For code questions, spawn ask. For edits, spawn coder. For verification, spawn tester. For external docs, spawn researcher. For "what's broken", spawn debugger. After a code change, spawn reviewer if a verdict is useful.
+For code questions, spawn ask. For edits, spawn coder. For verification, spawn tester. For a library, API, GitHub repo, error message, or anything not in this workspace, spawn researcher. For "what's broken", spawn debugger. After a code change, spawn reviewer if a verdict is useful.
 
 A coder/tester task must include: concrete paths, the change or check required, and any facts already learned (quote ask's report; do not say "see above"). If you do not have those yet, spawn ask first instead of coder.
 
@@ -597,7 +598,10 @@ class Orchestrator(AgentLoop):
         self, profile, agent_id: str, workspace: Path, isolated: bool
     ) -> Subagent:
         child_config = replace(
-            self._config, max_turns=profile.max_turns or self._config.max_turns
+            self._config,
+            max_turns=profile.max_turns or self._config.max_turns,
+            compact_trigger=CHILD_COMPACT_TRIGGER,
+            keep_full_tools=CHILD_KEEP_FULL_TOOLS,
         )
         tools = self._all_tools.subset(profile.tool_names, profile=profile.name)
         hooks = None

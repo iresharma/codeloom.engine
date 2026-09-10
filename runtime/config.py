@@ -7,6 +7,8 @@ from pathlib import Path
 from llm.openrouter import load_env_sh
 
 EXEC_APPROVALS = ("auto", "always", "never")
+CHILD_COMPACT_TRIGGER = 0.9
+CHILD_KEEP_FULL_TOOLS = 10
 
 
 @dataclass
@@ -19,6 +21,8 @@ class EngineConfig:
     exec_timeout_s: int = 120
     exec_file_limit_mb: int = 2048
     context_budget: int = 120_000
+    compact_trigger: float = 0.7
+    keep_full_tools: int = 3
     max_spawns_per_turn: int = 8
     subscriber_capacity: int = 4096
     subscriber_bytes: int = 1 << 20

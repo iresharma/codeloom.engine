@@ -7,7 +7,7 @@ from runtime.tools.scan import todo_scan as todo_scan_impl
 @tool(
     description=(
         "Find TODO/FIXME/XXX/HACK comments. Returns path:line:text. "
-        "Default 80 hits. Skips .git, node_modules, venvs."
+        "Default 80 hits. Skips caches, .git, node_modules, venvs."
     ),
     parameters={
         "type": "object",
