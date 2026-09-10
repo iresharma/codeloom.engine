@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
-from agents.compactor import CONTEXT_MD_CAP, SUMMARY_CLIP, compress_for_parent, write_context_md
+from agents.compactor import (
+    CONTEXT_MD_CAP,
+    SUMMARY_CLIP,
+    compress_for_parent,
+    write_context_md,
+)
 from agents.profile import REPORT_TO_ORCH, TEST_GLOBS, discover_profiles
+from llm.provider import LLMResult
 from runtime.tools.edits import apply_edit
 from runtime.tools.fileid import read_source
 from tools.registry import discover_tools
@@ -209,3 +216,252 @@ def test_write_context_trims(tmp_path):
     text = (tmp_path / ".engine" / "context.md").read_text()
     assert "tail-unique" in text
     assert len(text) <= CONTEXT_MD_CAP
+
+
+def _attempted_required(name="get_diagnostics", path="a.py"):
+    return [
+        {"role": "system", "content": "coder"},
+        {"role": "user", "content": "edit"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "1",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps({"path": path}),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "1", "content": "cancelled"},
+        {"role": "assistant", "content": "done"},
+    ]
+
+
+def test_empty_tools_called_does_not_scan_history():
+    async def run():
+        return await compress_for_parent(
+            _attempted_required(),
+            required_tools=["get_diagnostics"],
+            tools_called=set(),
+        )
+
+    result = asyncio.run(run())
+    assert result.status == "incomplete"
+    assert "get_diagnostics" in result.missing_checks
+
+
+def test_empty_files_touched_does_not_scan_history():
+    async def run():
+        return await compress_for_parent(
+            _attempted_required(),
+            files_touched=[],
+        )
+
+    result = asyncio.run(run())
+    assert result.files_touched == []
+
+
+def test_paths_from_history_fallback_reads_dest_and_file():
+    async def run():
+        return await compress_for_parent(
+            [
+                {"role": "user", "content": "x"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "1",
+                            "function": {
+                                "name": "copy",
+                                "arguments": json.dumps(
+                                    {
+                                        "dest": "out.py",
+                                        "file": "src.py",
+                                        "glob": "*.py",
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                },
+            ]
+        )
+
+    result = asyncio.run(run())
+    assert result.files_touched == ["src.py", "out.py"]
+    assert "*.py" not in result.files_touched
+
+
+def test_leftover_from_closer():
+    async def run():
+        return await compress_for_parent(
+            [
+                {"role": "user", "content": "x"},
+                {
+                    "role": "assistant",
+                    "content": "verdict: ok\nleftover: confirm the API; which branch?",
+                },
+            ]
+        )
+
+    result = asyncio.run(run())
+    assert result.leftover_questions == ["confirm the API", "which branch?"]
+    assert "leftover_questions:" in result.as_text()
+
+
+def test_summarize_keeps_outcome_distinct_and_parses_leftover():
+    captured = []
+
+    async def complete(prompt):
+        captured.append(prompt)
+        return LLMResult(
+            text="what: found retry\npaths: a.py\nverdict: ok\nleftover: confirm API"
+        )
+
+    async def run():
+        messages = [
+            {"role": "user", "content": "where?"},
+            {"role": "assistant", "content": "looking"},
+            {"role": "user", "content": "again"},
+            {"role": "assistant", "content": "still"},
+            {"role": "user", "content": "now"},
+            {"role": "assistant", "content": "it is in a.py"},
+        ]
+        return await compress_for_parent(messages, complete=complete)
+
+    result = asyncio.run(run())
+    assert captured
+    assert result.outcome == "it is in a.py"
+    assert result.summary != result.outcome
+    assert "found retry" in result.summary
+    assert result.leftover_questions == ["confirm API"]
+    text = result.as_text()
+    assert "outcome: it is in a.py" in text
+    assert "summary: " in text
+
+
+def test_summarize_failure_is_visible():
+    async def complete(prompt):
+        raise TimeoutError("llm down")
+
+    async def run():
+        messages = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+            {"role": "user", "content": "c"},
+            {"role": "assistant", "content": "d"},
+            {"role": "user", "content": "e"},
+            {"role": "assistant", "content": "closer text"},
+        ]
+        return await compress_for_parent(messages, complete=complete)
+
+    result = asyncio.run(run())
+    assert result.status == "ok"
+    assert result.summary == "summarize failed: TimeoutError"
+    assert result.outcome == "closer text"
+
+
+def test_summary_clips_on_full_line():
+    report = "\n".join(
+        [
+            "what: " + ("w" * 220),
+            "paths: a.py",
+            "verdict: ship-it-now",
+            "leftover: confirm API",
+            "notes: " + ("p" * 200),
+        ]
+    )
+
+    async def complete(prompt):
+        return LLMResult(text=report)
+
+    async def run():
+        messages = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+            {"role": "user", "content": "c"},
+            {"role": "assistant", "content": "d"},
+            {"role": "user", "content": "e"},
+            {"role": "assistant", "content": "done"},
+        ]
+        return await compress_for_parent(messages, complete=complete)
+
+    result = asyncio.run(run())
+    assert len(result.summary) <= SUMMARY_CLIP
+    assert "ship-it-now" in result.summary
+    assert result.summary.endswith("leftover: confirm API")
+    assert "ppp" not in result.summary
+    assert result.leftover_questions == ["confirm API"]
+
+
+def test_compress_summarize_keeps_tail():
+    captured = []
+
+    async def complete(prompt):
+        captured.append(prompt[1]["content"])
+        return LLMResult(text="what: ok")
+
+    async def run():
+        messages = [
+            {"role": "user", "content": "head-marker"},
+            {"role": "assistant", "content": "mid-a " * 4000},
+            {"role": "user", "content": "mid-b " * 4000},
+            {"role": "assistant", "content": "mid-c " * 4000},
+            {"role": "user", "content": "mid-d " * 4000},
+            {"role": "assistant", "content": "UNIQUE_TAIL closer"},
+        ]
+        return await compress_for_parent(messages, complete=complete)
+
+    result = asyncio.run(run())
+    assert captured
+    payload = captured[0]
+    assert "UNIQUE_TAIL" in payload
+    assert "head-marker" in payload
+    assert "middle omitted" in payload
+    assert result.outcome == "UNIQUE_TAIL closer"
+
+
+def test_as_text_omits_duplicate_outcome():
+    async def run():
+        return await compress_for_parent(
+            [
+                {"role": "user", "content": "x"},
+                {"role": "assistant", "content": "same closer"},
+            ]
+        )
+
+    result = asyncio.run(run())
+    text = result.as_text()
+    assert "summary: same closer" in text
+    assert "outcome:" not in text
+
+
+def test_finish_preserves_status_on_compaction_error(tmp_path):
+    from unittest.mock import patch
+
+    from agents.profiles.ask import PROFILE
+    from agents.subagent import Subagent
+    from tests.fakes import FakeProvider
+    from tools.registry import ToolRegistry
+
+    child = Subagent(
+        PROFILE,
+        llm=FakeProvider(),
+        tools=ToolRegistry(),
+        workspace=tmp_path,
+    )
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("paths exploded")
+
+    async def run():
+        with patch("agents.subagent.compress_for_parent", boom):
+            return await child.finish("ok")
+
+    result = asyncio.run(run())
+    assert result.status == "ok"
+    assert result.outcome.startswith("compaction error:")
+    assert "paths exploded" in result.outcome

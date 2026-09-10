@@ -551,6 +551,40 @@ def test_batch_nickname():
     )
 
 
+def test_apply_run_status_precedence():
+    from agents.compactor import AgentResult
+    from agents.orchestrator import _apply_run_status
+
+    incomplete = AgentResult(
+        status="incomplete",
+        summary="missed diagnostics",
+        outcome="closer",
+        missing_checks=["get_diagnostics"],
+    )
+    _apply_run_status(incomplete, "max_turns", "stopped after 16 turns")
+    assert incomplete.status == "incomplete"
+
+    ok = AgentResult(status="ok", summary="done", outcome="done")
+    _apply_run_status(ok, "max_turns", "stopped after 16 turns")
+    assert ok.status == "max_turns"
+
+    aborted = AgentResult(status="incomplete", summary="s", outcome="closer")
+    _apply_run_status(aborted, "aborted", "(aborted)")
+    assert aborted.status == "aborted"
+    assert aborted.outcome == "closer"
+
+    failed = AgentResult(status="ok", summary="report", outcome="closer")
+    _apply_run_status(failed, "failed", "error: boom")
+    assert failed.status == "failed"
+    assert failed.summary == "report"
+    assert failed.outcome == "closer"
+
+    empty = AgentResult(status="ok", summary="", outcome="")
+    _apply_run_status(empty, "failed", "error: boom")
+    assert empty.status == "failed"
+    assert empty.outcome == "error: boom"
+
+
 def test_request_orch_context(tmp_path):
     from protocol.commands import RequestOrchContext
     from protocol.events import OrchContext

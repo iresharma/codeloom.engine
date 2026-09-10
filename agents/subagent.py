@@ -4,6 +4,7 @@ from agents.agent_loop import AgentLoop
 from agents.compactor import AgentResult, compress_for_parent
 from agents.profile import REPORT_TO_ORCH, AgentProfile
 
+
 class Subagent(AgentLoop):
     """Same loop as the orch, no user-facing chat stream, no spawn tools."""
 
@@ -34,8 +35,8 @@ class Subagent(AgentLoop):
             )
         except Exception as exc:  # noqa: BLE001
             return AgentResult(
-                status="failed",
+                status=status,
                 summary="",
-                outcome=f"error: {exc}",
+                outcome=f"compaction error: {exc}",
                 files_touched=list(self._files_touched),
             )

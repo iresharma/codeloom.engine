@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
 
 from agents.compactor import (
     CONTEXT_ERROR_MARKERS,
+    CONTEXT_MD_CAP,
+    _bounded_transcript,
     compact,
     estimate_tokens,
     looks_like_overflow,
     read_context_md,
     trim_tool_results,
     validate_history,
+    write_context_md,
 )
 from llm.provider import LLMResult
 from protocol.codec import encode
@@ -215,3 +220,71 @@ def test_context_md_reports_encoding_replacement(tmp_path):
     text = read_context_md(tmp_path)
     assert "encoding errors replaced" in text
     assert "ok" in text
+
+
+def test_bounded_transcript_keeps_head_and_tail():
+    items = [
+        {"role": "user", "content": "head-marker"},
+        {"role": "assistant", "content": "MIDDLE " * 500},
+        {"role": "user", "content": "more-middle " * 500},
+        {"role": "assistant", "content": "UNIQUE_TAIL"},
+    ]
+    raw = json.dumps(items)
+    assert len(raw) > 800
+    dumped = _bounded_transcript(items, limit=800)
+    assert len(dumped) <= 800
+    payload = json.loads(dumped)
+    assert isinstance(payload, list)
+    assert "head-marker" in dumped
+    assert "UNIQUE_TAIL" in dumped
+    assert "middle omitted" in dumped
+    assert dumped == json.dumps(payload, default=str)
+
+
+def test_summarize_prompt_keeps_tail():
+    captured = []
+
+    async def complete(prompt):
+        captured.append(prompt[1]["content"])
+        return LLMResult(text="kept tail")
+
+    async def run():
+        messages = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "head-marker"},
+            *_tool_group("1", result="MIDDLE " * 4000),
+            {"role": "user", "content": "second"},
+            *_tool_group("2", result="UNIQUE_TAIL " * 10),
+            {"role": "user", "content": "latest"},
+            *_tool_group("3", result="now"),
+        ]
+        return await compact(messages, 200, complete=complete)
+
+    asyncio.run(run())
+    assert captured
+    payload = captured[0]
+    json.loads(payload)
+    assert "head-marker" in payload
+    assert "second" in payload
+    assert "middle omitted" in payload
+
+
+def test_write_context_concurrent(tmp_path):
+    errors = []
+
+    def write(n):
+        try:
+            write_context_md(tmp_path, f"note-{n}-unique")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(i,)) for i in range(20)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    text = (tmp_path / ".engine" / "context.md").read_text()
+    assert not errors
+    for i in range(20):
+        assert f"note-{i}-unique" in text
+    assert len(text) <= CONTEXT_MD_CAP + 80

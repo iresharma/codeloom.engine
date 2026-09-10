@@ -69,6 +69,29 @@ class _PendingSettle:
     summary: str
 
 
+def _apply_run_status(
+    result: AgentResult, run_status: str, run_outcome: str
+) -> AgentResult:
+    """Merge child.run() status onto the compressor result.
+
+    aborted/failed always win. incomplete (missing required tools) beats
+    max_turns and ok. max_turns only replaces ok. A failed run keeps the
+    compressor summary and only fills outcome from the exception when empty.
+    """
+    if run_status in {"aborted", "failed"}:
+        result.status = run_status
+        if (
+            run_status == "failed"
+            and run_outcome.startswith("error:")
+            and not (result.outcome or "").strip()
+        ):
+            result.outcome = run_outcome
+        return result
+    if run_status == "max_turns" and result.status == "ok":
+        result.status = "max_turns"
+    return result
+
+
 class Orchestrator(AgentLoop):
     def __init__(
         self,
@@ -447,10 +470,7 @@ class Orchestrator(AgentLoop):
             result = AgentResult(status="aborted", outcome="(aborted)")
         except Exception as exc:  # noqa: BLE001
             result = AgentResult(status="failed", outcome=f"error: {exc}")
-        if status in {"aborted", "failed", "max_turns"}:
-            result.status = status
-        if status == "failed" and outcome.startswith("error:"):
-            result.outcome = outcome
+        _apply_run_status(result, status, outcome)
         note = (
             f"subagent {agent_id} ({profile.name}): {result.status} — "
             f"{(result.summary or result.outcome)[:200]}"
