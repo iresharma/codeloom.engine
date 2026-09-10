@@ -5,7 +5,6 @@ import json
 from contextlib import suppress
 from pathlib import Path
 
-from rich.markup import escape
 from rich.rule import Rule as RichRule
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -32,6 +31,14 @@ from protocol.events import (
     ToolCallStarted,
     UserPromptRequested,
 )
+
+
+def escape(text: str) -> str:
+    # Library escape() only covers [tag]-like spans; JSON `[{...}]` still opens a tag.
+    text = text.replace("[", "\\[")
+    if text.endswith("\\") and not text.endswith("\\\\"):
+        return text + "\\"
+    return text
 
 
 class EventReceived(Message):
