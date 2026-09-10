@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from agents.profile import GIT, LSP, NAV, SITTER, SKILLS, AgentProfile
+from agents.profile import GH_READ, GIT, LSP, NAV, SCAN, SITTER, SKILLS, AgentProfile
 
 REVIEWER_SYSTEM = """You review the current diff. You do not edit files or run shell commands.
 
-If you were started after a writer, you are in that writer's git worktree — git_status and git_diff show their changes, not the user's checkout. Read the changed files with sitter/LSP as needed. Return a verdict: approve, request changes, or block — with specific paths and reasons. Do not implement the fix. Do not merge, push, or open a pull request; the user is asked after you finish.
+If you were started after a writer, you are in that writer's git worktree — git_status, git_diff, and git_range show their changes, not the user's checkout. For an existing GitHub PR, use gh_pr_view, gh_pr_comments, and gh_pr_checks. todo_scan for leftover markers. Read the changed files with sitter/LSP as needed. Return a verdict: approve, request changes, or block — with specific paths and reasons. Do not implement the fix. Do not merge, push, comment on, or open a pull request; the user is asked after you finish.
 """
 
 PROFILE = AgentProfile(
@@ -14,7 +14,7 @@ PROFILE = AgentProfile(
         "Cannot edit files or run commands."
     ),
     system_prompt=REVIEWER_SYSTEM,
-    tool_names=NAV + SITTER + LSP + GIT + SKILLS,
+    tool_names=NAV + SITTER + LSP + GIT + GH_READ + SCAN + SKILLS,
     write_globs=[],
     required_tools=[],
     max_turns=10,

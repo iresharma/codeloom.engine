@@ -6,8 +6,12 @@ import subprocess
 from pathlib import Path
 
 from protocol.snapshot import GitState
+from runtime.tools.fs import WorkspacePathError, resolve_in_workspace
 
 SETTLE_CHOICES = ("merge", "pr", "keep", "discard")
+LOG_MAX = 50
+SHOW_CAP = 40_000
+BLAME_CAP = 20_000
 
 
 def read_state(workspace: Path, *, diffs: bool = True) -> GitState:
@@ -214,12 +218,16 @@ def drop_empty_worktree(workspace: Path, dest: Path, branch: str) -> str:
     return err
 
 
-def _exec(
-    workspace: Path, args: list[str], *, timeout: float = 60
-) -> subprocess.CompletedProcess:
+def proc_env() -> dict[str, str]:
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GH_PROMPT_DISABLED"] = "1"
+    return env
+
+
+def exec_cmd(
+    workspace: Path, args: list[str], *, timeout: float = 60
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         args,
         cwd=str(workspace),
@@ -227,8 +235,102 @@ def _exec(
         text=True,
         timeout=timeout,
         check=False,
-        env=env,
+        env=proc_env(),
     )
+
+
+def _exec(
+    workspace: Path, args: list[str], *, timeout: float = 60
+) -> subprocess.CompletedProcess:
+    return exec_cmd(workspace, args, timeout=timeout)
+
+
+def git_log(workspace: Path, *, max_count: int = 20, path: str = "") -> str:
+    workspace = Path(workspace).resolve()
+    if not _is_repo(workspace):
+        return "not a git repository"
+    try:
+        requested = int(max_count)
+    except (TypeError, ValueError):
+        requested = 20
+    take = max(1, min(requested, LOG_MAX))
+    args = ["log", "--oneline", f"-n{take}"]
+    if path.strip():
+        try:
+            resolve_in_workspace(workspace, path)
+        except WorkspacePathError as exc:
+            return f"error: {exc}"
+        args.extend(["--", path.strip()])
+    result = exec_cmd(workspace, ["git", *args], timeout=20)
+    if result.returncode != 0:
+        return f"error: {(result.stderr or result.stdout or 'git log failed').strip()}"
+    return result.stdout.strip() or "(no commits)"
+
+
+def git_show(workspace: Path, rev: str) -> str:
+    workspace = Path(workspace).resolve()
+    if not _is_repo(workspace):
+        return "not a git repository"
+    rev = (rev or "").strip()
+    if not rev:
+        return "error: rev is required"
+    result = exec_cmd(workspace, ["git", "show", "--stat", "--format=fuller", rev], timeout=20)
+    if result.returncode != 0:
+        return f"error: {(result.stderr or result.stdout or 'git show failed').strip()}"
+    patch = exec_cmd(workspace, ["git", "show", "--format=", rev], timeout=20)
+    if patch.returncode != 0:
+        return f"error: {(patch.stderr or patch.stdout or 'git show failed').strip()}"
+    text = (result.stdout or "") + ("\n" + (patch.stdout or "") if patch.stdout else "")
+    return _clip(text.strip() or "(empty)", SHOW_CAP)
+
+
+def git_blame(
+    workspace: Path, path: str, *, start_line: int = 0, end_line: int = 0
+) -> str:
+    workspace = Path(workspace).resolve()
+    if not _is_repo(workspace):
+        return "not a git repository"
+    path = (path or "").strip()
+    if not path:
+        return "error: path is required"
+    try:
+        resolve_in_workspace(workspace, path)
+    except WorkspacePathError as exc:
+        return f"error: {exc}"
+    args = ["blame"]
+    start = int(start_line or 0)
+    end = int(end_line or 0)
+    if start > 0:
+        args.extend(["-L", f"{start},{end or start}"])
+    args.extend(["--", path])
+    result = exec_cmd(workspace, ["git", *args], timeout=20)
+    if result.returncode != 0:
+        return f"error: {(result.stderr or result.stdout or 'git blame failed').strip()}"
+    return _clip((result.stdout or "").rstrip() or "(empty)", BLAME_CAP)
+
+
+def git_range(workspace: Path, base: str, head: str) -> str:
+    workspace = Path(workspace).resolve()
+    if not _is_repo(workspace):
+        return "not a git repository"
+    base = (base or "").strip()
+    head = (head or "").strip()
+    if not base or not head:
+        return "error: base and head are required"
+    spec = f"{base}...{head}"
+    log = exec_cmd(workspace, ["git", "log", "--oneline", spec], timeout=20)
+    if log.returncode != 0:
+        return f"error: {(log.stderr or log.stdout or 'git range failed').strip()}"
+    stat = exec_cmd(workspace, ["git", "diff", "--stat", spec], timeout=20)
+    commits = (log.stdout or "").strip() or "(no commits)"
+    files = (stat.stdout or "").strip() or "(no diff)"
+    return _clip(f"commits {spec}:\n{commits}\n\n{files}", SHOW_CAP)
+
+
+def _clip(text: str, cap: int) -> str:
+    if len(text) <= cap:
+        return text
+    return text[:cap] + "\n...[truncated]"
 
 
 def tracked_paths(workspace: Path) -> list[str] | None:
