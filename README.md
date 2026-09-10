@@ -1,5 +1,7 @@
 # Engine
 
+![coverage](coverage.svg)
+
 A headless backend for an AI coding agent.
 
 Engine runs as a long-lived process bound to one workspace. It exposes a
@@ -855,6 +857,19 @@ pytest tests/test_apply.py  # one module
 
 `pytest.ini` sets `pythonpath = .` and `testpaths = tests`, so no install step
 is needed.
+
+To check coverage locally:
+
+```bash
+pytest --cov                       # coverage summary in the terminal
+coverage-badge -o coverage.svg -f  # regenerate the badge shown at the top of this README
+```
+
+`.coveragerc` scopes coverage to the source packages and excludes `tests/`.
+CI (`.github/workflows/tests.yml`) runs `pytest --cov` on every push and pull
+request, and on pushes to `main` it regenerates `coverage.svg` and commits it
+back to the repo with `[skip ci]` so the badge stays current without
+retriggering the workflow.
 
 Tests across 18 modules. The original write-path suite is unchanged; the new
 modules cover the runtime foundation (config, streaming, turns, stats, shell,

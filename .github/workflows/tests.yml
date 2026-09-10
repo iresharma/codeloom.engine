@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: pytest --cov -m "not lsp"
+
+      - name: Generate coverage badge
+        run: coverage-badge -o coverage.svg -f
+
+      - name: Commit coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add coverage.svg
+          git diff --cached --quiet || git commit -m "chore: update coverage badge [skip ci]"
+          git push

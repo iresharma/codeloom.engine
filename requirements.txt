@@ -7,3 +7,5 @@ tree-sitter-typescript
 tree-sitter-go
 textual>=1.0
 pytest>=8.0
+pytest-cov>=5.0
+coverage-badge>=1.1
