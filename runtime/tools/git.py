@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,6 +13,8 @@ SETTLE_CHOICES = ("merge", "pr", "keep", "discard")
 LOG_MAX = 50
 SHOW_CAP = 40_000
 BLAME_CAP = 20_000
+_ENGINE_AUTHOR = "engine"
+_ENGINE_EMAIL = "engine@localhost"
 
 
 def read_state(workspace: Path, *, diffs: bool = True) -> GitState:
@@ -108,28 +111,50 @@ def worktree_has_changes(workspace: Path, dest: Path) -> bool:
     if state.dirty:
         return True
     base = _run(workspace, "rev-parse", "HEAD").strip()
-    head = _run(dest, "rev-parse", "HEAD").strip()
-    return bool(base and head and base != head)
+    if not base:
+        return False
+    ahead = _run(dest, "rev-list", "--count", f"{base}..HEAD").strip()
+    try:
+        return int(ahead or "0") > 0
+    except ValueError:
+        return False
+
+
+def is_settle_prompt(choices) -> bool:
+    return set(choices or ()) == set(SETTLE_CHOICES)
+
+
+def parse_settle_intent(text: str) -> str | None:
+    """Return merge/pr/keep/discard when `text` clearly settles a worktree."""
+    raw = " ".join((text or "").strip().lower().split())
+    if not raw:
+        return None
+    if raw in {"merge", "m"}:
+        return "merge"
+    if raw in {"pr", "pull-request", "pull request"}:
+        return "pr"
+    if raw in {"keep", "leave", "later", "skip", "no"}:
+        return "keep"
+    if raw in {"discard", "delete", "remove", "drop"}:
+        return "discard"
+    if re.search(r"\b(don't|dont|do not)\s+merge\b", raw):
+        return "keep"
+    if "discard" in raw:
+        return "discard"
+    if "pull request" in raw or re.search(r"\bprs?\b", raw):
+        return "pr"
+    if raw.startswith("open") or raw.startswith("create"):
+        if "pr" in raw.split() or "pull" in raw:
+            return "pr"
+    if re.search(r"\bmerge\b", raw):
+        return "merge"
+    if raw.startswith("keep") or "keep the worktree" in raw:
+        return "keep"
+    return None
 
 
 def normalize_settle_action(text: str) -> str:
-    raw = (text or "").strip().lower()
-    if not raw:
-        return "keep"
-    if "discard" in raw or raw in {"delete", "remove", "drop"}:
-        return "discard"
-    if raw in {"keep", "leave", "later", "skip", "no"}:
-        return "keep"
-    if raw in {"merge", "m"} or raw.startswith("merge"):
-        return "merge"
-    if (
-        raw in {"pr", "pull-request", "pull request"}
-        or "pr" in raw.split()
-        or raw.startswith("create")
-        or raw.startswith("open")
-    ):
-        return "pr"
-    return "keep"
+    return parse_settle_intent(text) or "keep"
 
 
 def commit_if_dirty(dest: Path, message: str) -> str:
@@ -140,7 +165,11 @@ def commit_if_dirty(dest: Path, message: str) -> str:
     added = _exec(dest, ["git", "add", "-A"])
     if added.returncode != 0:
         return (added.stderr or added.stdout or "git add failed").strip()
-    commit = _exec(dest, ["git", "commit", "-m", message or "engine worktree"])
+    commit = _exec(
+        dest,
+        ["git", "commit", "-m", message or "engine worktree"],
+        env=_commit_identity(dest),
+    )
     if commit.returncode != 0:
         return (commit.stderr or commit.stdout or "git commit failed").strip()
     return ""
@@ -182,7 +211,7 @@ def apply_worktree(
         return True, f"merged {branch}", ""
     if action == "pr":
         pushed = _exec(
-            workspace, ["git", "push", "-u", "origin", branch], timeout=120
+            dest, ["git", "push", "-u", "origin", "HEAD"], timeout=120
         )
         if pushed.returncode != 0:
             return False, (pushed.stderr or pushed.stdout or "git push failed").strip(), ""
@@ -218,6 +247,65 @@ def drop_empty_worktree(workspace: Path, dest: Path, branch: str) -> str:
     return err
 
 
+def list_engine_worktrees(workspace: Path) -> list[tuple[str, str, Path]]:
+    """Engine worktrees still registered with git. (agent_id, branch, dest)."""
+    workspace = Path(workspace).resolve()
+    root = (workspace / ".engine" / "worktrees").resolve()
+    if not _is_repo(workspace) or not root.is_dir():
+        return []
+    result = exec_cmd(
+        workspace, ["git", "worktree", "list", "--porcelain"], timeout=20
+    )
+    if result.returncode != 0:
+        return []
+    found: list[tuple[str, str, Path]] = []
+    path = ""
+    branch = ""
+    for line in (result.stdout or "").splitlines():
+        if line.startswith("worktree "):
+            if path:
+                item = _engine_worktree_row(root, path, branch)
+                if item is not None:
+                    found.append(item)
+            path = line[9:].strip()
+            branch = ""
+            continue
+        if line.startswith("branch "):
+            ref = line[7:].strip()
+            branch = ref[11:] if ref.startswith("refs/heads/") else ref
+            continue
+        if line == "":
+            if path:
+                item = _engine_worktree_row(root, path, branch)
+                if item is not None:
+                    found.append(item)
+            path = ""
+            branch = ""
+    if path:
+        item = _engine_worktree_row(root, path, branch)
+        if item is not None:
+            found.append(item)
+    return found
+
+
+def _engine_worktree_row(
+    root: Path, path: str, branch: str
+) -> tuple[str, str, Path] | None:
+    try:
+        dest = Path(path).resolve()
+        dest.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    if not dest.is_dir() or dest == root:
+        return None
+    agent_id = dest.name
+    if not agent_id:
+        return None
+    if not branch:
+        branch = _run(dest, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    return agent_id, branch, dest
+
+
 def proc_env() -> dict[str, str]:
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -226,8 +314,11 @@ def proc_env() -> dict[str, str]:
 
 
 def exec_cmd(
-    workspace: Path, args: list[str], *, timeout: float = 60
+    workspace: Path, args: list[str], *, timeout: float = 60, env: dict | None = None
 ) -> subprocess.CompletedProcess:
+    merged = proc_env()
+    if env:
+        merged.update(env)
     return subprocess.run(
         args,
         cwd=str(workspace),
@@ -235,14 +326,31 @@ def exec_cmd(
         text=True,
         timeout=timeout,
         check=False,
-        env=proc_env(),
+        env=merged,
     )
 
 
+def _commit_identity(dest: Path) -> dict[str, str]:
+    extra: dict[str, str] = {}
+    name = _run(dest, "config", "user.name").strip()
+    email = _run(dest, "config", "user.email").strip()
+    if not name:
+        extra["GIT_AUTHOR_NAME"] = _ENGINE_AUTHOR
+        extra["GIT_COMMITTER_NAME"] = _ENGINE_AUTHOR
+    if not email:
+        extra["GIT_AUTHOR_EMAIL"] = _ENGINE_EMAIL
+        extra["GIT_COMMITTER_EMAIL"] = _ENGINE_EMAIL
+    return extra
+
+
 def _exec(
-    workspace: Path, args: list[str], *, timeout: float = 60
+    workspace: Path,
+    args: list[str],
+    *,
+    timeout: float = 60,
+    env: dict | None = None,
 ) -> subprocess.CompletedProcess:
-    return exec_cmd(workspace, args, timeout=timeout)
+    return exec_cmd(workspace, args, timeout=timeout, env=env)
 
 
 def git_log(workspace: Path, *, max_count: int = 20, path: str = "") -> str:

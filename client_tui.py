@@ -738,6 +738,7 @@ class DummyClientApp(App):
             return
         if isinstance(event, UserPromptRequested):
             dummy_client._LAST_PROMPT_ID = event.prompt_id
+            dummy_client._LAST_PROMPT_CHOICES = list(event.choices or [])
             chat.add_prompt(event)
             self._refresh_prompt()
 

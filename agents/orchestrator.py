@@ -17,7 +17,9 @@ from runtime.tools.git import (
     SETTLE_CHOICES,
     add_agent_worktree,
     apply_worktree,
+    commit_if_dirty,
     drop_empty_worktree,
+    list_engine_worktrees,
     normalize_settle_action,
     remove_agent_worktree,
     worktree_has_changes,
@@ -41,6 +43,8 @@ Dependent work is sequenced across turns, not inside one turn:
 - After a code change, spawn tester and/or reviewer the same way — on the previous child's report, not by guessing.
 
 Writers (coder, tester) run in a git worktree on a new branch under .engine/worktrees/. They will not collide with each other or with the user's checkout. Reviewer joins that worktree so it sees the writer's diff. The user is asked to merge, open a PR, keep, or discard after the writer and any reviewer on that tree have finished. A follow-up engine report says what they chose. Ask, researcher, and debugger use the main workspace.
+
+Never spawn coder or tester to merge, push, check out the user's branch, or open a pull request. Writers cannot leave their worktree and cannot check out a branch already in use. When the user wants those changes applied — including after a keep — call settle_worktree with merge, pr, or discard. Use action=status if you need the agent_id or branch.
 
 For code questions, spawn ask. For edits, spawn coder. For verification, spawn tester. For external docs, spawn researcher. For "what's broken", spawn debugger. After a code change, spawn reviewer if a verdict is useful.
 
@@ -96,6 +100,8 @@ class Orchestrator(AgentLoop):
         self._worktrees: dict[str, Path] = {}
         self._worktree_branches: dict[str, str] = {}
         self._worktree_batches: dict[str, str] = {}
+        self._worktree_summaries: dict[str, str] = {}
+        self._worktree_profiles: dict[str, str] = {}
         self._pending_settles: dict[str, _PendingSettle] = {}
         self._child_lsps: dict[str, object] = {}
         self._spawn_lock: asyncio.Lock | None = None
@@ -125,6 +131,8 @@ class Orchestrator(AgentLoop):
         for spec in profiles.as_tools(self.spawn):
             self._tools.register(spec)
         self._tools.register(_write_context_tool(self._ctx.workspace))
+        self._tools.register(_settle_worktree_tool(self))
+        self._recover_worktrees()
 
     def reset_spawn_budget(self) -> None:
         self._aborting_all = False
@@ -168,9 +176,126 @@ class Orchestrator(AgentLoop):
         for agent_id, dest in list(self._worktrees.items()):
             with suppress(OSError):
                 remove_agent_worktree(self._ctx.workspace, dest)
-            self._worktrees.pop(agent_id, None)
-            self._worktree_branches.pop(agent_id, None)
-            self._worktree_batches.pop(agent_id, None)
+            self._forget_worktree(agent_id)
+
+    def _forget_worktree(self, agent_id: str) -> None:
+        self._worktrees.pop(agent_id, None)
+        self._worktree_branches.pop(agent_id, None)
+        self._worktree_batches.pop(agent_id, None)
+        self._worktree_summaries.pop(agent_id, None)
+        self._worktree_profiles.pop(agent_id, None)
+        self._pending_settles.pop(agent_id, None)
+
+    def _recover_worktrees(self) -> None:
+        workspace = self._ctx.workspace
+        for agent_id, branch, dest in list_engine_worktrees(workspace):
+            if agent_id in self._worktrees or agent_id in self._child_tasks:
+                continue
+            if not worktree_has_changes(workspace, dest):
+                drop_empty_worktree(workspace, dest, branch)
+                continue
+            self._worktrees[agent_id] = dest
+            self._worktree_branches[agent_id] = branch
+            profile = ""
+            if branch.startswith("engine/") and branch.count("/") >= 2:
+                profile = branch.split("/", 2)[1]
+            self._worktree_profiles[agent_id] = profile or "coder"
+
+    def _remember_worktree(
+        self, agent_id: str, dest: Path, branch: str, profile: str, batch_id: str
+    ) -> None:
+        self._worktrees[agent_id] = dest
+        self._worktree_branches[agent_id] = branch
+        self._worktree_batches[agent_id] = batch_id
+        self._worktree_profiles[agent_id] = profile
+
+    def describe_worktrees(self) -> str:
+        self._recover_worktrees()
+        if not self._worktrees:
+            return "no open writer worktrees"
+        lines = []
+        for agent_id, dest in self._worktrees.items():
+            branch = self._worktree_branches.get(agent_id, "")
+            profile = self._worktree_profiles.get(agent_id, "")
+            dirty = worktree_has_changes(self._ctx.workspace, dest)
+            lines.append(
+                f"agent_id={agent_id} profile={profile or '-'} "
+                f"branch={branch} dirty={str(dirty).lower()} path={dest}"
+            )
+        return "\n".join(lines)
+
+    async def apply_named_worktree(
+        self, action: str, agent_id: str = "", branch: str = ""
+    ) -> str:
+        if action.strip().lower() in {"status", "list", ""}:
+            return self.describe_worktrees()
+        chosen = self._pick_worktree(agent_id=agent_id, branch=branch)
+        if chosen is None:
+            extra = self.describe_worktrees()
+            return f"error: no matching writer worktree\n{extra}"
+        aid, dest, wt_branch, profile, summary = chosen
+        settle = self._settle_tasks.pop(aid, None)
+        if settle is not None and not settle.done():
+            settle.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await settle
+        ok, detail, pr_url = await asyncio.to_thread(
+            apply_worktree,
+            self._ctx.workspace,
+            dest,
+            wt_branch,
+            action,
+            message=summary,
+            title=summary,
+            body=summary,
+        )
+        normalized = normalize_settle_action(action)
+        if ok and normalized != "keep":
+            self._forget_worktree(aid)
+        if self._on_worktree_settled is not None:
+            self._on_worktree_settled(
+                aid, profile, normalized, detail, wt_branch, pr_url, ok
+            )
+        flag = "ok" if ok else "error"
+        extra = f" {pr_url}" if pr_url else ""
+        return f"{flag} {normalized} {wt_branch}{extra}\n{detail}"
+
+    def _pick_worktree(
+        self, agent_id: str = "", branch: str = ""
+    ) -> tuple[str, Path, str, str, str] | None:
+        self._recover_worktrees()
+        needle = (agent_id or "").strip()
+        want_branch = (branch or "").strip()
+        matches: list[tuple[str, Path]] = []
+        for aid, dest in self._worktrees.items():
+            wt_branch = self._worktree_branches.get(aid, "")
+            if needle and needle not in aid:
+                continue
+            if want_branch and want_branch not in wt_branch:
+                continue
+            matches.append((aid, dest))
+        if not matches:
+            return None
+        if needle or want_branch:
+            aid, dest = matches[0]
+        else:
+            with_work = [
+                (aid, dest)
+                for aid, dest in matches
+                if worktree_has_changes(self._ctx.workspace, dest)
+            ]
+            pool = with_work or matches
+            pool.sort(
+                key=lambda item: item[1].stat().st_mtime if item[1].exists() else 0,
+                reverse=True,
+            )
+            aid, dest = pool[0]
+        wt_branch = self._worktree_branches.get(aid, "")
+        profile = self._worktree_profiles.get(aid, "") or "coder"
+        summary = self._worktree_summaries.get(aid) or (
+            f"engine({profile}): {wt_branch or aid}"
+        )
+        return aid, dest, wt_branch, profile, summary
 
     def has_live_children(self) -> bool:
         return any(not task.done() for task in self._child_tasks.values())
@@ -249,9 +374,9 @@ class Orchestrator(AgentLoop):
                 else:
                     worktree = path
                     child_workspace = Path(path)
-                    self._worktrees[agent_id] = Path(path)
-                    self._worktree_branches[agent_id] = branch
-                    self._worktree_batches[agent_id] = batch_id
+                    self._remember_worktree(
+                        agent_id, Path(path), branch, profile.name, batch_id
+                    )
             elif profile.join_worktree:
                 owner, joined, joined_branch = self._worktree_to_join(batch_id)
                 if joined is not None:
@@ -270,10 +395,8 @@ class Orchestrator(AgentLoop):
             self._reserved.discard(agent_id)
             self._child_tasks.pop(agent_id, None)
             self._children.pop(agent_id, None)
-            wt = self._worktrees.pop(agent_id, None)
-            self._worktree_branches.pop(agent_id, None)
-            self._worktree_batches.pop(agent_id, None)
-            self._pending_settles.pop(agent_id, None)
+            wt = self._worktrees.get(agent_id)
+            self._forget_worktree(agent_id)
             if wt is not None:
                 await asyncio.to_thread(remove_agent_worktree, self._ctx.workspace, wt)
             return f"error: {exc}"
@@ -342,10 +465,8 @@ class Orchestrator(AgentLoop):
         owns_worktree = agent_id in self._worktrees
         should_settle = owns_worktree and status != "aborted" and not self._aborting_all
         if status == "aborted" and owns_worktree:
-            wt = self._worktrees.pop(agent_id, None)
-            self._worktree_branches.pop(agent_id, None)
-            self._worktree_batches.pop(agent_id, None)
-            self._pending_settles.pop(agent_id, None)
+            wt = self._worktrees.get(agent_id)
+            self._forget_worktree(agent_id)
             if wt is not None:
                 with suppress(OSError):
                     await asyncio.to_thread(
@@ -362,12 +483,16 @@ class Orchestrator(AgentLoop):
         if should_settle:
             dest = self._worktrees.get(agent_id)
             if dest is not None:
+                summary = result.summary or result.outcome or task
+                self._worktree_summaries[agent_id] = (
+                    f"engine({profile.name}): {(summary or 'worktree').strip()[:72]}"
+                )
                 self._pending_settles[agent_id] = _PendingSettle(
                     agent_id=agent_id,
                     profile=profile.name,
                     dest=dest,
                     branch=branch or self._worktree_branches.get(agent_id, ""),
-                    summary=result.summary or result.outcome or task,
+                    summary=summary,
                 )
 
     async def _settle_worktree(
@@ -388,9 +513,16 @@ class Orchestrator(AgentLoop):
                 await asyncio.to_thread(
                     drop_empty_worktree, self._ctx.workspace, dest, branch
                 )
-                self._worktrees.pop(agent_id, None)
-                self._worktree_branches.pop(agent_id, None)
-                self._worktree_batches.pop(agent_id, None)
+                self._forget_worktree(agent_id)
+                return
+            message = f"engine({profile}): {(summary or 'worktree').strip()[:72]}"
+            self._worktree_summaries[agent_id] = message
+            commit_err = await asyncio.to_thread(commit_if_dirty, dest, message)
+            if commit_err:
+                if self._on_worktree_settled is not None and not self._aborting_all:
+                    self._on_worktree_settled(
+                        agent_id, profile, "keep", commit_err, branch, "", False
+                    )
                 return
             question = (
                 f"{profile} work on {branch} is ready. Merge into the current "
@@ -404,6 +536,7 @@ class Orchestrator(AgentLoop):
                         kind="choice",
                         choices=list(SETTLE_CHOICES),
                         default="keep",
+                        timeout=0,
                         agent_id=agent_id,
                         profile=profile,
                     )
@@ -411,7 +544,6 @@ class Orchestrator(AgentLoop):
                     return
                 except PromptTimeout:
                     answer = "keep"
-            message = f"engine({profile}): {(summary or 'worktree').strip()[:72]}"
             ok, detail, pr_url = await asyncio.to_thread(
                 apply_worktree,
                 self._ctx.workspace,
@@ -424,9 +556,7 @@ class Orchestrator(AgentLoop):
             )
             action = normalize_settle_action(answer)
             if ok and action != "keep":
-                self._worktrees.pop(agent_id, None)
-                self._worktree_branches.pop(agent_id, None)
-                self._worktree_batches.pop(agent_id, None)
+                self._forget_worktree(agent_id)
             if self._on_worktree_settled is not None and not self._aborting_all:
                 self._on_worktree_settled(
                     agent_id, profile, action, detail, branch, pr_url, ok
@@ -536,6 +666,50 @@ def _write_context_tool(workspace) -> Tool:
                 }
             },
             "required": ["note"],
+        },
+        fn=execute,
+    )
+
+
+def _settle_worktree_tool(orch: Orchestrator) -> Tool:
+    async def execute(
+        ctx: ToolContext,  # noqa: ARG001
+        action: str,
+        agent_id: str = "",
+        branch: str = "",
+    ) -> str:
+        return await orch.apply_named_worktree(
+            action, agent_id=agent_id, branch=branch
+        )
+
+    return Tool(
+        name="settle_worktree",
+        description=(
+            "Apply a finished writer worktree: merge into the current branch, "
+            "open a pull request, keep it, or discard it. Use action=status to "
+            "list open trees. Never spawn coder to merge or push."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": (
+                        "merge, pr, keep, discard, or status. "
+                        "merge applies the writer's branch onto the user's checkout. "
+                        "pr pushes that branch and opens a GitHub pull request."
+                    ),
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Writer agent_id (full or prefix). Omit to pick the latest tree with changes.",
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "Optional branch name (or substring) if agent_id is unknown.",
+                },
+            },
+            "required": ["action"],
         },
         fn=execute,
     )

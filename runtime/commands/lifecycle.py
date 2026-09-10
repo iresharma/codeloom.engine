@@ -16,6 +16,7 @@ from runtime.commands.register import handles
 from runtime.store import SessionState
 from runtime.store.sqlite import list_sessions
 from runtime.store.sqlite import load as load_snapshot
+from runtime.tools.git import is_settle_prompt, parse_settle_intent
 
 
 @handles(StartSession)
@@ -61,6 +62,16 @@ def submit_user_message(session, command: SubmitUserMessage) -> None:
         return
     pending = session._prompts.pending()
     if pending is not None:
+        if is_settle_prompt(pending.choices):
+            intent = parse_settle_intent(command.text)
+            if intent is None:
+                if session._loop is None:
+                    session._emit(ErrorOccurred(message="set OPENROUTER_API_KEY"))
+                    return
+                session.start_turn(command.text)
+                return
+            session._prompts.answer(pending.prompt_id, intent)
+            return
         session._prompts.answer(pending.prompt_id, command.text)
         return
     if session._loop is None:

@@ -230,9 +230,11 @@ list is matched against the relative path (`**/tests/**`, `**/*.md`, …).
 - `max_turns` — child's own cap, independent of the orch.
 - `needs_worktree` — if true, the child runs in a git worktree on a new branch
 under `.engine/worktrees/` so writers do not collide. `coder` and `tester`
-set this. When the child finishes with changes, the user is prompted to merge
-that branch, open a PR, keep the worktree, or discard it — after any
-`join_worktree` personality (reviewer) on that tree has also finished.
+set this. When the child finishes with changes, those edits are committed on
+the writer branch, then the user is prompted to merge, open a PR, keep, or
+discard — after any `join_worktree` personality (reviewer) on that tree has
+also finished. Later "please merge it" goes through `settle_worktree`, not a
+new writer spawn.
 - `join_worktree` — if true, the child reuses a live writer worktree (same
 batch if possible) instead of creating one. `reviewer` sets this so it sees
 the writer's diff. If no worktree is open, it uses the main checkout.

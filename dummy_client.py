@@ -46,10 +46,12 @@ from protocol.events import (
     WorktreeSettled,
 )
 from protocol.snapshot import FileTreeNode, GitState
+from runtime.tools.git import is_settle_prompt, parse_settle_intent
 
 CLIENT_EXIT = object()
 _COMMANDS_BY_NAME = {name.lower(): cls for name, cls in COMMANDS.items()}
 _LAST_PROMPT_ID = ""
+_LAST_PROMPT_CHOICES: list[str] = []
 _STREAM_ID = ""
 _NOTES: list[str] = []
 
@@ -135,7 +137,9 @@ def _help_text() -> str:
     lines.append("refresh after each edit. undo restores the last journal batch.")
     lines.append("Live agents: AgentsUpdated / SnapshotReady.agents show count,")
     lines.append("batch, profile, task, status, and current_tool. abort <id> kills one child.")
-    lines.append("When a writer finishes, answer merge / pr / keep / discard to settle its worktree.")
+    lines.append("When a writer finishes, answer merge / pr / keep / discard")
+    lines.append("(or 'please merge it' / 'open a PR'). After keep, tell the orch")
+    lines.append("to merge or open a PR — do not spawn another coder.")
     return "\n".join(lines) + "\n"
 
 
@@ -212,14 +216,20 @@ def command_from_line(line: str, workspace: Path):
         _note(f"unknown command: {line.split()[0]}  (try help)")
         return None
     if _LAST_PROMPT_ID:
+        if is_settle_prompt(_LAST_PROMPT_CHOICES):
+            intent = parse_settle_intent(line)
+            if intent is None:
+                return SubmitUserMessage(text=line)
+            return _take_answer(intent)
         return _take_answer(line)
     return SubmitUserMessage(text=line)
 
 
 def _take_answer(text: str) -> AnswerPrompt:
-    global _LAST_PROMPT_ID
+    global _LAST_PROMPT_ID, _LAST_PROMPT_CHOICES
     prompt_id = _LAST_PROMPT_ID
     _LAST_PROMPT_ID = ""
+    _LAST_PROMPT_CHOICES = []
     return AnswerPrompt(prompt_id=prompt_id, text=text)
 
 
@@ -386,8 +396,9 @@ def format_event(event) -> str:
             f"· ${s.cost:.3f} · {s.elapsed_s:.1f}s · turn {s.turns}"
         )
     if isinstance(event, UserPromptRequested):
-        global _LAST_PROMPT_ID
+        global _LAST_PROMPT_ID, _LAST_PROMPT_CHOICES
         _LAST_PROMPT_ID = event.prompt_id
+        _LAST_PROMPT_CHOICES = list(event.choices or [])
         extra = f"  choices={event.choices}" if event.choices else ""
         who = f" agent={event.agent_id}" if event.agent_id else ""
         return (

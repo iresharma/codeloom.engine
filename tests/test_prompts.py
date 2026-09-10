@@ -120,6 +120,7 @@ def test_plain_text_answers_outstanding_prompt():
     import dummy_client
 
     dummy_client._LAST_PROMPT_ID = "p1"
+    dummy_client._LAST_PROMPT_CHOICES = []
     command = dummy_client.command_from_line("yes", Path("."))
     assert isinstance(command, AnswerPrompt)
     assert command.prompt_id == "p1"
@@ -131,6 +132,27 @@ def test_plain_text_is_message_without_prompt():
     import dummy_client
 
     dummy_client._LAST_PROMPT_ID = ""
+    dummy_client._LAST_PROMPT_CHOICES = []
     command = dummy_client.command_from_line("yes", Path("."))
     assert isinstance(command, SubmitUserMessage)
     assert command.text == "yes"
+
+
+def test_settle_prompt_natural_language_is_merge():
+    import dummy_client
+
+    dummy_client._LAST_PROMPT_ID = "p2"
+    dummy_client._LAST_PROMPT_CHOICES = ["merge", "pr", "keep", "discard"]
+    command = dummy_client.command_from_line("please merge it", Path("."))
+    assert isinstance(command, AnswerPrompt)
+    assert command.text == "merge"
+
+
+def test_settle_prompt_unrelated_stays_chat():
+    import dummy_client
+
+    dummy_client._LAST_PROMPT_ID = "p3"
+    dummy_client._LAST_PROMPT_CHOICES = ["merge", "pr", "keep", "discard"]
+    command = dummy_client.command_from_line("what files changed?", Path("."))
+    assert isinstance(command, SubmitUserMessage)
+    assert dummy_client._LAST_PROMPT_ID == "p3"
