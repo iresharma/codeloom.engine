@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 from collections.abc import Callable
@@ -27,6 +28,7 @@ __all__ = [
     "ToolCall",
     "Usage",
     "load_env_sh",
+    "with_cache_breakpoints",
 ]
 
 
@@ -55,6 +57,7 @@ class OpenRouterLLM:
         tools: list[dict] | None = None,
         *,
         on_delta: Callable[[str, str], None] | None = None,
+        model: str | None = None,
     ) -> LLMResult:
         token = self._api_key
         authorization = (
@@ -67,15 +70,16 @@ class OpenRouterLLM:
             stream = bool(self._config.llm_stream)
             timeout_s = float(self._config.llm_timeout_s)
             idle_s = float(self._config.stream_idle_s)
+        cached_messages, cached_tools = with_cache_breakpoints(messages, tools)
         kwargs: dict = {
-            "messages": messages,
-            "model": self.model,
+            "messages": cached_messages,
+            "model": model or self.model,
             "stream": stream,
             "http_headers": {"Authorization": authorization},
             "timeout_ms": int(timeout_s * 1000),
         }
-        if tools:
-            kwargs["tools"] = tools
+        if cached_tools:
+            kwargs["tools"] = cached_tools
         retries = _retry_config()
         if retries is not None:
             # SDK retries happen inside send_async, before the stream is
@@ -114,6 +118,60 @@ def load_env_sh(path: Path) -> None:
 
 
 _load_env_sh = load_env_sh
+
+_CACHE = {"type": "ephemeral"}
+
+
+def with_cache_breakpoints(
+    messages: list[dict], tools: list[dict] | None = None
+) -> tuple[list[dict], list[dict] | None]:
+    """Copy messages/tools and mark Anthropic cache breakpoints.
+
+    Breakpoints: last tool schema, system prompt, last stable history
+    message (tool/user/assistant text — not an empty tool_calls stub).
+    Callers keep the originals; compaction rewriting history is a miss
+    on the next turn, which is intended.
+    """
+    msgs = copy.deepcopy(messages)
+    tool_list = copy.deepcopy(tools) if tools else None
+    if tool_list:
+        last = tool_list[-1]
+        if isinstance(last, dict):
+            tool_list[-1] = {**last, "cache_control": dict(_CACHE)}
+    if msgs and msgs[0].get("role") == "system":
+        msgs[0] = _mark_message(msgs[0])
+    for index in range(len(msgs) - 1, 0, -1):
+        item = msgs[index]
+        if item.get("role") == "assistant" and item.get("tool_calls"):
+            text = item.get("content")
+            if not (isinstance(text, str) and text.strip()):
+                continue
+        if item.get("role") in {"tool", "user", "assistant"}:
+            msgs[index] = _mark_message(item)
+            break
+    return msgs, tool_list
+
+
+def _mark_message(message: dict) -> dict:
+    content = message.get("content")
+    if isinstance(content, str):
+        return {
+            **message,
+            "content": [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": dict(_CACHE),
+                }
+            ],
+        }
+    if isinstance(content, list) and content:
+        parts = list(content)
+        last = parts[-1]
+        if isinstance(last, dict):
+            parts[-1] = {**last, "cache_control": dict(_CACHE)}
+        return {**message, "content": parts}
+    return {**message, "cache_control": dict(_CACHE)}
 
 
 def _retry_config():

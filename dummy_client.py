@@ -382,9 +382,15 @@ def format_event(event) -> str:
             f"task={event.task[:80]}{extra}"
         )
     if isinstance(event, AgentFinished):
+        extra = ""
+        if event.cost or event.total_tokens:
+            extra = (
+                f" ${event.cost:.3f} {event.total_tokens} tok "
+                f"{event.cached_tokens} cached"
+            )
         return (
             f"agent finished {event.profile} {event.agent_id} "
-            f"{event.status}: {event.summary[:120]}"
+            f"{event.status}:{extra} {event.summary[:120]}"
         )
     if isinstance(event, AgentsUpdated):
         return _format_agents(event.agents)
@@ -402,7 +408,7 @@ def format_event(event) -> str:
         s = event.stats
         return (
             f"tokens {s.prompt_tokens / 1000:.1f}k in / {s.completion_tokens / 1000:.1f}k out "
-            f"· ${s.cost:.3f} · {s.elapsed_s:.1f}s · turn {s.turns}"
+            f"· {s.cached_tokens / 1000:.1f}k cached · ${s.cost:.3f} · {s.elapsed_s:.1f}s · turn {s.turns}"
         )
     if isinstance(event, UserPromptRequested):
         global _LAST_PROMPT_ID, _LAST_PROMPT_CHOICES

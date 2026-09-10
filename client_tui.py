@@ -5,7 +5,10 @@ import json
 from contextlib import suppress
 from pathlib import Path
 
+from rich.console import Group
+from rich.markdown import Markdown
 from rich.rule import Rule as RichRule
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -41,6 +44,27 @@ def escape(text: str) -> str:
     return text
 
 
+def chat_uses_markdown(role: str) -> bool:
+    kind = (role.split() or [""])[0].lower()
+    return kind in {"assistant", "engine"}
+
+
+def chat_render_markdown(role: str, text: str) -> bool:
+    """Render model replies as markdown unless a code fence is still open."""
+    if not text or not chat_uses_markdown(role):
+        return False
+    return text.count("```") % 2 == 0
+
+
+def _chat_content(role: str, text: str):
+    label = Text(role, style="bold")
+    if not text:
+        return Group(label, Text("…", style="dim"))
+    if chat_render_markdown(role, text):
+        return Group(label, Markdown(text, code_theme="monokai"))
+    return Group(label, Text(text))
+
+
 class EventReceived(Message):
     def __init__(self, event) -> None:
         super().__init__()
@@ -59,20 +83,15 @@ class ChatLine(Static):
         self.message_id = message_id
         self._body = text
         classes = "chat-history" if history else f"chat-{_role_class(role)}"
-        super().__init__(self._markup(), classes=classes, markup=True)
+        super().__init__(_chat_content(role, text), classes=classes)
 
     def append(self, chunk: str) -> None:
         self._body += chunk
-        self.update(self._markup())
+        self.update(_chat_content(self.role, self._body))
 
     def set_body(self, text: str) -> None:
         self._body = text
-        self.update(self._markup())
-
-    def _markup(self) -> str:
-        label = escape(self.role)
-        body = escape(self._body) if self._body else "[dim]…[/dim]"
-        return f"[b]{label}[/b]\n{body}"
+        self.update(_chat_content(self.role, self._body))
 
 
 class PromptLine(Static):
@@ -120,7 +139,7 @@ class ChatPanel(VerticalScroll):
             return
         existing = self._lines.get(event.id)
         if existing is not None:
-            if event.text and event.text != existing._body:
+            if event.text:
                 existing.set_body(event.text)
             self._ensure_visible(existing)
             self.scroll_end(animate=False)
@@ -790,7 +809,8 @@ class DummyClientApp(App):
         elif isinstance(event, StatsUpdated):
             stats = event.stats
             self._stats_line = (
-                f"{stats.total_tokens} tok · ${stats.cost:.3f} · {stats.elapsed_s:.1f}s"
+                f"{stats.total_tokens} tok · {stats.cached_tokens} cached · "
+                f"${stats.cost:.3f} · {stats.elapsed_s:.1f}s"
             )
             self._refresh_status()
 

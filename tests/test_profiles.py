@@ -71,7 +71,8 @@ def test_orch_and_profile_allowlists():
     assert "gh_pr_create" not in reviewer.names()
     assert "gh_pr_comment" not in reviewer.names()
     researcher = tools.subset(profiles.get("researcher").tool_names)
-    assert "gh_pr_comment" in researcher.names()
+    assert "gh_pr_comment" not in researcher.names()
+    assert "gh_pr_view" not in researcher.names()
     assert "docs_lookup" in researcher.names()
     assert "github_repo" in researcher.names()
     assert "github_tree" in researcher.names()
@@ -119,6 +120,9 @@ def test_orch_and_profile_allowlists():
     assert profiles.get("debugger").max_turns == 32
     assert profiles.get("reviewer").max_turns == 32
     assert profiles.get("researcher").max_turns == 32
+    assert profiles.get("ask").model == "anthropic/claude-haiku-4.5"
+    assert profiles.get("tester").model == "anthropic/claude-haiku-4.5"
+    assert profiles.get("researcher").model is None
 
 
 async def _spawn(name: str, task: str) -> str:
@@ -286,6 +290,39 @@ def test_compress_prompt_keeps_facts():
     assert "Do not collapse a survey into a one-liner" in text
     assert "6 short labeled lines" not in text
     assert "Foo.bar retries" in result.summary
+
+
+def test_compress_skips_llm_when_labeled():
+    called = []
+
+    async def complete(prompt):
+        called.append(prompt)
+        return LLMResult(text="should not run")
+
+    closer = "\n".join(
+        [
+            "what: surveyed acme/engine",
+            "paths: README.md",
+            "facts: Foo.bar retries",
+            "verdict: skip always-on",
+        ]
+    )
+    messages = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"},
+        {"role": "user", "content": "c"},
+        {"role": "assistant", "content": "d"},
+        {"role": "user", "content": "e"},
+        {"role": "assistant", "content": closer},
+    ]
+
+    async def run():
+        return await compress_for_parent(messages, complete=complete)
+
+    result = asyncio.run(run())
+    assert called == []
+    assert "Foo.bar retries" in result.outcome
+    assert "surveyed" in result.summary
 
 
 def test_report_to_orch_is_defined():

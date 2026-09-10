@@ -156,7 +156,7 @@ def test_abort_between_tool_calls(tmp_path):
         hang = asyncio.Event()
 
         class SlowTools(FakeProvider):
-            async def complete(self, messages, tools=None, *, on_delta=None):
+            async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
                 if self.calls == 0:
                     self.calls += 1
                     return LLMResult(

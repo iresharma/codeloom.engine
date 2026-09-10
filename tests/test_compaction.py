@@ -305,7 +305,7 @@ def test_child_compact_defaults():
     orch = EngineConfig()
     assert orch.compact_trigger == 0.7
     assert orch.keep_full_tools == 3
-    assert CHILD_COMPACT_TRIGGER == 0.9
+    assert CHILD_COMPACT_TRIGGER == 2.0
     assert CHILD_KEEP_FULL_TOOLS == 10
 
 
@@ -336,3 +336,25 @@ def test_make_subagent_uses_child_compact(tmp_path):
     assert child._config.compact_trigger == CHILD_COMPACT_TRIGGER
     assert child._config.keep_full_tools == CHILD_KEEP_FULL_TOOLS
     assert child._config is not orch._config
+    assert child._freeze_system is True
+    assert child._concurrent_tools is True
+    assert child._model is None
+    ask = orch._make_subagent(
+        discover_profiles().get("ask"), "ask1", tmp_path, isolated=False
+    )
+    assert ask._model == "anthropic/claude-haiku-4.5"
+
+
+def test_freeze_system_ignores_later_memory(tmp_path):
+    from agents.agent_loop import AgentLoop
+    from runtime.store.memory import remember
+    from tests.fakes import FakeProvider
+
+    loop = AgentLoop(FakeProvider(), workspace=tmp_path, freeze_system=True)
+    first = loop._build_messages()[0]["content"]
+    remember(tmp_path, "engineering", "frozen-child-must-not-see-this")
+    second = loop._build_messages()[0]["content"]
+    assert first == second
+    assert "frozen-child-must-not-see-this" not in second
+    orch = AgentLoop(FakeProvider(), workspace=tmp_path, freeze_system=False)
+    assert "frozen-child-must-not-see-this" in orch._build_messages()[0]["content"]

@@ -10,6 +10,7 @@ from agents.profile import (
     SKILLS,
     TEST_GLOBS,
     TLDR,
+    EXTRACTOR_MODEL,
     AgentProfile,
 )
 
@@ -34,4 +35,5 @@ PROFILE = AgentProfile(
     required_tools=["run_command"],
     max_turns=32,
     needs_worktree=True,
+    model=EXTRACTOR_MODEL,
 )

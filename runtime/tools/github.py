@@ -14,6 +14,7 @@ MISSING_GH = (
 LIST_LIMIT = 20
 BODY_CAP = 20_000
 FILE_CAP = 50_000
+FILE_WINDOW = 12_000
 RUN_LOG_CAP = 20_000
 TREE_CAP = 200
 DIR_HINT = "error: path is a directory; use github_tree"
@@ -334,7 +335,15 @@ def search_code(
     return _clip("\n\n".join(blocks), BODY_CAP)
 
 
-def github_file(workspace: Path, repo: str, path: str, *, ref: str = "") -> str:
+def github_file(
+    workspace: Path,
+    repo: str,
+    path: str,
+    *,
+    ref: str = "",
+    offset: int = 0,
+    limit: int = 0,
+) -> str:
     repo = (repo or "").strip()
     path = (path or "").strip().lstrip("/")
     if not path:
@@ -355,7 +364,28 @@ def github_file(workspace: Path, repo: str, path: str, *, ref: str = "") -> str:
         return raw
     if _looks_like_dir_listing(raw):
         return DIR_HINT
-    return _clip(raw or "(empty)", FILE_CAP)
+    text = raw or "(empty)"
+    start = max(0, _as_int(offset, 0))
+    window = _as_int(limit, FILE_WINDOW)
+    if window <= 0:
+        window = FILE_WINDOW
+    window = min(window, FILE_CAP)
+    body = text[start : start + window]
+    if start + len(body) < len(text):
+        nxt = start + len(body)
+        body += (
+            f"\n...[truncated at {nxt}/{len(text)}; pass offset={nxt} to continue]"
+        )
+    return body
+
+
+def _as_int(value, default: int) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 _REPO_JSON = (

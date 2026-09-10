@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agents.profile import LSP, MEMORY, NAV, SCAN, SITTER, SKILLS, AgentProfile
+from agents.profile import LSP, MEMORY, NAV, SCAN, SITTER, SKILLS, EXTRACTOR_MODEL, AgentProfile
 
 ASK_SYSTEM = """You are a read-only codebase Q&A agent. You never edit files and never run shell commands.
 
@@ -15,7 +15,7 @@ How to look:
 
 Keep going until the briefing is enough for a coder to edit without re-exploring. Do not guess file contents. If LSP is missing, fall back to sitter tools and read_file. No web or GitHub.
 
-After you understand a source file, remember(section=files, path=..., note=...) with a short factual blurb (purpose, entry points, constraints) — not a transcript.
+After you understand a source file, remember(section=files, path=..., note=...) with a short factual blurb (purpose, entry points, constraints) — not a transcript. After the survey, remember(section=engineering or other, note=...) a one-line verdict the orchestrator can reuse next time.
 """
 
 PROFILE = AgentProfile(
@@ -30,4 +30,5 @@ PROFILE = AgentProfile(
     write_globs=[],
     required_tools=[],
     max_turns=32,
+    model=EXTRACTOR_MODEL,
 )

@@ -73,6 +73,45 @@ def test_stats_round_trip_sqlite(tmp_path):
     assert loaded.stats.requests == 2
 
 
+def test_agent_runs_round_trip_sqlite(tmp_path):
+    from protocol.snapshot import AgentRun
+
+    snap = EngineSnapshot(
+        session_id="s1",
+        workspace=str(tmp_path),
+        messages=[],
+        ended=False,
+        open_files=[],
+        file_tree=[],
+        git=GitState.empty(),
+        stats=Stats(
+            cost=1.2,
+            agent_runs=[
+                AgentRun(
+                    agent_id="abc",
+                    profile="researcher",
+                    cost=0.8,
+                    prompt_tokens=10,
+                    cached_tokens=4,
+                    total_tokens=12,
+                    requests=3,
+                )
+            ],
+        ),
+    )
+    db = tmp_path / "session.db"
+    from runtime.store.sqlite import init
+
+    init(db)
+    save(db, snap)
+    loaded = load(db, "s1")
+    assert len(loaded.stats.agent_runs) == 1
+    row = loaded.stats.agent_runs[0]
+    assert row.profile == "researcher"
+    assert row.cached_tokens == 4
+    assert abs(row.cost - 0.8) < 1e-9
+
+
 def test_missing_stats_defaults():
     snap = EngineSnapshot.from_json(
         {

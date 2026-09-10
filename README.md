@@ -457,7 +457,7 @@ can edit a tool and pick it up by restarting the session — no server restart.
 | `gh_release_list` / `gh_release_view` | Release notes / changelog. |
 | `github_compare` | Ahead/behind, commits, files between two refs. |
 | `github_search_code` | GitHub code search. `this_repo` scopes to the workspace remote. |
-| `github_file` | Raw file from `owner/name` @ ref. 50k cap. Directories tell you to use `github_tree`. |
+| `github_file` | Raw file from `owner/name` @ ref. Default 12k char window (hard cap 50k); pass `offset` to page. Directories tell you to use `github_tree`. |
 | `github_repo` | Repo metadata: description, default branch, language, license, topics, stars. |
 | `github_tree` | Files and dirs at a path (optional recursive, capped). Skips vendor/cache dirs. |
 | `gh_pr_comment` / `gh_issue_create` | Approval-gated writes (researcher, debugger). |
@@ -755,6 +755,7 @@ does not match the hash stored with the note.
 |---|---|---|
 | `OPENROUTER_API_KEY` | — | Required for chat. Placeholder values (`...`, `your-key`, `changeme`, `<OPENROUTER_API_KEY>`) are treated as unset. |
 | `OPENROUTER_MODEL` | `openai/gpt-4o-mini` | Any OpenRouter model with tool-calling support. |
+| `OPENROUTER_CHILD_MODEL` | (unset) | Fallback model for profiles that do not set `AgentProfile.model`. |
 | `ENGINE_LLM_STREAM` | `1` | Set `0` to disable token streaming. |
 | `ENGINE_LLM_TIMEOUT_S` | `600` | LLM request timeout. |
 | `ENGINE_LLM_IDLE_S` | `90` | Stream idle timeout. |
@@ -801,7 +802,10 @@ before writing your own client.
 ```
 
 - **Chat** — user, assistant, and `engine` (child reports) messages, streamed
-  deltas, history replay, and outstanding prompts.
+  deltas, history replay, and outstanding prompts. Assistant and engine
+  replies render as markdown (headings, lists, code fences); user lines stay
+  literal. An unclosed ` ``` ` fence stays as source until it closes so the
+  rest of a stream is not swallowed as code.
 - **Agents** — live subagents grouped by batch nickname (`batch_name`) plus a
   short `batch_id`: count, profile, task, status, current tool, worktree, and
   streamed child tokens (`ChatMessageStarted` / `Delta` / `Added` with
@@ -1029,7 +1033,10 @@ describe those implementations to a model. The suite exercises
 | Command timeout | 120s default, 600s max | `runtime/tools/shell.py` |
 | Command output | 30k / stream, 60k total | `runtime/tools/shell.py` |
 | Context budget | 120,000 tokens | `EngineConfig.context_budget` |
-| Compact trigger / keep full tools | orch 0.7 / 3, children 0.9 / 10 | `EngineConfig.compact_trigger` / `keep_full_tools` |
+| Compact trigger / keep full tools | orch 0.7 / 3; children never compact in-loop (`trigger=2.0`), overflow fuse + `compress_for_parent` on finish | `EngineConfig.compact_trigger` / `keep_full_tools` |
+| Child models | ask/tester `anthropic/claude-haiku-4.5`; others inherit `OPENROUTER_MODEL` | `AgentProfile.model` / `OPENROUTER_CHILD_MODEL` |
+| Survey spawn cap | one `ask` and one `researcher` per user message | `Orchestrator.reset_user_message_spawns` |
+| `github_file` window | 12,000 chars default, 50,000 hard cap | `runtime/tools/github.py` |
 | Child report summary / outcome | 400 / 2,000 chars | `SUMMARY_CLIP` / `OUTCOME_CLIP` |
 | Tool result to model | 80,000 chars | `tools/registry.py` |
 | Tool preview in events | 400 chars | `runtime/session.py` |

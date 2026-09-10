@@ -39,7 +39,7 @@ class FakeProvider:
         self.calls = 0
         self.deltas = deltas or []
 
-    async def complete(self, messages, tools=None, *, on_delta=None):
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
         self.calls += 1
         if self.hang is not None:
             await self.hang.wait()

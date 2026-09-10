@@ -67,4 +67,5 @@ class LLMProvider(Protocol):
         tools: list[dict] | None = None,
         *,
         on_delta: Callable[[str, str], None] | None = None,
+        model: str | None = None,
     ) -> LLMResult: ...

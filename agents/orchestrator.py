@@ -57,7 +57,9 @@ Answer directly only when:
 
 If a file note is STALE, spawn ask rather than quoting it. Use remember for lasting engineering, product, or CI/CD decisions — not play-by-play or subagent transcripts.
 
-If a child returns status=incomplete, respawn once with a tighter task or tell the user. If spawn returns "spawn budget exhausted", too many children are already live — stop spawning and report what is running. leftover_questions: ask the user, then respawn if needed.
+At most one ask and one researcher per user message. leftover_questions: put them in your answer and ask the user; do not spawn another ask or researcher to chase them. Respawn only when status=incomplete, or the user explicitly asks to go deeper. If spawn returns "already spawned", answer with what you have.
+
+If a child returns status=incomplete, respawn once with a tighter task or tell the user. If spawn returns "spawn budget exhausted", too many children are already live — stop spawning and report what is running.
 
 Do not call write tools or run_command. You do not have them.
 """
@@ -131,6 +133,8 @@ class Orchestrator(AgentLoop):
         self._pending_settles: dict[str, _PendingSettle] = {}
         self._child_lsps: dict[str, object] = {}
         self._spawn_lock: asyncio.Lock | None = None
+        self._user_survey_spawns: set[str] = set()
+        self._inbox_turn = False
         self._make_child_hooks = make_child_hooks
         self._make_child_lsp = make_child_lsp
         self._on_agent_started = on_agent_started
@@ -161,6 +165,9 @@ class Orchestrator(AgentLoop):
 
     def reset_spawn_budget(self) -> None:
         self._aborting_all = False
+
+    def reset_user_message_spawns(self) -> None:
+        self._user_survey_spawns.clear()
 
     def _live_spawn_count(self) -> int:
         live = sum(1 for task in self._child_tasks.values() if not task.done())
@@ -361,11 +368,13 @@ class Orchestrator(AgentLoop):
     async def run(self, task: str) -> str:
         self._batch_id = uuid4().hex
         self._batch_name = batch_nickname(task)
+        self._inbox_turn = str(task).lstrip().startswith("[agent ")
         try:
             return await super().run(task)
         finally:
             self._batch_id = ""
             self._batch_name = ""
+            self._inbox_turn = False
 
     async def spawn(self, profile_name: str, task: str) -> str:
         try:
@@ -375,10 +384,21 @@ class Orchestrator(AgentLoop):
         if self._spawn_lock is None:
             self._spawn_lock = asyncio.Lock()
         async with self._spawn_lock:
+            if (
+                profile_name in _SURVEY_ONCE
+                and profile_name in self._user_survey_spawns
+                and self._inbox_turn
+            ):
+                return (
+                    f"error: already spawned {profile_name} this user message; "
+                    "answer with what you have or ask the user"
+                )
             if self._live_spawn_count() >= self._spawn_budget:
                 return "error: spawn budget exhausted"
             agent_id = uuid4().hex
             self._reserved.add(agent_id)
+            if profile_name in _SURVEY_ONCE:
+                self._user_survey_spawns.add(profile_name)
             batch_id = self._batch_id or uuid4().hex
             batch_name = self._batch_name or batch_nickname(task)
         worktree = ""
@@ -418,6 +438,7 @@ class Orchestrator(AgentLoop):
             self._child_tasks[agent_id] = run_task
         except Exception as exc:  # noqa: BLE001
             self._reserved.discard(agent_id)
+            self._user_survey_spawns.discard(profile_name)
             self._child_tasks.pop(agent_id, None)
             self._children.pop(agent_id, None)
             wt = self._worktrees.get(agent_id)
@@ -486,7 +507,11 @@ class Orchestrator(AgentLoop):
                     )
         if self._on_agent_finished is not None:
             self._on_agent_finished(
-                agent_id, profile.name, result.status, result.summary
+                agent_id,
+                profile.name,
+                result.status,
+                result.summary,
+                usage=child._usage,
             )
         if self._on_agent_result is not None and not self._aborting_all:
             self._on_agent_result(agent_id, profile.name, result.as_text())
@@ -595,6 +620,7 @@ class Orchestrator(AgentLoop):
             keep_full_tools=CHILD_KEEP_FULL_TOOLS,
         )
         tools = self._all_tools.subset(profile.tool_names, profile=profile.name)
+        child_model = (profile.model or self._config.child_model or "").strip() or None
         hooks = None
         if self._make_child_hooks is not None:
             hooks = self._make_child_hooks(agent_id, profile.name)
@@ -645,7 +671,11 @@ class Orchestrator(AgentLoop):
             write_lock=write_lock,
             skills=self._skills,
             on_skill_activated=self._on_skill_activated,
+            model=child_model,
         )
+
+
+_SURVEY_ONCE = frozenset({"ask", "researcher"})
 
 
 def batch_nickname(task: str, *, limit: int = 48) -> str:

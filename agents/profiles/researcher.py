@@ -3,8 +3,7 @@ from __future__ import annotations
 from agents.profile import (
     DEP,
     DOCS,
-    GH_READ,
-    GH_WRITE,
+    GH_REPO,
     MCP,
     MEMORY,
     NAV,
@@ -27,6 +26,8 @@ How to look:
 - Relate findings to this workspace with list_files / search / read_file only after the external facts exist. Skip caches, venvs, and build folders.
 
 Do not stop after one page. If a source disagreed or you could not confirm, leftover: the open question.
+
+When the survey has a lasting conclusion (adopt / skip / opt-in-only, version, constraint), remember(section=engineering or other, note=...) one short verdict. Do not remember play-by-play.
 """
 
 PROFILE = AgentProfile(
@@ -37,7 +38,7 @@ PROFILE = AgentProfile(
         "do not fetch GitHub HTML. Cannot edit the workspace."
     ),
     system_prompt=RESEARCHER_SYSTEM,
-    tool_names=WEB + NAV + GH_READ + GH_WRITE + PKG + DOCS + SEC + OPENAPI + DEP + SKILLS + MEMORY + MCP,
+    tool_names=WEB + NAV + GH_REPO + PKG + DOCS + SEC + OPENAPI + DEP + SKILLS + MEMORY + MCP,
     write_globs=[],
     required_tools=[],
     max_turns=32,
