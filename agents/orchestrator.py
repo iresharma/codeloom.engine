@@ -10,7 +10,7 @@ from uuid import uuid4
 from agents.agent_loop import AgentLoop
 from agents.compactor import AgentResult, write_context_md
 from agents.hooks import AgentHooks
-from agents.profile import ProfileRegistry
+from agents.profile import SKILLS, ProfileRegistry
 from agents.subagent import Subagent
 from runtime.prompts import PromptTimeout
 from runtime.tools.git import (
@@ -113,8 +113,10 @@ class Orchestrator(AgentLoop):
         self._aborting_all = False
         self._batch_id = ""
         self._batch_name = ""
+        self._skills = kwargs.get("skills")
+        self._on_skill_activated = kwargs.get("on_skill_activated")
 
-        kwargs.setdefault("tools", all_tools.subset([]))
+        kwargs.setdefault("tools", all_tools.subset(SKILLS))
         kwargs.setdefault("system_prompt", ORCH_SYSTEM)
         kwargs.setdefault("role", "orchestrator")
         kwargs.setdefault("concurrent_tools", True)
@@ -305,6 +307,7 @@ class Orchestrator(AgentLoop):
         status = "ok"
         outcome = ""
         try:
+            child.set_catalog_query(task)
             text = await child.run(task)
             if str(text).startswith("stopped after"):
                 status = "max_turns"
@@ -446,7 +449,7 @@ class Orchestrator(AgentLoop):
         child_config = replace(
             self._config, max_turns=profile.max_turns or self._config.max_turns
         )
-        tools = self._all_tools.subset(profile.tool_names)
+        tools = self._all_tools.subset(profile.tool_names, profile=profile.name)
         hooks = None
         if self._make_child_hooks is not None:
             hooks = self._make_child_hooks(agent_id, profile.name)
@@ -495,6 +498,8 @@ class Orchestrator(AgentLoop):
             agent_id=agent_id,
             parent_id=self.agent_id,
             write_lock=write_lock,
+            skills=self._skills,
+            on_skill_activated=self._on_skill_activated,
         )
 
 

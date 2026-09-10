@@ -12,6 +12,7 @@ from protocol.events import (
     AgentStateChanged,
     AgentsUpdated,
     OrchContext,
+    McpAuthRequired,
     WorktreeSettled,
     ChatHistoryAdded,
     ChatMessageAdded,
@@ -56,6 +57,7 @@ SIZE_FIELDS: dict[type, tuple[str, ...]] = {
     AgentsUpdated: (),
     OrchContext: ("text",),
     WorktreeSettled: ("detail",),
+    McpAuthRequired: ("url",),
 }
 
 SMALL_STRING_FIELDS = frozenset(
@@ -90,6 +92,7 @@ SMALL_STRING_FIELDS = frozenset(
         "batch_name",
         "action",
         "pr_url",
+        "server",
     }
 )
 

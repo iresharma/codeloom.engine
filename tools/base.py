@@ -28,6 +28,9 @@ class ToolContext:
     profile: str = ""
     write_globs: list[str] | None = None
     write_lock: Any = None
+    skills: Any = None
+    activate_skill: Any = None
+    unlocked_skills: Any = None
 
 
 @dataclass
@@ -36,6 +39,8 @@ class Tool:
     description: str
     parameters: dict
     fn: Callable
+    family: str = ""
+    mcp_profiles: tuple[str, ...] | None = None
 
     def schema(self) -> dict:
         return {
@@ -67,6 +72,7 @@ def tool(
     *,
     name: str | None = None,
     parameters: dict | None = None,
+    family: str = "",
 ) -> Callable:
     """Register a function as an engine tool.
 
@@ -80,6 +86,7 @@ def tool(
             description=(description or fn.__doc__ or fn.__name__).strip(),
             parameters=parameters or _schema_from_fn(fn),
             fn=fn,
+            family=family,
         )
         fn._engine_tool = spec
         return fn

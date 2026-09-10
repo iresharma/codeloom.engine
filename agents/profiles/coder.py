@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agents.profile import EDIT, GIT, LSP, NAV, SHELL, SITTER, AgentProfile
+from agents.profile import EDIT, GIT, LSP, NAV, SHELL, SITTER, SKILLS, AgentProfile
 
 CODER_SYSTEM = """You implement code changes in this workspace.
 
@@ -24,7 +24,7 @@ PROFILE = AgentProfile(
         "Must call get_diagnostics before finishing. Not for repo surveys."
     ),
     system_prompt=CODER_SYSTEM,
-    tool_names=NAV + SITTER + LSP + EDIT + SHELL + GIT,
+    tool_names=NAV + SITTER + LSP + EDIT + SHELL + GIT + SKILLS,
     write_globs=None,
     required_tools=["get_diagnostics"],
     max_turns=16,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agents.profile import EDIT, NAV, SHELL, TEST_GLOBS, AgentProfile
+from agents.profile import EDIT, NAV, SHELL, SKILLS, TEST_GLOBS, AgentProfile
 
 TESTER_SYSTEM = """You prove behavior: unit tests, curl against APIs, and the project's own E2E runner (pytest, cypress, npx playwright — whatever the repo already has).
 
@@ -18,7 +18,7 @@ PROFILE = AgentProfile(
         "Cannot edit production code. Must run_command at least once."
     ),
     system_prompt=TESTER_SYSTEM,
-    tool_names=NAV + EDIT + SHELL,
+    tool_names=NAV + EDIT + SHELL + SKILLS,
     write_globs=list(TEST_GLOBS),
     required_tools=["run_command"],
     max_turns=16,

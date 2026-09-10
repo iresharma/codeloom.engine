@@ -7,6 +7,7 @@ import tools as tools_pkg
 from tools.base import Tool, ToolContext
 
 MAX_RESULT = 80_000
+DEFAULT_MCP_PROFILES = {"researcher", "debugger"}
 
 
 class ToolRegistry:
@@ -23,10 +24,19 @@ class ToolRegistry:
     def names(self) -> set[str]:
         return set(self._tools)
 
-    def subset(self, names: list[str]) -> ToolRegistry:
+    def subset(self, names: list[str], profile: str = "") -> ToolRegistry:
         out = ToolRegistry()
         seen: set[str] = set()
         for name in names:
+            if name == "mcp":
+                for spec in self._tools.values():
+                    if spec.family != "mcp" or spec.name in seen:
+                        continue
+                    if not _mcp_allowed(spec, profile):
+                        continue
+                    seen.add(spec.name)
+                    out._tools[spec.name] = spec
+                continue
             if name in seen:
                 continue
             seen.add(name)
@@ -36,6 +46,11 @@ class ToolRegistry:
                 continue
             out._tools[name] = spec
         return out
+
+    def drop_family(self, family: str) -> None:
+        self._tools = {
+            name: spec for name, spec in self._tools.items() if spec.family != family
+        }
 
     def schemas(self) -> list[dict]:
         return [spec.schema() for spec in self._tools.values()]
@@ -72,3 +87,12 @@ def discover_tools() -> ToolRegistry:
             if isinstance(spec, Tool):
                 registry.register(spec)
     return registry
+
+
+def _mcp_allowed(spec: Tool, profile: str) -> bool:
+    if not profile:
+        return True
+    allowed = spec.mcp_profiles
+    if allowed is None:
+        allowed = tuple(DEFAULT_MCP_PROFILES)
+    return profile in allowed

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agents.profile import NAV, WEB, AgentProfile
+from agents.profile import MCP, NAV, SKILLS, WEB, AgentProfile
 
 RESEARCHER_SYSTEM = """You gather external facts: docs, APIs, library behavior, error messages.
 
@@ -16,7 +16,7 @@ PROFILE = AgentProfile(
         "Cannot edit the workspace."
     ),
     system_prompt=RESEARCHER_SYSTEM,
-    tool_names=WEB + NAV,
+    tool_names=WEB + NAV + SKILLS + MCP,
     write_globs=[],
     required_tools=[],
     max_turns=10,

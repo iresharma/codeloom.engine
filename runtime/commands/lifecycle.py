@@ -19,7 +19,7 @@ from runtime.store.sqlite import load as load_snapshot
 
 
 @handles(StartSession)
-def start_session(session, command: StartSession) -> None:
+async def start_session(session, command: StartSession) -> None:
     incoming = Path(command.workspace).expanduser().resolve()
     if incoming != session._workspace:
         session._emit(
@@ -44,7 +44,7 @@ def start_session(session, command: StartSession) -> None:
     else:
         session._state = SessionState(session_id=uuid4().hex)
         session._persist()
-    session._bind_loop()
+    await session._bind_loop()
     session._emit_snapshot()
     if session.language.warning:
         session._emit(WarningOccurred(message=session.language.warning))
