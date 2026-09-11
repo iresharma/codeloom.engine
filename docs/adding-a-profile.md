@@ -236,7 +236,7 @@ list is matched against the relative path (`**/tests/**`, `**/*.md`, …).
 `AgentResult.status` is `incomplete` (the child still exits). Used by `coder`
 (`get_diagnostics`) and `tester` (`run_command`).
 - `max_turns` — child's own cap, independent of the orch. Built-in profiles use 32. Hitting it prompts continue (same child, another `turn_slice`), handoff (orch may spawn one writer with leftover), or stop (no respawn). `ENGINE_TURN_CONTINUE=never` skips the prompt and hands off. Do not lower researcher without `Stats.agent_runs` showing frequent `max_turns`; spawn-once still blocks a sibling researcher, so a hard cut just wastes the survey.
-- `model` — optional OpenRouter model id for this personality. `ask` and `tester` use Haiku; researcher/coder/debugger/reviewer inherit `OPENROUTER_MODEL`. `OPENROUTER_CHILD_MODEL` overrides only profiles that leave `model` unset.
+- `model` — optional OpenRouter model id for this personality. `tester` uses Haiku; ask/researcher/coder/debugger/reviewer inherit `OPENROUTER_MODEL`. `OPENROUTER_CHILD_MODEL` overrides only profiles that leave `model` unset.
 - `needs_worktree` — if true, the child runs in a git worktree on a new branch
 under `.engine/worktrees/` so writers do not collide. `coder` and `tester`
 set this. When the child finishes with changes, those edits are committed on

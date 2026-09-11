@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import threading
 import time
 from contextlib import suppress
@@ -744,6 +745,7 @@ class EngineSession:
         stats.turns += 1
         stats.last_turn_tokens += usage.total_tokens
         stats.last_turn_cost += usage.cost
+        apply_cost_correction(self._workspace, self._state)
         self._emit_stats()
 
     def _on_state(
@@ -938,6 +940,7 @@ class EngineSession:
         self._emit(AgentsUpdated(agents=[replace(row) for row in self._state.agents]))
 
     def _emit_stats(self) -> None:
+        apply_cost_correction(self._workspace, self._state)
         self._emit(StatsUpdated(stats=self._state.stats))
 
     def _cancel_history_replay(self) -> None:
@@ -948,6 +951,7 @@ class EngineSession:
             task.cancel()
 
     def _emit_snapshot(self, *, replay: bool = True) -> None:
+        apply_cost_correction(self._workspace, self._state)
         self._drop_missing_open_files()
         if replay:
             self._cancel_history_replay()
@@ -1128,6 +1132,7 @@ class EngineSession:
     def _persist(self) -> None:
         if self._state.session_id is None:
             return
+        apply_cost_correction(self._workspace, self._state)
         save_snapshot(
             self._db_path,
             self._state.snapshot(str(self._workspace), [], GitState.empty()),
@@ -1157,6 +1162,38 @@ class EngineSession:
     def _emit(self, event: Event) -> None:
         for queue in list(self._subscribers):
             queue.put(event)
+
+
+def apply_cost_correction(workspace: Path, state: SessionState) -> None:
+    """Floor persisted stats.cost from .engine/cost-correction.json.
+
+    Used to backfill a session whose stream usage omitted dollars.
+    Never lowers an already-higher live total.
+    """
+    if state.session_id is None:
+        return
+    path = Path(workspace) / ".engine" / "cost-correction.json"
+    if not path.is_file():
+        return
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if data.get("session_id") != state.session_id:
+        return
+    stats = state.stats
+    cost = float(data.get("cost") or 0)
+    if cost > stats.cost:
+        stats.cost = cost
+    by_id = {
+        item.get("agent_id"): float(item.get("cost") or 0)
+        for item in data.get("agent_runs") or []
+        if item.get("agent_id")
+    }
+    for row in stats.agent_runs:
+        extra = by_id.get(row.agent_id)
+        if extra is not None and extra > row.cost:
+            row.cost = extra
 
 
 def _count_tree(nodes) -> int:

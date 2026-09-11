@@ -86,7 +86,9 @@ REPORT_TO_ORCH = (
     "End with a complete briefing: labeled lines for what / paths / facts / verdict / leftover. "
     "Facts must be specific enough that a later coder can work without re-surveying. "
     "A filename is not an answer. Finish the investigation before you report. "
-    "Omit empty fields."
+    "Omit empty fields. If a command or fetch failed for environment reasons "
+    "(missing dependency, auth, network) rather than a code bug, say so in "
+    "leftover instead of retrying blindly."
 )
 
 TEST_GLOBS = [
@@ -101,7 +103,8 @@ TEST_GLOBS = [
 ]
 
 
-# Extractive children (ask, tester). Researcher stays on OPENROUTER_MODEL.
+# Tester only. Ask inherits OPENROUTER_MODEL — the briefing is the map
+# the orch and coder run on, and Haiku was the wrong place to save money.
 EXTRACTOR_MODEL = "anthropic/claude-haiku-4.5"
 
 

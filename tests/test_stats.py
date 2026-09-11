@@ -112,6 +112,28 @@ def test_agent_runs_round_trip_sqlite(tmp_path):
     assert abs(row.cost - 0.8) < 1e-9
 
 
+def test_apply_cost_correction_floors_session_and_runs(tmp_path):
+    from protocol.snapshot import AgentRun
+    from runtime.session import apply_cost_correction
+    from runtime.store import SessionState
+
+    engine = tmp_path / ".engine"
+    engine.mkdir()
+    (engine / "cost-correction.json").write_text(
+        '{"session_id":"s1","cost":1.5,"agent_runs":[{"agent_id":"a","cost":0.4}]}'
+    )
+    state = SessionState(
+        session_id="s1",
+        stats=Stats(
+            cost=0.1,
+            agent_runs=[AgentRun(agent_id="a", profile="ask", cost=0.0)],
+        ),
+    )
+    apply_cost_correction(tmp_path, state)
+    assert abs(state.stats.cost - 1.5) < 1e-9
+    assert abs(state.stats.agent_runs[0].cost - 0.4) < 1e-9
+
+
 def test_missing_stats_defaults():
     snap = EngineSnapshot.from_json(
         {

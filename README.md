@@ -1036,7 +1036,7 @@ describe those implementations to a model. The suite exercises
 | Command output | 30k / stream, 60k total | `runtime/tools/shell.py` |
 | Context budget | 120,000 tokens | `EngineConfig.context_budget` |
 | Compact trigger / keep full tools | orch 0.7 / 3; children never compact in-loop (`trigger=2.0`), overflow fuse + `compress_for_parent` on finish | `EngineConfig.compact_trigger` / `keep_full_tools` |
-| Child models | ask/tester `anthropic/claude-haiku-4.5`; others inherit `OPENROUTER_MODEL` | `AgentProfile.model` / `OPENROUTER_CHILD_MODEL` |
+| Child models | tester `anthropic/claude-haiku-4.5`; ask and others inherit `OPENROUTER_MODEL` | `AgentProfile.model` / `OPENROUTER_CHILD_MODEL` |
 | Survey spawn cap | first user turn may fan out; leftover inbox turns spawn at most one `ask` and one `researcher` | `Orchestrator.reset_user_message_spawns` |
 | `github_file` window | 12,000 chars default, 50,000 hard cap | `runtime/tools/github.py` |
 | Child report summary / outcome | 400 / 32,000 chars; a clipped closer is `incomplete` so ask/researcher may respawn once | `SUMMARY_CLIP` / `OUTCOME_CLIP` |

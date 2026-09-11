@@ -61,7 +61,7 @@ class FakeApprover:
         return self.answer
 
 
-def chunk(*, content=None, reasoning=None, tool_calls=None, usage=None, error=None, finish=None, model="fake"):
+def chunk(*, content=None, reasoning=None, tool_calls=None, usage=None, error=None, finish=None, model="fake", chunk_id=None):
     delta = SimpleNamespace(
         content=content,
         reasoning=reasoning,
@@ -73,6 +73,7 @@ def chunk(*, content=None, reasoning=None, tool_calls=None, usage=None, error=No
         usage=usage,
         error=error,
         model=model,
+        id=chunk_id,
     )
 
 

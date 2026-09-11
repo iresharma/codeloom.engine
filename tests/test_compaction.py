@@ -342,7 +342,7 @@ def test_make_subagent_uses_child_compact(tmp_path):
     ask = orch._make_subagent(
         discover_profiles().get("ask"), "ask1", tmp_path, isolated=False
     )
-    assert ask._model == "anthropic/claude-haiku-4.5"
+    assert ask._model is None
 
 
 def test_freeze_system_ignores_later_memory(tmp_path):

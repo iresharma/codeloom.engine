@@ -88,10 +88,35 @@ class OpenRouterLLM:
             kwargs["retries"] = retries
         response = await self._client.chat.send_async(**kwargs)
         if stream:
-            return await _result_from_stream(response, on_delta, idle_s)
-        result = _result_from(response)
-        if on_delta and result.text:
-            on_delta("text", result.text)
+            result = await _result_from_stream(response, on_delta, idle_s)
+        else:
+            result = _result_from(response)
+            if on_delta and result.text:
+                on_delta("text", result.text)
+        return await self._fill_missing_cost(result)
+
+    async def _fill_missing_cost(self, result: LLMResult) -> LLMResult:
+        usage = result.usage
+        gen_id = result.generation_id
+        if (
+            usage is None
+            or usage.cost
+            or not (usage.total_tokens or usage.prompt_tokens)
+            or not gen_id
+        ):
+            return result
+        try:
+            meta = await self._client.generations.get_generation_async(id=gen_id)
+        except Exception:
+            return result
+        data = getattr(meta, "data", None) or meta
+        cost = _cost_from(data)
+        if not cost:
+            cost = _float_or_zero(_field(data, "total_cost")) or _float_or_zero(
+                _field(data, "usage")
+            )
+        if cost:
+            usage.cost = cost
         return result
 
 
@@ -184,19 +209,34 @@ def _retry_config():
     )
 
 
-def _int_or_zero(value) -> int:
+def _field(raw, name, default=None):
+    if isinstance(raw, dict):
+        return raw.get(name, default)
+    return getattr(raw, name, default)
+
+
+def _is_missing(value) -> bool:
     if value is None:
+        return True
+    # Speakeasy UNSET is a pydantic model with __bool__ == False.
+    if type(value).__name__ == "Unset":
+        return True
+    if value is getattr(value, "__class__", None):
+        return True
+    return False
+
+
+def _int_or_zero(value) -> int:
+    if _is_missing(value):
         return 0
     try:
-        if value is getattr(value, "__class__", None):
-            return 0
         return int(value)
     except (TypeError, ValueError):
         return 0
 
 
 def _float_or_zero(value) -> float:
-    if value is None:
+    if _is_missing(value):
         return 0.0
     try:
         return float(value)
@@ -204,25 +244,56 @@ def _float_or_zero(value) -> float:
         return 0.0
 
 
+def _cost_from(raw) -> float:
+    cost = _float_or_zero(_field(raw, "cost"))
+    if cost:
+        return cost
+    details = _field(raw, "cost_details")
+    if details is None or _is_missing(details):
+        return 0.0
+    total = _float_or_zero(_field(details, "upstream_inference_cost"))
+    if total:
+        return total
+    return _float_or_zero(_field(details, "upstream_inference_prompt_cost")) + _float_or_zero(
+        _field(details, "upstream_inference_completions_cost")
+    )
+
+
 def _usage_from(raw) -> Usage | None:
     if raw is None:
         return None
-    details = getattr(raw, "completion_tokens_details", None)
-    prompt_details = getattr(raw, "prompt_tokens_details", None)
+    details = _field(raw, "completion_tokens_details")
+    prompt_details = _field(raw, "prompt_tokens_details")
     reasoning = 0
     cached = 0
     if details is not None:
-        reasoning = _int_or_zero(getattr(details, "reasoning_tokens", None))
+        reasoning = _int_or_zero(_field(details, "reasoning_tokens"))
     if prompt_details is not None:
-        cached = _int_or_zero(getattr(prompt_details, "cached_tokens", None))
+        cached = _int_or_zero(_field(prompt_details, "cached_tokens"))
     return Usage(
-        prompt_tokens=_int_or_zero(getattr(raw, "prompt_tokens", 0)),
-        completion_tokens=_int_or_zero(getattr(raw, "completion_tokens", 0)),
-        total_tokens=_int_or_zero(getattr(raw, "total_tokens", 0)),
+        prompt_tokens=_int_or_zero(_field(raw, "prompt_tokens", 0)),
+        completion_tokens=_int_or_zero(_field(raw, "completion_tokens", 0)),
+        total_tokens=_int_or_zero(_field(raw, "total_tokens", 0)),
         reasoning_tokens=reasoning,
         cached_tokens=cached,
-        cost=_float_or_zero(getattr(raw, "cost", 0)),
+        cost=_cost_from(raw),
         requests=1,
+    )
+
+
+def _prefer_usage(current: Usage | None, incoming: Usage | None) -> Usage | None:
+    if incoming is None:
+        return current
+    if current is None:
+        return incoming
+    return Usage(
+        prompt_tokens=incoming.prompt_tokens or current.prompt_tokens,
+        completion_tokens=incoming.completion_tokens or current.completion_tokens,
+        total_tokens=incoming.total_tokens or current.total_tokens,
+        reasoning_tokens=incoming.reasoning_tokens or current.reasoning_tokens,
+        cached_tokens=incoming.cached_tokens or current.cached_tokens,
+        cost=incoming.cost or current.cost,
+        requests=incoming.requests or current.requests or 1,
     )
 
 
@@ -242,6 +313,7 @@ def _result_from(response) -> LLMResult:
         usage=usage,
         finish_reason=str(finish) if finish else None,
         model=getattr(response, "model", None),
+        generation_id=getattr(response, "id", None) or None,
     )
 
 
@@ -285,6 +357,7 @@ async def _result_from_stream(stream, on_delta, idle_s: float) -> LLMResult:
     usage = None
     finish_reason = None
     model = None
+    generation_id = None
     closer = getattr(stream, "__aexit__", None)
     try:
         if hasattr(stream, "__aenter__"):
@@ -304,9 +377,12 @@ async def _result_from_stream(stream, on_delta, idle_s: float) -> LLMResult:
                 raise LLMError(message, code=_int_or_zero(code) or None)
             if getattr(chunk, "model", None):
                 model = chunk.model
+            chunk_id = getattr(chunk, "id", None)
+            if chunk_id:
+                generation_id = chunk_id
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
-                usage = _usage_from(chunk_usage)
+                usage = _prefer_usage(usage, _usage_from(chunk_usage))
             choices = getattr(chunk, "choices", None) or []
             for choice in choices:
                 reason = getattr(choice, "finish_reason", None)
@@ -358,6 +434,7 @@ async def _result_from_stream(stream, on_delta, idle_s: float) -> LLMResult:
             usage=usage,
             finish_reason=finish_reason,
             model=model,
+            generation_id=generation_id,
         )
     finally:
         if closer is not None:

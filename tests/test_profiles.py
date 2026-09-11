@@ -122,7 +122,7 @@ def test_orch_and_profile_allowlists():
     assert profiles.get("debugger").max_turns == 32
     assert profiles.get("reviewer").max_turns == 32
     assert profiles.get("researcher").max_turns == 32
-    assert profiles.get("ask").model == "anthropic/claude-haiku-4.5"
+    assert profiles.get("ask").model is None
     assert profiles.get("tester").model == "anthropic/claude-haiku-4.5"
     assert profiles.get("researcher").model is None
 

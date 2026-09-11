@@ -56,6 +56,7 @@ class LLMResult:
     usage: Usage | None = None
     finish_reason: str | None = None
     model: str | None = None
+    generation_id: str | None = None
 
 
 class LLMProvider(Protocol):

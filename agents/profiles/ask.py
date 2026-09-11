@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agents.profile import LSP, MEMORY, NAV, SCAN, SITTER, SKILLS, EXTRACTOR_MODEL, AgentProfile
+from agents.profile import LSP, MEMORY, NAV, SCAN, SITTER, SKILLS, AgentProfile
 
 ASK_SYSTEM = """You are a read-only codebase Q&A agent. You never edit files and never run shell commands.
 
@@ -30,5 +30,4 @@ PROFILE = AgentProfile(
     write_globs=[],
     required_tools=[],
     max_turns=32,
-    model=EXTRACTOR_MODEL,
 )

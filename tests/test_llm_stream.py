@@ -5,8 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm.openrouter import _result_from_stream
-from llm.provider import LLMError, Usage
+from llm.openrouter import (
+    OpenRouterLLM,
+    _cost_from,
+    _prefer_usage,
+    _result_from_stream,
+    _usage_from,
+)
+from llm.provider import LLMError, LLMResult, Usage
 from tests.fakes import FakeStream, chunk, tool_delta
 
 
@@ -106,6 +112,108 @@ def test_usage_unset_details():
         assert isinstance(result.usage, Usage)
         assert result.usage.reasoning_tokens == 0
         assert result.usage.cached_tokens == 0
+
+    asyncio.run(run())
+
+
+def test_cost_falls_back_to_cost_details():
+    class Unset:
+        def __bool__(self):
+            return False
+
+    raw = SimpleNamespace(
+        prompt_tokens=10,
+        completion_tokens=2,
+        total_tokens=12,
+        cost=Unset(),
+        cost_details=SimpleNamespace(
+            upstream_inference_cost=0.0123,
+            upstream_inference_prompt_cost=0.01,
+            upstream_inference_completions_cost=0.0023,
+        ),
+        completion_tokens_details=None,
+        prompt_tokens_details=None,
+    )
+    usage = _usage_from(raw)
+    assert usage is not None
+    assert abs(usage.cost - 0.0123) < 1e-9
+    assert abs(_cost_from(SimpleNamespace(cost=Unset(), cost_details=None)) - 0.0) < 1e-9
+    split = SimpleNamespace(
+        cost=None,
+        cost_details=SimpleNamespace(
+            upstream_inference_cost=Unset(),
+            upstream_inference_prompt_cost=0.008,
+            upstream_inference_completions_cost=0.002,
+        ),
+    )
+    assert abs(_cost_from(split) - 0.01) < 1e-9
+
+
+def test_prefer_usage_keeps_cost_when_later_chunk_omits_it():
+    first = Usage(prompt_tokens=1, total_tokens=1, cost=0.2, requests=1)
+    second = Usage(prompt_tokens=10, completion_tokens=2, total_tokens=12, cost=0.0, requests=1)
+    merged = _prefer_usage(first, second)
+    assert merged is not None
+    assert merged.total_tokens == 12
+    assert abs(merged.cost - 0.2) < 1e-9
+
+
+def test_stream_keeps_generation_id_and_merges_cost():
+    async def run():
+        stream = FakeStream(
+            [
+                chunk(
+                    content="x",
+                    chunk_id="gen-1",
+                    usage=SimpleNamespace(
+                        prompt_tokens=2,
+                        completion_tokens=0,
+                        total_tokens=2,
+                        cost=0.05,
+                        completion_tokens_details=None,
+                        prompt_tokens_details=None,
+                    ),
+                ),
+                chunk(
+                    content="y",
+                    chunk_id="gen-1",
+                    usage=SimpleNamespace(
+                        prompt_tokens=2,
+                        completion_tokens=3,
+                        total_tokens=5,
+                        cost=None,
+                        completion_tokens_details=None,
+                        prompt_tokens_details=None,
+                    ),
+                ),
+            ]
+        )
+        result = await _result_from_stream(stream, None, 1)
+        assert result.generation_id == "gen-1"
+        assert result.usage is not None
+        assert result.usage.total_tokens == 5
+        assert abs(result.usage.cost - 0.05) < 1e-9
+
+    asyncio.run(run())
+
+
+def test_fill_missing_cost_from_generation():
+    async def run():
+        llm = OpenRouterLLM(api_key="sk-test", model="fake")
+
+        class Gens:
+            async def get_generation_async(self, id):
+                assert id == "gen-99"
+                return SimpleNamespace(data=SimpleNamespace(total_cost=0.42, usage=0.42))
+
+        llm._client = SimpleNamespace(generations=Gens())
+        result = await llm._fill_missing_cost(
+            LLMResult(
+                usage=Usage(prompt_tokens=10, total_tokens=12, cost=0.0, requests=1),
+                generation_id="gen-99",
+            )
+        )
+        assert abs(result.usage.cost - 0.42) < 1e-9
 
     asyncio.run(run())
 
