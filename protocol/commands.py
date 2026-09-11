@@ -113,3 +113,42 @@ class ActivateSkill(ProtocolMessage):
 class CompleteMcpAuth(ProtocolMessage):
     server: str
     token: str
+
+
+@command
+@dataclass
+class CreatePath(ProtocolMessage):
+    path: str
+    is_dir: bool = False
+    content: str = ""
+
+
+@command
+@dataclass
+class RenamePath(ProtocolMessage):
+    src: str
+    dest: str
+
+
+@command
+@dataclass
+class DeletePath(ProtocolMessage):
+    path: str
+
+
+@command
+@dataclass
+class RequestContext(ProtocolMessage):
+    agent_id: str = ""
+
+
+@command
+@dataclass
+class RequestMemory(ProtocolMessage):
+    pass
+
+
+@command
+@dataclass
+class RequestAgentTranscript(ProtocolMessage):
+    agent_id: str

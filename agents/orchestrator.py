@@ -175,6 +175,7 @@ class Orchestrator(AgentLoop):
         self._batch_name = ""
         self._skills = kwargs.get("skills")
         self._on_skill_activated = kwargs.get("on_skill_activated")
+        self._finished_transcripts: dict[str, dict] = {}
 
         kwargs.setdefault("tools", all_tools.subset(SKILLS + MEMORY))
         kwargs.setdefault("system_prompt", ORCH_SYSTEM)
@@ -186,6 +187,49 @@ class Orchestrator(AgentLoop):
             self._tools.register(spec)
         self._tools.register(_settle_worktree_tool(self))
         self._recover_worktrees()
+
+    def _store_transcript(self, agent_id: str, child) -> None:
+        payload = {
+            "lines": [],
+            "breakdown": None,
+            "profile": getattr(child, "profile", ""),
+        }
+        try:
+            payload["lines"] = child.transcript_lines()
+        except Exception:  # noqa: BLE001
+            payload["lines"] = []
+        try:
+            payload["breakdown"] = child.context_breakdown()
+        except Exception:  # noqa: BLE001
+            payload["breakdown"] = None
+        self._finished_transcripts[agent_id] = payload
+        while len(self._finished_transcripts) > 32:
+            self._finished_transcripts.pop(next(iter(self._finished_transcripts)))
+
+    def agent_loop_for(self, agent_id: str = ""):
+        if not agent_id:
+            return self
+        return self._children.get(agent_id)
+
+    def transcript_for(self, agent_id: str):
+        child = self._children.get(agent_id)
+        if child is not None:
+            return child.transcript_lines()
+        stored = self._finished_transcripts.get(agent_id)
+        if stored is not None:
+            return stored.get("lines") or []
+        return None
+
+    def breakdown_for(self, agent_id: str = ""):
+        if not agent_id:
+            return self.context_breakdown()
+        child = self._children.get(agent_id)
+        if child is not None:
+            return child.context_breakdown()
+        stored = self._finished_transcripts.get(agent_id)
+        if stored is not None:
+            return stored.get("breakdown")
+        return None
 
     def reset_spawn_budget(self) -> None:
         self._aborting_all = False
@@ -545,6 +589,8 @@ class Orchestrator(AgentLoop):
             )
         except Exception:  # noqa: BLE001
             pass
+        if getattr(self._ctx, "on_memory", None) is not None:
+            self._ctx.on_memory()
         self._shutdown_child_lsp(agent_id)
         owns_worktree = agent_id in self._worktrees
         should_settle = owns_worktree and status != "aborted" and not self._aborting_all
@@ -566,6 +612,7 @@ class Orchestrator(AgentLoop):
             )
         if self._on_agent_result is not None and not self._aborting_all:
             self._on_agent_result(agent_id, profile.name, result.as_text())
+        self._store_transcript(agent_id, child)
         self._child_tasks.pop(agent_id, None)
         self._children.pop(agent_id, None)
         if should_settle:
@@ -719,6 +766,7 @@ class Orchestrator(AgentLoop):
             skills=self._skills,
             on_skill_activated=self._on_skill_activated,
             model=child_model,
+            on_memory=self._ctx.on_memory,
         )
 
 

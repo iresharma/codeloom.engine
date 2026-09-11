@@ -83,6 +83,40 @@ def test_undo_round_trip(ctx):
     assert (ctx.workspace / "a.py").read_text() == "print(1)\n"
 
 
+def test_mkdir_delete_rename_undo(ctx):
+    from runtime.tools.edits import delete_path, mkdir_path, rename_path
+
+    async def run():
+        made = await mkdir_path(ctx, "pkg")
+        assert made.startswith("ok:")
+        assert (ctx.workspace / "pkg").is_dir()
+        created = await apply_edit(
+            ctx, "pkg/a.py", lambda src: "x = 1\n", "create_file", creating=True
+        )
+        assert created.startswith("ok:")
+        renamed = await rename_path(ctx, "pkg/a.py", "pkg/b.py")
+        assert renamed.startswith("ok:")
+        assert (ctx.workspace / "pkg/b.py").is_file()
+        assert not (ctx.workspace / "pkg/a.py").exists()
+        undone = await undo_last(ctx)
+        assert undone.startswith("ok:")
+        assert (ctx.workspace / "pkg/a.py").is_file()
+        deleted = await delete_path(ctx, "pkg/a.py")
+        assert deleted.startswith("ok:")
+        assert not (ctx.workspace / "pkg/a.py").exists()
+        restored = await undo_last(ctx)
+        assert restored.startswith("ok:")
+        assert (ctx.workspace / "pkg/a.py").is_file()
+        await delete_path(ctx, "pkg/a.py")
+        empty = await delete_path(ctx, "pkg")
+        assert empty.startswith("ok:")
+        assert not (ctx.workspace / "pkg").exists()
+        await undo_last(ctx)
+        assert (ctx.workspace / "pkg").is_dir()
+
+    asyncio.run(run())
+
+
 def test_must_read_before_edit(ctx):
     (ctx.workspace / "a.py").write_text("print(1)\n")
 

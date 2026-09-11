@@ -377,6 +377,93 @@ class SkillRow:
 
 
 @dataclass
+class ContextSection:
+    name: str
+    chars: int = 0
+    tokens_est: int = 0
+    text: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "chars": self.chars,
+            "tokens_est": self.tokens_est,
+            "text": self.text,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> ContextSection:
+        text = str(data.get("text") or "")
+        chars = int(data.get("chars") or len(text))
+        return cls(
+            name=str(data.get("name") or ""),
+            chars=chars,
+            tokens_est=int(data.get("tokens_est") or max(0, chars // 4)),
+            text=text,
+        )
+
+
+@dataclass
+class MemoryFileNote:
+    path: str
+    purpose: str = ""
+    entry_points: str = ""
+    constraints: str = ""
+    note: str = ""
+    stale: bool = False
+    action: str = ""
+    updated_at: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"path": self.path, "stale": self.stale}
+        if self.purpose:
+            payload["purpose"] = self.purpose
+        if self.entry_points:
+            payload["entry_points"] = self.entry_points
+        if self.constraints:
+            payload["constraints"] = self.constraints
+        if self.note:
+            payload["note"] = self.note
+        if self.action:
+            payload["action"] = self.action
+        if self.updated_at:
+            payload["updated_at"] = self.updated_at
+        return payload
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> MemoryFileNote:
+        return cls(
+            path=str(data.get("path") or ""),
+            purpose=str(data.get("purpose") or ""),
+            entry_points=str(data.get("entry_points") or ""),
+            constraints=str(data.get("constraints") or ""),
+            note=str(data.get("note") or ""),
+            stale=bool(data.get("stale", False)),
+            action=str(data.get("action") or ""),
+            updated_at=str(data.get("updated_at") or ""),
+        )
+
+
+@dataclass
+class MemoryDecision:
+    text: str
+    updated_at: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"text": self.text}
+        if self.updated_at:
+            payload["updated_at"] = self.updated_at
+        return payload
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> MemoryDecision:
+        return cls(
+            text=str(data.get("text") or ""),
+            updated_at=str(data.get("updated_at") or ""),
+        )
+
+
+@dataclass
 class EngineSnapshot:
     session_id: str
     workspace: str

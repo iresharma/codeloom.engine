@@ -562,6 +562,8 @@ def _commit(
         ctx.files.mark(prepared.src.rel, prepared.after_sha)
     try:
         touch(ctx.workspace, prepared.src.rel, prepared.after_sha, "edit")
+        if getattr(ctx, "on_memory", None) is not None:
+            ctx.on_memory()
     except OSError:
         pass
     return ApplyResult(
@@ -705,6 +707,8 @@ async def _apply_edit_body(
         extra = await asyncio.to_thread(_lsp_after, ctx, result, before)
     if ctx.on_edit is not None and result.diff:
         ctx.on_edit(result.rel, result.diff, tool_name, result.edit_id)
+    if ctx.on_edit is not None and result.created and not result.diff:
+        ctx.on_edit(result.rel, result.diff or "", tool_name, result.edit_id)
     return _format_success(result, extra)
 
 
@@ -875,6 +879,12 @@ def undo_last_sync(ctx: ToolContext) -> ApplyResult:
                     ok=False,
                     message=f"error: {rec.path} exists; expected it to be deleted",
                 )
+        elif rec.tool == "mkdir" or (target.is_dir() and rec.after == b""):
+            if not target.is_dir():
+                return ApplyResult(
+                    ok=False,
+                    message=f"error: {rec.path} is not the directory that was created",
+                )
         else:
             if current_sha != rec.after_sha:
                 return ApplyResult(
@@ -893,7 +903,10 @@ def undo_last_sync(ctx: ToolContext) -> ApplyResult:
         if rec.before is None:
             before_now = target.read_bytes() if target.is_file() else None
             before_sha = sha256_bytes(before_now) if before_now is not None else None
-            target.unlink()
+            if target.is_dir():
+                _rmdir_if_empty(target)
+            elif target.exists():
+                target.unlink()
             for directory in reversed(rec.created_dirs):
                 _rmdir_if_empty(ctx.workspace / directory)
             after_bytes = None
@@ -902,13 +915,22 @@ def undo_last_sync(ctx: ToolContext) -> ApplyResult:
             new_text = ""
         elif rec.after is None:
             _ensure_parents(ctx.workspace, target)
-            _atomic_create(target, rec.before)
-            before_now = None
-            before_sha = None
-            after_bytes = rec.before
-            after_sha = rec.before_sha
-            old_text = ""
-            new_text = rec.before.decode("utf-8", errors="replace")
+            if rec.tool in {"delete_path", "rename_path"} and rec.before == b"":
+                target.mkdir(exist_ok=True)
+                before_now = None
+                before_sha = None
+                after_bytes = rec.before
+                after_sha = rec.before_sha
+                old_text = ""
+                new_text = ""
+            else:
+                _atomic_create(target, rec.before)
+                before_now = None
+                before_sha = None
+                after_bytes = rec.before
+                after_sha = rec.before_sha
+                old_text = ""
+                new_text = rec.before.decode("utf-8", errors="replace")
         else:
             before_now = target.read_bytes()
             _atomic_replace(target, rec.before)
@@ -990,3 +1012,236 @@ def list_edits_text(ctx: ToolContext, limit: int = 20) -> str:
             lines.append(snippet)
             lines.append("")
     return "\n".join(lines).rstrip()
+
+
+def _fire_edit(ctx: ToolContext, result: ApplyResult, tool_name: str) -> None:
+    if ctx.on_edit is None or not result.ok:
+        return
+    ctx.on_edit(result.rel, result.diff or "", tool_name, result.edit_id)
+
+
+def mkdir_path_sync(ctx: ToolContext, path: str) -> ApplyResult:
+    denied = _profile_write_error(ctx, path)
+    if denied:
+        return ApplyResult(ok=False, message=denied)
+    try:
+        resolved = guard_write_path(ctx.workspace, path)
+        rel = relative_posix(ctx.workspace, resolved)
+        if resolved.exists():
+            return ApplyResult(ok=False, message=f"error: path already exists: {rel}")
+        created_dirs = _ensure_parents(ctx.workspace, resolved)
+        resolved.mkdir(exist_ok=False)
+        created_dirs.append(rel)
+        diff = f"--- a/{rel}\n+++ b/{rel}\n@@ -0,0 +1 @@\n+<dir>\n"
+        edit_id = None
+        after_sha = sha256_bytes(b"")
+        if ctx.journal is not None:
+            edit_id = journal.record(
+                Path(ctx.journal),
+                session_id=_session_id(ctx),
+                batch_id=uuid4().hex,
+                path=rel,
+                tool="mkdir",
+                before=None,
+                after=b"",
+                before_sha=None,
+                after_sha=after_sha,
+                diff=diff,
+                created_dirs=created_dirs,
+            )
+        return ApplyResult(
+            ok=True,
+            message="",
+            rel=rel,
+            diff=diff,
+            edit_id=edit_id,
+            created=True,
+        )
+    except (EditError, WorkspacePathError, FileExistsError, OSError) as exc:
+        return ApplyResult(
+            ok=False,
+            message=str(exc) if str(exc).startswith("error:") else f"error: {exc}",
+        )
+
+
+def delete_path_sync(ctx: ToolContext, path: str) -> ApplyResult:
+    denied = _profile_write_error(ctx, path)
+    if denied:
+        return ApplyResult(ok=False, message=denied)
+    try:
+        resolved = guard_write_path(ctx.workspace, path)
+        rel = relative_posix(ctx.workspace, resolved)
+        if not resolved.exists():
+            return ApplyResult(ok=False, message=f"error: path not found: {rel}")
+        if resolved.is_dir():
+            if any(resolved.iterdir()):
+                return ApplyResult(
+                    ok=False, message=f"error: directory is not empty: {rel}"
+                )
+            resolved.rmdir()
+            diff = f"--- a/{rel}\n+++ /dev/null\n@@ -1 +0,0 @@\n-<dir>\n"
+            before_bytes = b""
+            before_sha = sha256_bytes(b"")
+            after_bytes = None
+            after_sha = None
+        elif resolved.is_file():
+            before_bytes = resolved.read_bytes()
+            before_sha = sha256_bytes(before_bytes)
+            old_text = before_bytes.decode("utf-8", errors="replace")
+            diff = format_unified_diff(
+                old_text.replace("\r\n", "\n").replace("\r", "\n"), "", rel
+            )
+            resolved.unlink()
+            after_bytes = None
+            after_sha = None
+        else:
+            return ApplyResult(ok=False, message=f"error: not a file or directory: {rel}")
+        edit_id = None
+        if ctx.journal is not None:
+            edit_id = journal.record(
+                Path(ctx.journal),
+                session_id=_session_id(ctx),
+                batch_id=uuid4().hex,
+                path=rel,
+                tool="delete_path",
+                before=before_bytes,
+                after=after_bytes,
+                before_sha=before_sha,
+                after_sha=after_sha,
+                diff=diff,
+                created_dirs=[],
+            )
+        if ctx.files is not None:
+            ctx.files.mark(rel, "")
+        return ApplyResult(
+            ok=True, message="", rel=rel, diff=diff, edit_id=edit_id
+        )
+    except (EditError, WorkspacePathError, FileNotFoundError, OSError) as exc:
+        return ApplyResult(
+            ok=False,
+            message=str(exc) if str(exc).startswith("error:") else f"error: {exc}",
+        )
+
+
+def rename_path_sync(ctx: ToolContext, src: str, dest: str) -> ApplyResult:
+    denied = _profile_write_error(ctx, src) or _profile_write_error(ctx, dest)
+    if denied:
+        return ApplyResult(ok=False, message=denied)
+    try:
+        src_resolved = guard_write_path(ctx.workspace, src)
+        dest_resolved = guard_write_path(ctx.workspace, dest)
+        src_rel = relative_posix(ctx.workspace, src_resolved)
+        dest_rel = relative_posix(ctx.workspace, dest_resolved)
+        if not src_resolved.exists():
+            return ApplyResult(ok=False, message=f"error: path not found: {src_rel}")
+        if dest_resolved.exists():
+            return ApplyResult(ok=False, message=f"error: path already exists: {dest_rel}")
+        if src_resolved.is_dir():
+            created_dirs = _ensure_parents(ctx.workspace, dest_resolved)
+            src_resolved.rename(dest_resolved)
+            diff = f"rename {src_rel} -> {dest_rel}"
+            edit_id = None
+            batch_id = uuid4().hex
+            if ctx.journal is not None:
+                edit_id = journal.record(
+                    Path(ctx.journal),
+                    session_id=_session_id(ctx),
+                    batch_id=batch_id,
+                    path=dest_rel,
+                    tool="rename_path",
+                    before=None,
+                    after=b"",
+                    before_sha=None,
+                    after_sha=sha256_bytes(b""),
+                    diff=diff,
+                    created_dirs=created_dirs + [dest_rel],
+                )
+                journal.record(
+                    Path(ctx.journal),
+                    session_id=_session_id(ctx),
+                    batch_id=batch_id,
+                    path=src_rel,
+                    tool="rename_path",
+                    before=b"",
+                    after=None,
+                    before_sha=sha256_bytes(b""),
+                    after_sha=None,
+                    diff=diff,
+                    created_dirs=[],
+                )
+            return ApplyResult(
+                ok=True, message="", rel=dest_rel, diff=diff, edit_id=edit_id, created=True
+            )
+        data = src_resolved.read_bytes()
+        created_dirs = _ensure_parents(ctx.workspace, dest_resolved)
+        _atomic_create(dest_resolved, data)
+        src_resolved.unlink()
+        old_text = data.decode("utf-8", errors="replace")
+        diff = f"rename {src_rel} -> {dest_rel}\n" + format_unified_diff(
+            "", old_text.replace("\r\n", "\n").replace("\r", "\n"), dest_rel
+        )
+        digest = sha256_bytes(data)
+        edit_id = None
+        batch_id = uuid4().hex
+        if ctx.journal is not None:
+            edit_id = journal.record(
+                Path(ctx.journal),
+                session_id=_session_id(ctx),
+                batch_id=batch_id,
+                path=dest_rel,
+                tool="rename_path",
+                before=None,
+                after=data,
+                before_sha=None,
+                after_sha=digest,
+                diff=diff,
+                created_dirs=created_dirs,
+            )
+            journal.record(
+                Path(ctx.journal),
+                session_id=_session_id(ctx),
+                batch_id=batch_id,
+                path=src_rel,
+                tool="rename_path",
+                before=data,
+                after=None,
+                before_sha=digest,
+                after_sha=None,
+                diff=diff,
+                created_dirs=[],
+            )
+        if ctx.files is not None:
+            ctx.files.mark(dest_rel, digest)
+            ctx.files.mark(src_rel, "")
+        return ApplyResult(
+            ok=True, message="", rel=dest_rel, diff=diff, edit_id=edit_id, created=True
+        )
+    except (EditError, WorkspacePathError, FileNotFoundError, OSError) as exc:
+        return ApplyResult(
+            ok=False,
+            message=str(exc) if str(exc).startswith("error:") else f"error: {exc}",
+        )
+
+
+async def mkdir_path(ctx: ToolContext, path: str) -> str:
+    result = mkdir_path_sync(ctx, path)
+    if not result.ok:
+        return result.message
+    _fire_edit(ctx, result, "mkdir")
+    return f"ok: created directory {result.rel}"
+
+
+async def delete_path(ctx: ToolContext, path: str) -> str:
+    result = delete_path_sync(ctx, path)
+    if not result.ok:
+        return result.message
+    _fire_edit(ctx, result, "delete_path")
+    return f"ok: deleted {result.rel}"
+
+
+async def rename_path(ctx: ToolContext, src: str, dest: str) -> str:
+    result = rename_path_sync(ctx, src, dest)
+    if not result.ok:
+        return result.message
+    _fire_edit(ctx, result, "rename_path")
+    return f"ok: renamed {src} -> {result.rel}"

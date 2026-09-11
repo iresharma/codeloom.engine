@@ -31,6 +31,7 @@ class ToolContext:
     skills: Any = None
     activate_skill: Any = None
     unlocked_skills: Any = None
+    on_memory: Any = None
 
 
 @dataclass

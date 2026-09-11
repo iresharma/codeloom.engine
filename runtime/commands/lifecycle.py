@@ -5,13 +5,23 @@ from uuid import uuid4
 
 from protocol.commands import (
     ListSessions,
+    RequestAgentTranscript,
+    RequestContext,
+    RequestMemory,
     RequestOrchContext,
     RequestSnapshot,
     Shutdown,
     StartSession,
     SubmitUserMessage,
 )
-from protocol.events import ErrorOccurred, OrchContext, SessionList, WarningOccurred
+from protocol.events import (
+    ChatHistoryAdded,
+    ChatHistoryComplete,
+    ErrorOccurred,
+    OrchContext,
+    SessionList,
+    WarningOccurred,
+)
 from runtime.commands.register import handles
 from runtime.store import SessionState
 from runtime.store.sqlite import list_sessions
@@ -98,6 +108,73 @@ def request_orch_context(session, command: RequestOrchContext) -> None:
 
     text, _ = clip_text(session._loop.context_dump(), EVENT_SOFT_LIMIT)
     session._emit(OrchContext(text=text))
+
+
+@handles(RequestContext)
+def request_context(session, command: RequestContext) -> None:
+    if not session._require_session():
+        return
+    if session._loop is None:
+        session._emit(ErrorOccurred(message="set OPENROUTER_API_KEY"))
+        return
+    agent_id = command.agent_id or ""
+    breakdown = session._loop.breakdown_for(agent_id)
+    if breakdown is None:
+        session._emit(ErrorOccurred(message=f"unknown agent: {agent_id}"))
+        return
+    from runtime.subscriber import EVENT_SOFT_LIMIT, clip_text
+
+    for section in breakdown.sections:
+        clipped, _ = clip_text(section.text, EVENT_SOFT_LIMIT)
+        section.text = clipped
+        section.chars = len(clipped)
+        section.tokens_est = max(0, len(clipped) // 4)
+    session._emit(breakdown)
+
+
+@handles(RequestMemory)
+def request_memory(session, command: RequestMemory) -> None:
+    if not session._require_session():
+        return
+    session._emit_memory()
+
+
+@handles(RequestAgentTranscript)
+def request_agent_transcript(session, command: RequestAgentTranscript) -> None:
+    if not session._require_session():
+        return
+    if session._loop is None:
+        session._emit(ErrorOccurred(message="set OPENROUTER_API_KEY"))
+        return
+    agent_id = command.agent_id or ""
+    if not agent_id:
+        session._emit(ErrorOccurred(message="agent_id is required"))
+        return
+    lines = session._loop.transcript_for(agent_id)
+    if lines is None:
+        session._emit(ErrorOccurred(message=f"unknown agent: {agent_id}"))
+        return
+    total = len(lines)
+    if total == 0:
+        session._emit(ChatHistoryComplete(count=0, agent_id=agent_id))
+        return
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    ts = datetime.now(timezone.utc).isoformat()
+    for index, line in enumerate(lines):
+        session._emit(
+            ChatHistoryAdded(
+                id=uuid4().hex,
+                role=str(line.get("role") or "assistant"),
+                text=str(line.get("text") or ""),
+                ts=ts,
+                index=index,
+                total=total,
+                agent_id=agent_id,
+            )
+        )
+    session._emit(ChatHistoryComplete(count=total, agent_id=agent_id))
 
 
 @handles(Shutdown)

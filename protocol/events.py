@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from protocol.message import ProtocolMessage
 from protocol.snapshot import (
     AgentRow,
+    ContextSection,
     EngineSnapshot,
     FileTreeNode,
     GitState,
     McpServerRow,
+    MemoryDecision,
+    MemoryFileNote,
     PendingPrompt,
     SessionSummary,
     SkillRow,
@@ -45,12 +48,14 @@ class ChatHistoryAdded(ProtocolMessage):
     ts: str
     index: int
     total: int
+    agent_id: str = ""
 
 
 @event
 @dataclass
 class ChatHistoryComplete(ProtocolMessage):
     count: int
+    agent_id: str = ""
 
 
 @event
@@ -277,3 +282,31 @@ class McpAuthRequired(ProtocolMessage):
     server: str
     url: str = ""
     prompt_id: str = ""
+
+
+@event
+@dataclass
+class PathChanged(ProtocolMessage):
+    path: str
+    action: str
+    dest: str = ""
+
+
+@event
+@dataclass
+class ContextBreakdown(ProtocolMessage):
+    agent_id: str = ""
+    budget: int = 0
+    prompt_tokens: int = 0
+    compacted: bool = False
+    sections: list[ContextSection] = field(default_factory=list)
+
+
+@event
+@dataclass
+class MemoryUpdated(ProtocolMessage):
+    files: list[MemoryFileNote] = field(default_factory=list)
+    engineering: list[MemoryDecision] = field(default_factory=list)
+    product: list[MemoryDecision] = field(default_factory=list)
+    cicd: list[MemoryDecision] = field(default_factory=list)
+    other: list[MemoryDecision] = field(default_factory=list)

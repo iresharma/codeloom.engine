@@ -1,16 +1,28 @@
 from __future__ import annotations
 
-from protocol.commands import CloseFile, OpenFile, UndoLastEdit
-from protocol.events import ErrorOccurred, FileClosed
+from protocol.commands import (
+    CloseFile,
+    CreatePath,
+    DeletePath,
+    OpenFile,
+    RenamePath,
+    UndoLastEdit,
+)
+from protocol.events import ErrorOccurred, FileClosed, PathChanged
 from runtime.commands.register import handles
-from runtime.tools.edits import undo_last
+from runtime.tools.edits import (
+    apply_edit,
+    delete_path,
+    mkdir_path,
+    rename_path,
+    undo_last,
+)
 from runtime.tools.fs import (
     WorkspacePathError,
     read_text,
     relative_posix,
     resolve_in_workspace,
 )
-from tools.base import ToolContext
 
 
 @handles(OpenFile)
@@ -28,7 +40,7 @@ def open_file(session, command: OpenFile) -> None:
     if rel not in session._state.open_files:
         session._state.open_files.append(rel)
     session._persist()
-    session._emit_file_content(rel)
+    session._emit_file_content(rel, full=True)
 
 
 @handles(CloseFile)
@@ -55,16 +67,82 @@ def close_file(session, command: CloseFile) -> None:
 async def undo_last_edit(session, command: UndoLastEdit) -> None:
     if not session._require_session():
         return
-    ctx = ToolContext(
-        workspace=session._workspace,
-        language=session.language,
-        lsp=session._lsp,
-        files=session._files,
-        journal=session._db_path,
-        session_id=session._state.session_id,
-        on_edit=session._on_edit,
-        config=session._config,
-    )
+    ctx = session.tool_context()
     text = await undo_last(ctx)
     if text.startswith("error:"):
         session._emit(ErrorOccurred(message=text))
+
+
+@handles(CreatePath)
+async def create_path(session, command: CreatePath) -> None:
+    if not session._require_session():
+        return
+    ctx = session.tool_context()
+    path = (command.path or "").strip()
+    if not path:
+        session._emit(ErrorOccurred(message="path is required"))
+        return
+    if command.is_dir:
+        text = await mkdir_path(ctx, path)
+        if text.startswith("error:"):
+            session._emit(ErrorOccurred(message=text))
+            return
+        session._emit(PathChanged(path=path, action="mkdir"))
+        session._emit_tree()
+        session._emit_git()
+        return
+
+    async def run():
+        return await apply_edit(
+            ctx, path, lambda src: command.content or "", "create_path", creating=True
+        )
+
+    text = await run()
+    if text.startswith("error:"):
+        session._emit(ErrorOccurred(message=text))
+
+
+@handles(RenamePath)
+async def rename_path_cmd(session, command: RenamePath) -> None:
+    if not session._require_session():
+        return
+    ctx = session.tool_context()
+    src = (command.src or "").strip()
+    dest = (command.dest or "").strip()
+    if not src or not dest:
+        session._emit(ErrorOccurred(message="src and dest are required"))
+        return
+    text = await rename_path(ctx, src, dest)
+    if text.startswith("error:"):
+        session._emit(ErrorOccurred(message=text))
+        return
+    if src in session._state.open_files:
+        session._state.open_files.remove(src)
+        if dest not in session._state.open_files:
+            session._state.open_files.append(dest)
+        session._persist()
+    session._emit(PathChanged(path=src, action="renamed", dest=dest))
+    session._emit_tree()
+    session._emit_git()
+
+
+@handles(DeletePath)
+async def delete_path_cmd(session, command: DeletePath) -> None:
+    if not session._require_session():
+        return
+    ctx = session.tool_context()
+    path = (command.path or "").strip()
+    if not path:
+        session._emit(ErrorOccurred(message="path is required"))
+        return
+    text = await delete_path(ctx, path)
+    if text.startswith("error:"):
+        session._emit(ErrorOccurred(message=text))
+        return
+    if path in session._state.open_files:
+        session._state.open_files.remove(path)
+        session._persist()
+        session._emit(FileClosed(path=path))
+    session._emit(PathChanged(path=path, action="deleted"))
+    session._emit_tree()
+    session._emit_git()

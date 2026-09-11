@@ -118,6 +118,7 @@ class AgentLoop:
         on_skill_activated=None,
         model: str | None = None,
         freeze_system: bool = False,
+        on_memory=None,
     ):
         self._llm = llm
         self._tools = tools or ToolRegistry()
@@ -156,6 +157,7 @@ class AgentLoop:
             profile=profile,
             write_globs=write_globs,
             write_lock=write_lock,
+            on_memory=on_memory,
         )
         self._system_prompt = system_prompt
         self._on_tool = self._hooks.on_tool
@@ -174,6 +176,8 @@ class AgentLoop:
         self._model = model
         self._freeze_system = freeze_system
         self._frozen_system: str | None = None
+        self._frozen_parts: dict[str, str] | None = None
+        self._did_compact = False
         self._ctx.skills = skills
         self._ctx.unlocked_skills = self._unlocked_skills
         self._ctx.activate_skill = self.activate_skill
@@ -219,15 +223,17 @@ class AgentLoop:
             self._on_skill_activated(name, self.agent_id)
         return skill.body + extra
 
-    def _build_messages(self) -> list[dict]:
-        if self._freeze_system and self._frozen_system is not None:
-            return [{"role": "system", "content": self._frozen_system}] + list(
-                self._history
-            )
-        system = self._system_prompt
+    def _system_parts(self) -> dict[str, str]:
+        if self._freeze_system and self._frozen_parts is not None:
+            return dict(self._frozen_parts)
+        parts = {
+            "system": self._system_prompt or "",
+            "memory": "",
+            "skills": "",
+        }
         notes = render_memory(self._ctx.workspace)
         if notes:
-            system = f"{system}\n\n{notes}"
+            parts["memory"] = notes
         if self._skills is not None:
             catalog = render_catalog(
                 self._skills,
@@ -238,7 +244,36 @@ class AgentLoop:
                 bodies=self._activated_bodies,
             )
             if catalog:
-                system = f"{system}\n\n## Skills\n{catalog}"
+                parts["skills"] = catalog
+        if self._freeze_system:
+            self._frozen_parts = dict(parts)
+            joined = parts["system"]
+            if parts["memory"]:
+                joined = f"{joined}\n\n{parts['memory']}"
+            if parts["skills"]:
+                joined = f"{joined}\n\n## Skills\n{parts['skills']}"
+            self._frozen_system = joined
+        return parts
+
+    def _join_system(self, parts: dict[str, str]) -> str:
+        if self._frozen_system is not None:
+            return self._frozen_system
+        joined = parts.get("system") or ""
+        memory = parts.get("memory") or ""
+        skills = parts.get("skills") or ""
+        if memory:
+            joined = f"{joined}\n\n{memory}"
+        if skills:
+            joined = f"{joined}\n\n## Skills\n{skills}"
+        return joined
+
+    def _build_messages(self) -> list[dict]:
+        if self._freeze_system and self._frozen_system is not None:
+            return [{"role": "system", "content": self._frozen_system}] + list(
+                self._history
+            )
+        parts = self._system_parts()
+        system = self._join_system(parts)
         if self._freeze_system:
             self._frozen_system = system
         return [{"role": "system", "content": system}] + list(self._history)
@@ -274,6 +309,102 @@ class AgentLoop:
                 parts.append(text)
             parts.append("")
         return "\n".join(parts).rstrip() + "\n"
+
+    def _section(self, name: str, text: str):
+        from protocol.snapshot import ContextSection
+
+        body = text or ""
+        chars = len(body)
+        return ContextSection(
+            name=name, chars=chars, tokens_est=max(0, chars // 4), text=body
+        )
+
+    def _tools_text(self) -> str:
+        try:
+            schemas = self._tools.schemas() if self._tools is not None else []
+        except Exception:  # noqa: BLE001
+            schemas = []
+        if not schemas:
+            return ""
+        return json.dumps(schemas, default=str, indent=2)
+
+    def _messages_text(self) -> str:
+        parts: list[str] = []
+        for message in self._history:
+            role = str(message.get("role") or "?")
+            content = message.get("content")
+            if content is None:
+                text = ""
+            elif isinstance(content, str):
+                text = content
+            else:
+                text = json.dumps(content, default=str)
+            header = f"--- {role} ---"
+            calls = message.get("tool_calls") or []
+            if calls:
+                names = []
+                for call in calls:
+                    fn = call.get("function") if isinstance(call, dict) else None
+                    if isinstance(fn, dict):
+                        names.append(str(fn.get("name") or "?"))
+                    elif isinstance(call, dict):
+                        names.append(str(call.get("name") or "?"))
+                if names:
+                    header += " tools=" + ",".join(names)
+            call_id = message.get("tool_call_id")
+            if call_id:
+                header += f" tool_call_id={call_id}"
+            parts.append(header)
+            if text:
+                parts.append(text)
+            parts.append("")
+        return "\n".join(parts).rstrip()
+
+    def context_breakdown(self):
+        from protocol.events import ContextBreakdown
+
+        parts = self._system_parts()
+        sections = [
+            self._section("system", parts.get("system") or ""),
+            self._section("memory", parts.get("memory") or ""),
+            self._section("skills", parts.get("skills") or ""),
+            self._section("tools", self._tools_text()),
+            self._section("messages", self._messages_text()),
+        ]
+        budget = int(getattr(self._config, "context_budget", 0) or 0)
+        return ContextBreakdown(
+            agent_id=self.agent_id or "",
+            budget=budget,
+            prompt_tokens=int(self._last_prompt_tokens or 0),
+            compacted=self._did_compact,
+            sections=sections,
+        )
+
+    def transcript_lines(self) -> list[dict]:
+        lines = []
+        for message in self._history:
+            role = str(message.get("role") or "assistant")
+            content = message.get("content")
+            if content is None:
+                text = ""
+            elif isinstance(content, str):
+                text = content
+            else:
+                text = json.dumps(content, default=str)
+            calls = message.get("tool_calls") or []
+            if calls:
+                names = []
+                for call in calls:
+                    fn = call.get("function") if isinstance(call, dict) else None
+                    if isinstance(fn, dict):
+                        names.append(str(fn.get("name") or "?"))
+                    elif isinstance(call, dict):
+                        names.append(str(call.get("name") or "?"))
+                if names:
+                    extra = "tools=" + ",".join(names)
+                    text = f"{extra}\n{text}".rstrip() if text else extra
+            lines.append({"role": role, "text": text})
+        return lines
 
     def _state(self, state: str, turn: int = 0) -> None:
         if self._hooks.on_state is not None:
@@ -480,6 +611,7 @@ class AgentLoop:
         )
         if info.get("strategy") == "noop":
             return
+        self._did_compact = True
         self._history = [item for item in compacted if item is not compacted[0]]
         if compacted and compacted[0].get("role") == "system":
             extras = [

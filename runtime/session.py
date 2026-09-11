@@ -15,6 +15,7 @@ from agents.orchestrator import Orchestrator
 from agents.profile import discover_profiles
 from llm.openrouter import OpenRouterLLM
 from llm.provider import Usage
+from protocol.codec import STREAM_LIMIT
 from protocol.commands import Command
 from protocol.events import (
     AgentFinished,
@@ -33,8 +34,11 @@ from protocol.events import (
     FileContent,
     FileEdited,
     FileTreeUpdated,
+    GitStateUpdated,
     McpAuthRequired,
+    MemoryUpdated,
     McpServersUpdated,
+    PathChanged,
     SessionEnded,
     SkillActivated,
     SkillCatalogUpdated,
@@ -368,6 +372,7 @@ class EngineSession:
             on_proc=self._on_proc,
             skills=self._skills,
             on_skill_activated=self._on_skill_activated,
+            on_memory=self._emit_memory,
         )
         self._loop.hydrate(self._state.messages)
 
@@ -633,8 +638,17 @@ class EngineSession:
         )
         if path in self._state.open_files:
             self._emit_file_content(path)
-        if tool in {"create_file", "undo_edit"}:
+        tree_tools = {
+            "create_file",
+            "undo_edit",
+            "mkdir",
+            "delete_path",
+            "rename_path",
+            "create_path",
+        }
+        if tool in tree_tools:
             self._emit_tree()
+        self._emit_git()
 
     def _on_tool_start(
         self, call_id: str, name: str, arguments: dict, agent_id: str = ""
@@ -975,15 +989,97 @@ class EngineSession:
             return
         self._emit(FileTreeUpdated(file_tree=nodes))
 
-    def _emit_file_content(self, path: str) -> None:
+    def _emit_git(self) -> None:
+        git = read_git(self._workspace)
+        limit = EVENT_SOFT_LIMIT // 2
+        staged, omitted_s = clip_text(git.staged_diff, limit)
+        unstaged, omitted_u = clip_text(git.unstaged_diff, limit)
+        git.staged_diff = staged
+        git.unstaged_diff = unstaged
+        self._emit(GitStateUpdated(git=git))
+        omitted = omitted_s + omitted_u
+        if omitted:
+            self._emit(
+                WarningOccurred(message=f"git diffs truncated; {omitted} bytes omitted")
+            )
+
+    def _emit_memory(self) -> None:
+        from protocol.snapshot import MemoryDecision, MemoryFileNote
+        from runtime.store.memory import dump_for_client
+
+        raw = dump_for_client(self._workspace)
+        self._emit(
+            MemoryUpdated(
+                files=[
+                    MemoryFileNote(
+                        path=item.get("path") or "",
+                        purpose=item.get("purpose") or "",
+                        entry_points=item.get("entry_points") or "",
+                        constraints=item.get("constraints") or "",
+                        note=item.get("note") or "",
+                        stale=bool(item.get("stale")),
+                        action=item.get("action") or "",
+                        updated_at=item.get("updated_at") or "",
+                    )
+                    for item in raw.get("files") or []
+                ],
+                engineering=[
+                    MemoryDecision(
+                        text=item.get("text") or "",
+                        updated_at=item.get("updated_at") or "",
+                    )
+                    for item in raw.get("engineering") or []
+                ],
+                product=[
+                    MemoryDecision(
+                        text=item.get("text") or "",
+                        updated_at=item.get("updated_at") or "",
+                    )
+                    for item in raw.get("product") or []
+                ],
+                cicd=[
+                    MemoryDecision(
+                        text=item.get("text") or "",
+                        updated_at=item.get("updated_at") or "",
+                    )
+                    for item in raw.get("cicd") or []
+                ],
+                other=[
+                    MemoryDecision(
+                        text=item.get("text") or "",
+                        updated_at=item.get("updated_at") or "",
+                    )
+                    for item in raw.get("other") or []
+                ],
+            )
+        )
+
+    def tool_context(self) -> ToolContext:
+        from tools.base import ToolContext
+
+        return ToolContext(
+            workspace=self._workspace,
+            language=self.language,
+            lsp=self._lsp,
+            files=self._files,
+            journal=self._db_path,
+            session_id=self._state.session_id,
+            on_edit=self._on_edit,
+            config=self._config,
+            on_memory=self._emit_memory,
+        )
+
+    def _emit_file_content(self, path: str, *, full: bool = False) -> None:
         try:
             rel, content = read_text(self._workspace, path)
         except (FileNotFoundError, WorkspacePathError) as exc:
             self._emit(ErrorOccurred(message=f"{path}: {exc}"))
             return
-        clipped, omitted = clip_text(content, EVENT_SOFT_LIMIT)
+        limit = STREAM_LIMIT - 4096 if full else EVENT_SOFT_LIMIT
+        clipped, omitted = clip_text(content, limit)
         if omitted:
-            clipped += "; use read_file"
+            suffix = "" if full else "; use read_file"
+            clipped += suffix
             self._emit(
                 WarningOccurred(
                     message=f"{rel} truncated; {omitted} bytes omitted"

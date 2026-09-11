@@ -57,7 +57,7 @@ def remember(
     constraints: str = "",
 ) -> str:
     try:
-        return store_remember(
+        result = store_remember(
             ctx.workspace,
             section,
             note=note or "",
@@ -68,3 +68,6 @@ def remember(
         )
     except OSError as exc:
         return f"error: {exc}"
+    if result == "ok" and getattr(ctx, "on_memory", None) is not None:
+        ctx.on_memory()
+    return result

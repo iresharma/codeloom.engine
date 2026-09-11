@@ -18,6 +18,7 @@ from protocol.events import (
     ChatMessageAdded,
     ChatMessageDelta,
     CommandOutputChunk,
+    ContextBreakdown,
     ContextCompacted,
     ErrorOccurred,
     Event,
@@ -25,6 +26,8 @@ from protocol.events import (
     FileEdited,
     FileTreeUpdated,
     GitStateUpdated,
+    MemoryUpdated,
+    PathChanged,
     ToolCallFinished,
     ToolCallStarted,
     WarningOccurred,
@@ -47,6 +50,9 @@ SIZE_FIELDS: dict[type, tuple[str, ...]] = {
     FileEdited: ("diff",),
     FileTreeUpdated: (),
     GitStateUpdated: (),
+    MemoryUpdated: (),
+    PathChanged: (),
+    ContextBreakdown: (),
     ContextCompacted: ("summary",),
     ErrorOccurred: ("message",),
     WarningOccurred: ("message",),
@@ -91,6 +97,7 @@ SMALL_STRING_FIELDS = frozenset(
         "batch_id",
         "batch_name",
         "action",
+        "dest",
         "pr_url",
         "server",
     }
@@ -229,6 +236,20 @@ def approx_size(event: Event) -> int:
         return FLAT_SIZE + len(getattr(git, "staged_diff", "") or "") + len(
             getattr(git, "unstaged_diff", "") or ""
         )
+    if cls is ContextBreakdown:
+        total = FLAT_SIZE
+        for section in getattr(event, "sections", None) or []:
+            total += len(getattr(section, "text", "") or "")
+        return total
+    if cls is MemoryUpdated:
+        total = FLAT_SIZE
+        for item in getattr(event, "files", None) or []:
+            total += len(getattr(item, "note", "") or "")
+            total += len(getattr(item, "purpose", "") or "")
+        for name in ("engineering", "product", "cicd", "other"):
+            for item in getattr(event, name, None) or []:
+                total += len(getattr(item, "text", "") or "")
+        return total
     names = SIZE_FIELDS.get(cls)
     if names is None:
         return FLAT_SIZE

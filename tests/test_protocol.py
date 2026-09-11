@@ -149,6 +149,49 @@ def test_new_commands_and_events_round_trip():
 
     ctx = decode_event(encode(OrchContext(text="--- system ---\nhello\n")))
     assert "hello" in ctx.text
+    from protocol.commands import (
+        CreatePath,
+        DeletePath,
+        RenamePath,
+        RequestAgentTranscript,
+        RequestContext,
+        RequestMemory,
+    )
+    from protocol.events import ContextBreakdown, MemoryUpdated, PathChanged
+    from protocol.snapshot import ContextSection, MemoryDecision, MemoryFileNote
+
+    created = decode_command(encode(CreatePath(path="a.py", content="x")))
+    assert created.path == "a.py"
+    renamed = decode_command(encode(RenamePath(src="a.py", dest="b.py")))
+    assert renamed.dest == "b.py"
+    deleted = decode_command(encode(DeletePath(path="b.py")))
+    assert deleted.path == "b.py"
+    req = decode_command(encode(RequestContext(agent_id="abc")))
+    assert req.agent_id == "abc"
+    assert isinstance(decode_command(encode(RequestMemory())), RequestMemory)
+    tr = decode_command(encode(RequestAgentTranscript(agent_id="abc")))
+    assert tr.agent_id == "abc"
+    changed = decode_event(encode(PathChanged(path="a", action="mkdir")))
+    assert changed.action == "mkdir"
+    breakdown = decode_event(
+        encode(
+            ContextBreakdown(
+                budget=120000,
+                sections=[ContextSection(name="system", chars=5, tokens_est=1, text="hello")],
+            )
+        )
+    )
+    assert breakdown.sections[0].name == "system"
+    mem = decode_event(
+        encode(
+            MemoryUpdated(
+                files=[MemoryFileNote(path="a.py", stale=True, purpose="x")],
+                engineering=[MemoryDecision(text="ship it")],
+            )
+        )
+    )
+    assert mem.files[0].stale is True
+    assert mem.engineering[0].text == "ship it"
     from protocol.events import WorktreeSettled
 
     settled = decode_event(

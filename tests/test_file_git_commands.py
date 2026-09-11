@@ -146,9 +146,7 @@ def test_request_git_dirty_repo(tmp_path):
 
 
 def test_request_git_truncates_huge_diff(tmp_path, monkeypatch):
-    import runtime.commands.git as git_cmd
-
-    monkeypatch.setattr(git_cmd, "EVENT_SOFT_LIMIT", 64)
+    monkeypatch.setattr("runtime.session.EVENT_SOFT_LIMIT", 64)
     _init_git(tmp_path)
     (tmp_path / "README").write_text("x" * 200 + "\n", encoding="utf-8")
 

@@ -332,6 +332,49 @@ def render_memory(workspace: Path, cap: int = RENDER_CAP) -> str:
     return text
 
 
+def dump_for_client(workspace: Path) -> dict:
+    path_obj = _file(workspace)
+    with _LOCK:
+        data = _load_unlocked(path_obj)
+        _drop_missing(workspace, data)
+        _prune(data)
+        snapshot = {
+            "files": dict(data.get("files") or {}),
+            **{section: list(data.get(section) or []) for section in SECTIONS},
+        }
+    files = []
+    for rel, entry in snapshot["files"].items():
+        if not isinstance(entry, dict) or not _has_note(entry):
+            continue
+        disk = _disk_sha(workspace, rel)
+        note_sha = str(entry.get("note_sha") or "")
+        stale = bool(note_sha) and disk is not None and note_sha != disk
+        purpose, entry_points, constraints = _file_blurb(entry)
+        files.append(
+            {
+                "path": rel,
+                "purpose": purpose,
+                "entry_points": entry_points,
+                "constraints": constraints,
+                "note": str(entry.get("note") or ""),
+                "stale": stale,
+                "action": str(entry.get("action") or ""),
+                "updated_at": str(entry.get("updated_at") or ""),
+            }
+        )
+    out: dict = {"files": files}
+    for section in SECTIONS:
+        out[section] = [
+            {
+                "text": str(item.get("text") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+            for item in snapshot[section]
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+    return out
+
+
 def _file_note_entry(
     existing,
     *,
