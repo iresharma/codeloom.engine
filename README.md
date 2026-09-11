@@ -1039,7 +1039,7 @@ describe those implementations to a model. The suite exercises
 | Child models | ask/tester `anthropic/claude-haiku-4.5`; others inherit `OPENROUTER_MODEL` | `AgentProfile.model` / `OPENROUTER_CHILD_MODEL` |
 | Survey spawn cap | first user turn may fan out; leftover inbox turns spawn at most one `ask` and one `researcher` | `Orchestrator.reset_user_message_spawns` |
 | `github_file` window | 12,000 chars default, 50,000 hard cap | `runtime/tools/github.py` |
-| Child report summary / outcome | 400 / 2,000 chars | `SUMMARY_CLIP` / `OUTCOME_CLIP` |
+| Child report summary / outcome | 400 / 32,000 chars; a clipped closer is `incomplete` so ask/researcher may respawn once | `SUMMARY_CLIP` / `OUTCOME_CLIP` |
 | Tool result to model | 80,000 chars | `tools/registry.py` |
 | Tool preview in events | 400 chars | `runtime/session.py` |
 | `read_file` window | 200 default, 400 max | `runtime/tools/fs.py` |

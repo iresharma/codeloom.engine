@@ -237,6 +237,51 @@ def test_compress_clips_long_closer():
     result = asyncio.run(run())
     assert len(result.outcome) <= OUTCOME_CLIP
     assert len(result.summary) <= SUMMARY_CLIP
+    assert result.status == "ok"
+
+
+def test_compress_keeps_survey_sized_closer():
+    facts = "facts: " + ("runtime/server.py has no tests; " * 80)
+    closer = "\n".join(
+        [
+            "what: coverage survey",
+            "paths: runtime/server.py, runtime/language.py",
+            facts,
+            "verdict: start with server.py",
+        ]
+    )
+    assert SUMMARY_CLIP < len(closer) < OUTCOME_CLIP
+
+    async def run():
+        return await compress_for_parent(
+            [
+                {"role": "user", "content": "x"},
+                {"role": "assistant", "content": closer},
+            ]
+        )
+
+    result = asyncio.run(run())
+    assert result.status == "ok"
+    assert "runtime/server.py" in result.outcome
+    assert "runtime/language.py" in result.outcome
+    assert "... (truncated)" not in result.outcome
+
+
+def test_compress_marks_truncated_closer_incomplete():
+    closer = "what: coverage\nfacts: " + ("row " * (OUTCOME_CLIP // 2)) + "\nverdict: go"
+
+    async def run():
+        return await compress_for_parent(
+            [
+                {"role": "user", "content": "x"},
+                {"role": "assistant", "content": closer},
+            ]
+        )
+
+    result = asyncio.run(run())
+    assert result.status == "incomplete"
+    assert result.outcome.endswith("... (truncated)")
+    assert result.leftover_questions
 
 
 def test_outcome_keeps_long_facts():
@@ -325,6 +370,24 @@ def test_compress_skips_llm_when_labeled():
     assert called == []
     assert "Foo.bar retries" in result.outcome
     assert "surveyed" in result.summary
+
+
+def test_compress_joins_cutoff_continuations():
+    from agents.compactor import OUTPUT_CUTOFF_CONTINUE
+
+    async def run():
+        return await compress_for_parent(
+            [
+                {"role": "user", "content": "survey"},
+                {"role": "assistant", "content": "Module | Cov\nserver.py | 0"},
+                {"role": "user", "content": OUTPUT_CUTOFF_CONTINUE},
+                {"role": "assistant", "content": "\nlanguage.py | 0"},
+            ]
+        )
+
+    result = asyncio.run(run())
+    assert "server.py" in result.outcome
+    assert "language.py" in result.outcome
 
 
 def test_compress_runs_when_what_prefix_is_not_a_label():

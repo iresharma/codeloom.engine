@@ -381,6 +381,53 @@ def test_survey_first_turn_may_fan_out(tmp_path):
     asyncio.run(run())
 
 
+def test_incomplete_survey_may_respawn_once(tmp_path):
+    from agents.compactor import OUTCOME_CLIP
+
+    closer = "\n".join(
+        [
+            "what: coverage survey",
+            "paths: runtime/server.py",
+            "facts: " + ("runtime/server.py untested; " * 2000),
+            "verdict: start with server.py",
+        ]
+    )
+    assert len(closer) > OUTCOME_CLIP
+
+    class _OrchQuiet(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self.child_texts = [
+                closer,
+                "what: rest\nfacts: language.py\nverdict: ok",
+            ]
+
+        async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
+            if _is_orch(tools):
+                return LLMResult(text="noted")
+            if self.child_texts:
+                return LLMResult(text=self.child_texts.pop(0))
+            return LLMResult(text="what: ok\nfacts: done\nverdict: done")
+
+    async def run():
+        session = await _bind(tmp_path, _OrchQuiet())()
+        orch: Orchestrator = session._loop
+        orch._inbox_turn = True
+        first = await orch.spawn("ask", "one")
+        assert first.startswith("started")
+        await orch.wait_children()
+        orch._inbox_turn = True
+        second = await orch.spawn("ask", "two")
+        assert second.startswith("started"), second
+        await orch.wait_children()
+        orch._inbox_turn = True
+        third = await orch.spawn("ask", "three")
+        assert "already spawned ask" in third
+        await _wait_idle(session)
+
+    asyncio.run(run())
+
+
 def test_abort_turn_leaves_children(tmp_path):
     async def run():
         hang = asyncio.Event()

@@ -23,8 +23,15 @@ CHARS_PER_TOKEN = 4
 TRIGGER_RATIO = 0.7
 STRUCTURAL_RATIO = 0.8
 SUMMARY_CLIP = 400
-OUTCOME_CLIP = 2000
+OUTCOME_CLIP = 32_000
 TRANSCRIPT_BOUND = 20_000
+LENGTH_CONTINUE_CAP = 3
+LENGTH_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
+OUTPUT_CUTOFF_CONTINUE = (
+    "Your previous message was cut off by the output token limit. "
+    "Continue from the exact cutoff. Do not restart the briefing."
+)
+OUTCOME_TRUNCATED = "\n... (truncated)"
 TRIM_KEEP = 400
 TRIM_NOTICE = "\n... (trimmed; re-run the tool if you need this again)"
 _PATH_KEYS = ("path", "file", "target", "dest")
@@ -454,11 +461,32 @@ def _looks_like_briefing(text: str) -> bool:
     return "what" in keys and ("facts" in keys or "verdict" in keys)
 
 
+def _is_output_cutoff(result) -> bool:
+    reason = str(getattr(result, "finish_reason", None) or "").strip().lower()
+    return reason in LENGTH_FINISH_REASONS
+
+
+def _is_cutoff_continue(message: dict) -> bool:
+    if message.get("role") != "user":
+        return False
+    return OUTPUT_CUTOFF_CONTINUE in _content_as_text(message.get("content"))
+
+
 def _last_assistant_text(messages: list[dict]) -> str:
+    """Join a briefing that was split across output-token continuations."""
+    parts: list[str] = []
     for message in reversed(messages):
         if message.get("role") == "assistant" and not (message.get("tool_calls") or []):
-            return _content_as_text(message.get("content"))
-    return ""
+            text = _content_as_text(message.get("content"))
+            if text:
+                parts.append(text)
+            continue
+        if parts and _is_cutoff_continue(message):
+            continue
+        if parts:
+            break
+    parts.reverse()
+    return "".join(parts)
 
 
 async def compress_for_parent(
@@ -483,13 +511,21 @@ async def compress_for_parent(
     if status == "ok" and missing:
         status = "incomplete"
     closer = _last_assistant_text(messages)
+    leftover = _leftover_from_text(closer)
     outcome = _clip_labeled(closer, OUTCOME_CLIP)
+    if closer and len(outcome) < len(closer.strip()):
+        outcome = outcome.rstrip() + OUTCOME_TRUNCATED
+        if status == "ok":
+            status = "incomplete"
+        if not leftover:
+            leftover = [
+                "briefing truncated; respawn with a tighter scope or ask the user"
+            ]
     files = (
         list(files_touched)
         if files_touched is not None
         else _paths_from_history(messages)
     )
-    leftover = _leftover_from_text(closer)
     summary = _clip_labeled(outcome, SUMMARY_CLIP)
     work = [item for item in messages if item.get("role") != "system"]
     if complete is not None and len(work) > 4 and not _looks_like_briefing(closer):

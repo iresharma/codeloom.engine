@@ -156,6 +156,8 @@ class Orchestrator(AgentLoop):
         self._child_lsps: dict[str, object] = {}
         self._spawn_lock: asyncio.Lock | None = None
         self._user_survey_spawns: set[str] = set()
+        self._survey_retry: set[str] = set()
+        self._survey_retry_used: set[str] = set()
         self._inbox_turn = False
         self._make_child_hooks = make_child_hooks
         self._make_child_lsp = make_child_lsp
@@ -190,6 +192,8 @@ class Orchestrator(AgentLoop):
 
     def reset_user_message_spawns(self) -> None:
         self._user_survey_spawns.clear()
+        self._survey_retry.clear()
+        self._survey_retry_used.clear()
 
     def _live_spawn_count(self) -> int:
         live = sum(1 for task in self._child_tasks.values() if not task.done())
@@ -414,10 +418,13 @@ class Orchestrator(AgentLoop):
                 and profile_name in self._user_survey_spawns
                 and self._inbox_turn
             ):
-                return (
-                    f"error: already spawned {profile_name} this user message; "
-                    "answer with what you have or ask the user"
-                )
+                if profile_name not in self._survey_retry:
+                    return (
+                        f"error: already spawned {profile_name} this user message; "
+                        "answer with what you have or ask the user"
+                    )
+                self._survey_retry.discard(profile_name)
+                self._survey_retry_used.add(profile_name)
             if self._live_spawn_count() >= self._spawn_budget:
                 return "error: spawn budget exhausted"
             agent_id = uuid4().hex
@@ -518,6 +525,12 @@ class Orchestrator(AgentLoop):
         except Exception as exc:  # noqa: BLE001
             result = AgentResult(status="failed", outcome=f"error: {exc}")
         _apply_run_status(result, status, outcome)
+        if (
+            result.status == "incomplete"
+            and profile.name in _SURVEY_ONCE
+            and profile.name not in self._survey_retry_used
+        ):
+            self._survey_retry.add(profile.name)
         files = child._ctx.files
         survey_paths = (
             list(files.paths()) if files is not None and hasattr(files, "paths") else []

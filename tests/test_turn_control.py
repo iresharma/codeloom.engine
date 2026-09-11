@@ -281,3 +281,23 @@ def test_client_skips_already_streamed_added():
         )
         == "assistant: bye"
     )
+
+
+def test_output_cutoff_continues_briefing(tmp_path):
+    from agents.agent_loop import AgentLoop
+
+    provider = FakeProvider(
+        results=[
+            LLMResult(text="Module | Cov\nserver.py | 0", finish_reason="length"),
+            LLMResult(text="\nlanguage.py | 0", finish_reason="stop"),
+        ]
+    )
+    loop = AgentLoop(provider, workspace=tmp_path)
+
+    async def run():
+        return await loop.run("survey coverage")
+
+    text = asyncio.run(run())
+    assert "server.py" in text
+    assert "language.py" in text
+    assert provider.calls == 2

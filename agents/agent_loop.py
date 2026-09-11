@@ -7,7 +7,15 @@ from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
-from agents.compactor import compact, looks_like_overflow, validate_history
+from agents.compactor import (
+    LENGTH_CONTINUE_CAP,
+    OUTPUT_CUTOFF_CONTINUE,
+    _is_output_cutoff,
+    _last_assistant_text,
+    compact,
+    looks_like_overflow,
+    validate_history,
+)
 from agents.hooks import AgentHooks
 from llm.openrouter import OpenRouterLLM
 from llm.provider import Usage
@@ -280,6 +288,7 @@ class AgentLoop:
         self._history.append({"role": "user", "content": task})
         schemas = self._tools.schemas()
         last_text = ""
+        length_continues = 0
         self._exit_status = "ok"
         turn = 0
         continues = 0
@@ -320,16 +329,26 @@ class AgentLoop:
                 last_text = result.text
                 self._history.append({"role": "assistant", "content": last_text})
                 self._emit_message(last_text or "")
-                return last_text
+                if (
+                    _is_output_cutoff(result)
+                    and length_continues < LENGTH_CONTINUE_CAP
+                ):
+                    length_continues += 1
+                    self._history.append(
+                        {"role": "user", "content": OUTPUT_CUTOFF_CONTINUE}
+                    )
+                    continue
+                return _last_assistant_text(self._history) or last_text
             if self._exit_status == "ok":
                 self._exit_status = "max_turns"
             if last_text:
-                final = last_text
+                final = _last_assistant_text(self._history) or last_text
             elif self._exit_status == "stopped":
                 final = "stopped by user request"
             else:
                 final = f"stopped after {self._config.max_turns} tool turns"
-            self._emit_message(final)
+            if not last_text:
+                self._emit_message(final)
             return final
         except asyncio.CancelledError:
             del self._history[marker:]
