@@ -11,6 +11,16 @@ from runtime.session import EngineSession
 from runtime.store.edits import ensure_schema
 
 
+async def _wait_socket(path: Path, timeout: float = 2.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if path.exists() and path.is_socket():
+            return
+        await asyncio.sleep(0.01)
+    pytest.fail(f"socket did not appear: {path}")
+
+
 @pytest.fixture
 def session(short_tmp_path):
     """Create a test EngineSession."""
@@ -42,11 +52,7 @@ def test_server_creates_socket(session, short_tmp_path):
 
         # Start server in background
         serve_task = asyncio.create_task(server.serve())
-        await asyncio.sleep(0.01)  # Give it time to bind
-
-        # Check socket file exists
-        assert socket_path.exists()
-        assert socket_path.is_socket()
+        await _wait_socket(socket_path)
 
         # Stop server
         server.stop()
@@ -73,11 +79,7 @@ def test_server_removes_stale_socket(session, short_tmp_path):
 
         # Start server in background
         serve_task = asyncio.create_task(server.serve())
-        await asyncio.sleep(0.01)  # Give it time to bind
-
-        # Socket should exist and be a proper socket
-        assert socket_path.exists()
-        assert socket_path.is_socket()
+        await _wait_socket(socket_path)
 
         # Stop server
         server.stop()
@@ -100,11 +102,8 @@ def test_server_creates_parent_directories(session, short_tmp_path):
 
         # Start server in background
         serve_task = asyncio.create_task(server.serve())
-        await asyncio.sleep(0.01)  # Give it time to bind
-
-        # Parent directories should be created
+        await _wait_socket(socket_path)
         assert socket_path.parent.exists()
-        assert socket_path.exists()
 
         # Stop server
         server.stop()
@@ -125,10 +124,7 @@ def test_server_clean_shutdown(session, short_tmp_path):
 
         # Start server
         serve_task = asyncio.create_task(server.serve())
-        await asyncio.sleep(0.01)
-
-        # Socket should exist
-        assert socket_path.exists()
+        await _wait_socket(socket_path)
 
         # Stop the server
         server.stop()
@@ -150,10 +146,7 @@ def test_server_stop_works(session, short_tmp_path):
         server = EngineServer(session, socket_path)
 
         serve_task = asyncio.create_task(server.serve())
-        await asyncio.sleep(0.01)
-
-        # Verify server is running
-        assert socket_path.exists()
+        await _wait_socket(socket_path)
 
         # Call stop
         server.stop()
@@ -203,16 +196,14 @@ def test_server_multiple_startups_cleanup(session, short_tmp_path):
         # First server
         server1 = EngineServer(session, socket_path)
         serve_task1 = asyncio.create_task(server1.serve())
-        await asyncio.sleep(0.01)
-        assert socket_path.exists()
+        await _wait_socket(socket_path)
         server1.stop()
         await serve_task1
 
         # Second server (should clean up first socket)
         server2 = EngineServer(session, socket_path)
         serve_task2 = asyncio.create_task(server2.serve())
-        await asyncio.sleep(0.01)
-        assert socket_path.exists()
+        await _wait_socket(socket_path)
         server2.stop()
         await serve_task2
 

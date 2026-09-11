@@ -37,6 +37,33 @@ from runtime.tools.lsp import (
 )
 
 
+class _IdlePipe:
+    """Blocks on readline until close() so LSP reader threads idle, not spin."""
+
+    def __init__(self):
+        self._closed = threading.Event()
+
+    def readline(self):
+        self._closed.wait()
+        return b""
+
+    def read(self, size=-1):
+        self._closed.wait()
+        return b""
+
+    def close(self):
+        self._closed.set()
+
+
+def _mock_proc(mock_popen):
+    proc = MagicMock()
+    proc.stdin = MagicMock()
+    proc.stdout = _IdlePipe()
+    proc.stderr = _IdlePipe()
+    mock_popen.return_value = proc
+    return proc
+
+
 class MockPipe:
     """Mock pipe for LSP client testing."""
 
@@ -71,11 +98,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_init_success(self, mock_popen):
         """Test LSPClient initialization."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test", "server"], cwd="/test")
         assert client._alive
@@ -96,46 +119,38 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_read_message_empty(self, mock_popen):
         """Test reading empty message returns None."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
-        mock_proc.stdout.readline.return_value = b""
-        result = client._read_message(mock_proc.stdout)
+        stream = MagicMock()
+        stream.readline.return_value = b""
+        result = client._read_message(stream)
         assert result is None
 
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_read_message_with_content(self, mock_popen):
         """Test reading a complete LSP message."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
 
         body = json.dumps({"id": 1, "result": "ok"}).encode("utf-8")
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
 
-        readline_calls = [b"Content-Length: " + str(len(body)).encode() + b"\r\n", b"\r\n"]
-        mock_proc.stdout.readline.side_effect = readline_calls
-        mock_proc.stdout.read.return_value = body
+        stream = MagicMock()
+        stream.readline.side_effect = [
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n",
+            b"\r\n",
+        ]
+        stream.read.return_value = body
 
-        result = client._read_message(mock_proc.stdout)
+        result = client._read_message(stream)
         assert result == {"id": 1, "result": "ok"}
 
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_write_message(self, mock_popen):
         """Test writing an LSP message."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         payload = {"jsonrpc": "2.0", "id": 1, "method": "test"}
@@ -148,12 +163,8 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_write_message_broken_pipe(self, mock_popen):
         """Test write_message raises on broken pipe."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
+        mock_proc = _mock_proc(mock_popen)
         mock_proc.stdin.write.side_effect = BrokenPipeError("pipe broken")
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
 
         client = LSPClient(["test"], cwd="/test")
 
@@ -163,11 +174,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_request_success(self, mock_popen):
         """Test LSP request method."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
 
@@ -182,11 +189,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_request_timeout(self, mock_popen):
         """Test LSP request times out."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
 
@@ -196,11 +199,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_request_not_alive(self, mock_popen):
         """Test request fails if client not alive."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         client._alive = False
@@ -211,11 +210,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_request_error_response(self, mock_popen):
         """Test request with error response."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
 
@@ -231,11 +226,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_notify(self, mock_popen):
         """Test notify method."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         client.notify("test_notify", {"param": "value"})
@@ -245,11 +236,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_reply(self, mock_popen):
         """Test reply method."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         client.reply(123, {"result": "data"})
@@ -259,11 +246,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_get_notification(self, mock_popen):
         """Test get_notification method."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         client._notifications.put({"method": "test", "params": {}})
@@ -274,11 +257,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_get_notification_timeout(self, mock_popen):
         """Test get_notification times out."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         notif = client.get_notification(timeout=0.01)
@@ -287,27 +266,24 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_shutdown(self, mock_popen):
         """Test shutdown method."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
-        client._pending[1] = queue.Queue()
-        client._pending[1].put({"id": 1, "result": None})
 
-        client.shutdown()
+        def fake_write(payload):
+            if payload.get("method") == "shutdown":
+                pending = client._pending.get(payload["id"])
+                if pending is not None:
+                    pending.put({"id": payload["id"], "result": None})
+
+        with patch.object(client, "_write_message", side_effect=fake_write):
+            client.shutdown()
         assert not client._alive
 
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_shutdown_already_not_alive(self, mock_popen):
         """Test shutdown when already not alive."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         client._alive = False
@@ -316,11 +292,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_reader_loop_processes_responses(self, mock_popen):
         """Test reader loop processes response messages."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         # Simulate a response being placed in pending queue by reader loop
@@ -334,11 +306,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_reader_loop_processes_notifications(self, mock_popen):
         """Test reader loop processes notification messages."""
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_popen.return_value = mock_proc
+        mock_proc = _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         # Simulate notification being placed in queue by reader loop
@@ -502,23 +470,17 @@ class TestLSPManager:
         """Test _client_for creates a new client when not cached."""
         manager = LSPManager(tmp_path)
         mock_client = MagicMock()
-        mock_client._alive = True
-        mock_client_class.return_value = mock_client
+        # Dead so the notification listener thread exits immediately.
+        mock_client._alive = False
         mock_client.request.return_value = {}
+        mock_client.get_notification.return_value = None
+        mock_client_class.return_value = mock_client
 
         cfg = LSPManager.SERVER_CONFIGS["python"]
-        # This will try to create a real subprocess, so we mock the Popen call
-        with patch("runtime.tools.lsp.subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            try:
-                client = manager._client_for(cfg)
-                assert client is not None
-            except RuntimeError:
-                pass
+        client = manager._client_for(cfg)
+        assert client is mock_client
+        mock_client.request.assert_called()
+        assert manager._clients[tuple(cfg.cmd)] is mock_client
 
     def test_lspmanager_iter_source_files(self, tmp_path):
         """Test iterating source files."""

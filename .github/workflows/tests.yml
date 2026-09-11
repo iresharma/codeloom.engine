@@ -24,7 +24,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run tests with coverage
-        run: pytest --cov --durations=20 -n auto -m "not lsp and not integration"
+        run: pytest --cov --durations=20 -n 2 --dist loadscope -m "not lsp and not integration"
 
       - name: Generate coverage badge
         run: coverage-badge -o coverage.svg -f
