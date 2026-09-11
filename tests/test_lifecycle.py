@@ -111,7 +111,8 @@ def test_request_snapshot_no_session(session):
     """Test RequestSnapshot with no active session."""
     from runtime.commands.lifecycle import request_snapshot
 
-    session._state = None
+    # session is created with empty SessionState (session_id=None)
+    # so _require_session() will fail
     events = []
     session._emit = events.append
 
@@ -148,7 +149,8 @@ def test_request_orch_context_no_session(session):
     """Test RequestOrchContext with no active session."""
     from runtime.commands.lifecycle import request_orch_context
 
-    session._state = None
+    # session is created with empty SessionState (session_id=None)
+    # so _require_session() will fail
     events = []
     session._emit = events.append
 
@@ -177,15 +179,16 @@ def test_shutdown_command(session):
         await shutdown(session, cmd2)
 
     asyncio.run(run_shutdown())
-    # Session should be closed
-    assert session._state is None
+    # Session should be closed (state reset to empty SessionState with session_id=None)
+    assert session._state.session_id is None
 
 
 def test_submit_user_message_no_session(session):
     """Test SubmitUserMessage with no active session."""
     from runtime.commands.lifecycle import submit_user_message
 
-    session._state = None
+    # session is created with empty SessionState (session_id=None)
+    # so _require_session() will fail
     events = []
     session._emit = events.append
 
