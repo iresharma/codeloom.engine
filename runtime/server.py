@@ -13,7 +13,12 @@ class EngineServer:
     def __init__(self, session: EngineSession, socket_path: Path):
         self._session = session
         self._socket_path = socket_path
-        self._stopped = asyncio.Event()
+        self._stopped: asyncio.Event | None = None
+
+    def _stop_event(self) -> asyncio.Event:
+        if self._stopped is None:
+            self._stopped = asyncio.Event()
+        return self._stopped
 
     async def serve(self) -> None:
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -25,13 +30,13 @@ class EngineServer:
         )
         try:
             async with server:
-                await self._stopped.wait()
+                await self._stop_event().wait()
         finally:
             if self._socket_path.exists():
                 self._socket_path.unlink()
 
     def stop(self) -> None:
-        self._stopped.set()
+        self._stop_event().set()
 
     async def _on_client(
         self,

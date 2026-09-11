@@ -139,6 +139,7 @@ _PARSE_TYPES = set().union(*SYMBOL_TYPES.values()) | {
 }
 
 _LANGUAGES: dict | None = None
+_PARSERS: dict = {}
 
 
 def _languages():
@@ -177,7 +178,10 @@ def language_for(path: str, language: str = "") -> str | None:
 def parse_bytes(lang: str, source: bytes):
     from tree_sitter import Parser
 
-    parser = Parser(_languages()[lang])
+    parser = _PARSERS.get(lang)
+    if parser is None:
+        parser = Parser(_languages()[lang])
+        _PARSERS[lang] = parser
     return parser.parse(source)
 
 
