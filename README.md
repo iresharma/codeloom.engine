@@ -494,11 +494,11 @@ can edit a tool and pick it up by restarting the session — no server restart.
 | `web_fetch` | HTTP GET. HTML becomes markdown (main/article, chrome dropped). `github.com` URLs are refused. SPA pages hint at debugger `browser_open`. |
 | `web_search` | Brave Search if `BRAVE_API_KEY` is set; otherwise an error. |
 
-**Memory.** Every personality (and the orch) can record lasting workspace facts. Reads and edits auto-touch path + SHA; `remember` stores notes and decisions. Stale file notes are flagged when the on-disk hash no longer matches.
+**Memory.** Every personality (and the orch) can record lasting workspace facts. `remember` upserts a file note (`purpose` / `entry_points` / `constraints`) or a decision. Ask, coder, and researcher briefings are also ingested automatically on finish. Reads and edits only update `seen_sha` on files that already have a note. Stale file notes are flagged when the on-disk hash no longer matches.
 
 | Tool | Purpose |
 |---|---|
-| `remember` | Upsert a file blurb (`section=files` + `path`) or append an engineering / product / CI/CD / other decision. |
+| `remember` | Upsert a file blurb (`section=files` + `path`, optional `purpose` / `entry_points` / `constraints`) or append an engineering / product / CI/CD / other decision. |
 
 **Skills.** Every personality (and the orch) can load a `SKILL.md` body.
 
@@ -734,7 +734,7 @@ Everything lives in `{workspace}/.engine/`:
 |---|---|
 | `engine.sock` | Unix domain socket. Removed on clean shutdown. |
 | `session.db` | SQLite: `sessions` and `edits` tables. |
-| `memory.json` | Structured workspace memory: file notes keyed by SHA-256, plus engineering / product / CI/CD / other decisions. Injected into every agent prompt. |
+| `memory.json` | Structured workspace memory: file notes (`purpose` / `entry_points` / `constraints`) keyed by SHA-256, plus engineering / product / CI/CD / other decisions. Filled by `remember` and by ingesting ask/coder/researcher briefings. Injected into every agent prompt. |
 
 The `sessions` table holds `id`, `json`, `created_at`, `saved_at`. Saves are
 upserts. Only durable state is persisted — the file tree, git state, and
@@ -742,10 +742,12 @@ detected language are stripped before writing, since all three are recomputed
 from disk on load. Sessions are listed newest-saved-first.
 
 State is persisted after every user message, agent reply, file open, file
-close, and on shutdown. File memory is updated on `read_file` and successful
-edits (`touch`); richer notes and decisions are written only when an agent
-calls `remember`. A file note is marked `STALE` when the current disk hash
-does not match the hash stored with the note.
+close, and on shutdown. File notes and decisions are written when an agent
+calls `remember`, and when ask / coder / researcher finish (the labeled
+briefing is ingested with no extra model call). `touch` on `read_file` and
+successful edits only refreshes `seen_sha` for files that already have a
+note; empty touches are not stored. A file note is marked `STALE` when the
+current disk hash does not match the hash stored with the note.
 
 ---
 

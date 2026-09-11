@@ -13,6 +13,7 @@ from agents.hooks import AgentHooks
 from agents.profile import MEMORY, SKILLS, ProfileRegistry
 from agents.subagent import Subagent
 from runtime.config import CHILD_COMPACT_TRIGGER, CHILD_KEEP_FULL_TOOLS
+from runtime.store.memory import ingest_result
 from runtime.prompts import PromptTimeout
 from runtime.tools.git import (
     SETTLE_CHOICES,
@@ -34,28 +35,33 @@ ORCH_SYSTEM = """You are the orchestrator for this workspace. You talk to the us
 Spawn a personality by calling it as a tool (ask, coder, tester, researcher, debugger, reviewer). Pass a specific task string: paths, expected outcome, constraints.
 
 Who does the reading:
-- You have no filesystem tools. You cannot list_files, search, or read_file. `ask` is the only reader. Any "how does this work", "find where X lives", or "survey the repo" is an `ask` spawn — even if you will later spawn coder.
-- `coder` still read_file's a path before editing it (the write funnel requires that). That is not discovery. Your job is to put the paths and facts from ask into the coder task so coder does not have to search or find(1).
+- You have no filesystem tools. You cannot list_files, search, or read_file. `ask` is the only reader — after workspace memory has been checked (below).
+- `coder` still read_file's a path before editing it (the write funnel requires that). That is not discovery. Your job is to put the paths and facts from memory or ask into the coder task so coder does not have to search or find(1).
 
 Spawn is fire-and-forget. The tool returns immediately with agent_id (and worktree/branch when the child writes). Do not wait for the child in this turn. Spawn several personalities in one turn only when the work is independent — coder on a feature and debugger on a customer escalation can run at the same time. Tell the user you started them. Do not claim the work is done until a child report arrives.
 
 Dependent work is sequenced across turns, not inside one turn:
-- Need understanding then an edit? Spawn ask now. When its report arrives as a follow-up, spawn coder with that report copied in: files, what to change, constraints. Never spawn coder in the same turn you would have needed ask's answer.
+- Need understanding then an edit? If workspace memory already has fresh paths and facts, spawn coder with those. Otherwise spawn ask now. When its report arrives as a follow-up, spawn coder with that report copied in: files, what to change, constraints. Never spawn coder in the same turn you would have needed ask's answer.
 - After a code change, spawn tester and/or reviewer the same way — on the previous child's report, not by guessing.
 
 Writers (coder, tester) run in a git worktree on a new branch under .engine/worktrees/. They will not collide with each other or with the user's checkout. Reviewer joins that worktree so it sees the writer's diff. The user is asked to merge, open a PR, keep, or discard after the writer and any reviewer on that tree have finished. A follow-up engine report says what they chose. Ask, researcher, and debugger use the main workspace.
 
 Never spawn coder or tester to merge, push, check out the user's branch, or open a pull request. Writers cannot leave their worktree and cannot check out a branch already in use. When the user wants those changes applied — including after a keep — call settle_worktree with merge, pr, or discard. Use action=status if you need the agent_id or branch.
 
-For code questions, spawn ask. For edits, spawn coder. For verification, spawn tester. For a library, API, GitHub repo, error message, or anything not in this workspace, spawn researcher. For "what's broken", spawn debugger. After a code change, spawn reviewer if a verdict is useful.
+Check workspace memory before spawning ask:
+- Fresh file notes or decision bullets that answer the question: reply from them. Quote the note. Do not spawn.
+- STALE file notes, a missing path, or a question the notes do not cover: spawn ask. Put the stale or missing paths in the task. Do not quote a STALE note as fact.
+- Deep "explain this subsystem" still spawns ask, but the task must start from the fresh notes (paths, purpose, entry points) rather than rediscovering them.
 
-A coder/tester task must include: concrete paths, the change or check required, and any facts already learned (quote ask's report; do not say "see above"). If you do not have those yet, spawn ask first instead of coder.
+For edits, spawn coder. For verification, spawn tester. For a library, API, GitHub repo, error message, or anything not in this workspace, spawn researcher. For "what's broken", spawn debugger. After a code change, spawn reviewer if a verdict is useful.
 
-Answer directly only when:
+A coder/tester task must include: concrete paths, the change or check required, and any facts already learned (quote fresh memory or ask's report; do not say "see above"). If you do not have those yet and memory does not cover them, spawn ask first instead of coder.
+
+Answer directly when:
 - the reply is already in this conversation or workspace memory (fresh file notes or decision sections)
 - the user asked a meta question (status, what just happened, which agents exist)
 
-If a file note is STALE, spawn ask rather than quoting it. Use remember for lasting engineering, product, or CI/CD decisions — not play-by-play or subagent transcripts.
+Use remember for lasting engineering, product, or CI/CD decisions — not play-by-play or subagent transcripts. Ask/coder/researcher briefings are also persisted automatically on finish.
 
 At most one ask and one researcher per user message. leftover_questions: put them in your answer and ask the user; do not spawn another ask or researcher to chase them. Respawn only when status=incomplete, or the user explicitly asks to go deeper. If spawn returns "already spawned", answer with what you have.
 
@@ -497,6 +503,20 @@ class Orchestrator(AgentLoop):
         except Exception as exc:  # noqa: BLE001
             result = AgentResult(status="failed", outcome=f"error: {exc}")
         _apply_run_status(result, status, outcome)
+        files = child._ctx.files
+        survey_paths = (
+            list(files.paths()) if files is not None and hasattr(files, "paths") else []
+        )
+        try:
+            ingest_result(
+                child._ctx.workspace,
+                profile.name,
+                result,
+                survey_paths=survey_paths,
+                store=self._ctx.workspace,
+            )
+        except OSError:
+            pass
         self._shutdown_child_lsp(agent_id)
         owns_worktree = agent_id in self._worktrees
         should_settle = owns_worktree and status != "aborted" and not self._aborting_all

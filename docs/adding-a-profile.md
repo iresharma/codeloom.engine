@@ -221,6 +221,11 @@ this personality will not do.
 `.engine/memory.json`). Subagents freeze that system text on the first model call so
 prompt-cache prefixes stay stable; `remember()` during the child's own run is visible
 as a tool result, not as a rewritten system block. The orchestrator re-renders every turn.
+Ask, coder, and researcher briefings are ingested into the main workspace
+`memory.json` when the child finishes (hashed in the child's tree, including
+worktrees). Mid-run `remember` can still write a better structured note; ingest
+will not overwrite a **fresh** file note. STALE notes (disk hash ≠ `note_sha`)
+are rewritten from the briefing.
 - `tool_names` — allowlist from `discover_tools()`. Unknown names become
 registry errors, not a crash. Never include other personality names. Include
 `MEMORY` (`remember`) unless the personality truly has nothing to persist.

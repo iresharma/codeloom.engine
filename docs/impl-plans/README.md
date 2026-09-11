@@ -19,3 +19,4 @@ How-to guides for extending the running system live in `docs/` (`adding-a-*.md`)
 14. [Researcher surveys](fix-researcher-surveys.md)
 15. [Long-term memory](long-term-memory.md) — structured workspace notes instead of context.md
 16. [Cost controls](cost-controls.md) — prompt cache, append-only children, spawn-once, Haiku ask/tester
+17. [Memory ingest](memory-ingest.md) — auto-persist child briefings; structured file notes; orch prefers fresh memory

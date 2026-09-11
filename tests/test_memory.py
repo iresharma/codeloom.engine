@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 
+from agents.compactor import AgentResult
 from runtime.store.memory import (
     FILE_NOTE_CAP,
+    INGEST_FILE_CAP,
     RENDER_CAP,
     SECTION_CAP,
+    ingest_result,
     load,
     remember,
     render_memory,
@@ -30,6 +34,7 @@ def test_touch_does_not_clobber_note(tmp_path):
     touch(tmp_path, "session.py", second, "read")
     entry = load(tmp_path)["files"]["session.py"]
     assert entry["note"] == "EngineSession binds orch"
+    assert entry["purpose"] == "EngineSession binds orch"
     assert entry["note_sha"] == first
     assert entry["seen_sha"] == second
     assert entry["action"] == "read"
@@ -89,10 +94,11 @@ def test_remember_and_touch_concurrent(tmp_path):
         thread.join()
     assert not errors
     files = load(tmp_path)["files"]
-    for index in range(20):
-        assert f"f{index}.py" in files
     for index in range(0, 20, 2):
+        assert f"f{index}.py" in files
         assert files[f"f{index}.py"]["note"] == f"note-{index}-unique"
+    for index in range(1, 20, 2):
+        assert f"f{index}.py" not in files
 
 
 def test_render_prefers_decisions_and_caps(tmp_path):
@@ -119,18 +125,32 @@ def test_missing_file_is_dropped(tmp_path):
     assert "gone.py" not in load(tmp_path)["files"]
 
 
-def test_read_file_touches_memory(tmp_path):
+def test_read_file_does_not_create_empty_entry(tmp_path):
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     ctx = ToolContext(workspace=tmp_path, files=FileTracker())
     read_file(ctx, "a.py")
+    assert load(tmp_path)["files"] == {}
+    assert not (tmp_path / ".engine" / "memory.json").exists()
+
+
+def test_read_file_updates_seen_sha_on_noted_file(tmp_path):
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    remember(tmp_path, "files", "a module", path="a.py")
+    first = load(tmp_path)["files"]["a.py"]["seen_sha"]
+    target.write_text("x = 2\n", encoding="utf-8")
+    ctx = ToolContext(workspace=tmp_path, files=FileTracker())
+    read_file(ctx, "a.py")
     entry = load(tmp_path)["files"]["a.py"]
+    assert entry["note"] == "a module"
+    assert entry["seen_sha"] == sha256_bytes(b"x = 2\n")
+    assert entry["seen_sha"] != first
     assert entry["action"] == "read"
-    assert entry["seen_sha"] == sha256_bytes(b"x = 1\n")
-    assert not entry.get("note")
 
 
-def test_apply_edit_touches_memory(tmp_path):
+def test_apply_edit_updates_noted_file(tmp_path):
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    remember(tmp_path, "files", "a module", path="a.py")
     ctx = ToolContext(workspace=tmp_path, files=FileTracker())
     read_file(ctx, "a.py")
 
@@ -142,6 +162,7 @@ def test_apply_edit_touches_memory(tmp_path):
     entry = load(tmp_path)["files"]["a.py"]
     assert entry["action"] == "edit"
     assert entry["seen_sha"] == sha256_bytes(b"x = 2\n")
+    assert entry["note"] == "a module"
 
 
 def test_remember_tool_is_discovered():
@@ -156,8 +177,267 @@ def test_invalid_remember(tmp_path):
     assert remember(tmp_path, "engineering", "  ").startswith("error:")
     (tmp_path / "ok.py").write_text("x\n", encoding="utf-8")
     assert remember(tmp_path, "files", "missing", path="nope.py").startswith("error:")
+    assert remember(tmp_path, "files", path="ok.py").startswith("error:")
 
 
 def test_empty_render(tmp_path):
     assert render_memory(tmp_path) == ""
     assert not (tmp_path / ".engine" / "memory.json").exists()
+
+
+def test_structured_remember_and_render(tmp_path):
+    (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+    assert (
+        remember(
+            tmp_path,
+            "files",
+            path="a.py",
+            purpose="alpha",
+            entry_points="foo",
+            constraints="no globals",
+        )
+        == "ok"
+    )
+    text = render_memory(tmp_path)
+    assert "purpose: alpha" in text
+    assert "entry: foo" in text
+    assert "constraints: no globals" in text
+    assert "Recently touched" not in text
+    entry = load(tmp_path)["files"]["a.py"]
+    assert entry["purpose"] == "alpha"
+    assert entry["entry_points"] == "foo"
+
+
+def test_render_drops_touch_only_entries(tmp_path):
+    (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+    digest = sha256_bytes(b"x\n")
+    engine = tmp_path / ".engine"
+    engine.mkdir()
+    (engine / "memory.json").write_text(
+        json.dumps(
+            {
+                "files": {
+                    "a.py": {
+                        "seen_sha": digest,
+                        "note": "",
+                        "note_sha": None,
+                        "action": "read",
+                        "updated_at": "2026-01-01T00:00:00+00:00",
+                    }
+                },
+                "engineering": [],
+                "product": [],
+                "cicd": [],
+                "other": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    text = render_memory(tmp_path)
+    assert "Recently touched" not in text
+    assert "a.py" not in text
+    assert "a.py" not in load(tmp_path)["files"]
+
+
+def test_ingest_ask_writes_fields_and_engineering(tmp_path):
+    (tmp_path / "session.py").write_text("class EngineSession:\n    pass\n", encoding="utf-8")
+    result = AgentResult(
+        status="ok",
+        outcome=(
+            "what: EngineSession binds orch\n"
+            "paths: session.py\n"
+            "facts: EngineSession._bind_loop wires tools\n"
+            "verdict: session.py is the session root\n"
+        ),
+        leftover_questions=["none of the leftover"],
+    )
+    ingest_result(tmp_path, "ask", result, survey_paths=["session.py"])
+    data = load(tmp_path)
+    assert data["engineering"]
+    assert "session root" in data["engineering"][-1]["text"]
+    entry = data["files"]["session.py"]
+    assert "EngineSession binds orch" in entry["purpose"]
+    assert "session.py" in entry["entry_points"]
+    assert "leftover" in entry["constraints"]
+    rendered = render_memory(tmp_path)
+    assert "purpose:" in rendered
+    assert "[fresh]" in rendered
+    assert "Recently touched" not in rendered
+
+
+def test_ingest_duplicate_verdict_not_appended(tmp_path):
+    (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+    result = AgentResult(
+        status="ok",
+        outcome="what: keep\nverdict: ship it\npaths: a.py\n",
+    )
+    ingest_result(tmp_path, "ask", result)
+    ingest_result(tmp_path, "ask", result)
+    assert len(load(tmp_path)["engineering"]) == 1
+
+
+def test_ingest_skips_tester_and_aborted(tmp_path):
+    (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+    result = AgentResult(
+        status="ok",
+        outcome="what: x\nverdict: y\npaths: a.py\n",
+    )
+    ingest_result(tmp_path, "tester", result)
+    ingest_result(
+        tmp_path,
+        "ask",
+        AgentResult(status="aborted", outcome="what: x\nverdict: y\npaths: a.py\n"),
+    )
+    ingest_result(
+        tmp_path,
+        "ask",
+        AgentResult(status="failed", outcome="what: x\nverdict: y\npaths: a.py\n"),
+    )
+    ingest_result(
+        tmp_path,
+        "reviewer",
+        result,
+    )
+    data = load(tmp_path)
+    assert data["engineering"] == []
+    assert data["files"] == {}
+
+
+def test_ingest_coder_uses_files_touched(tmp_path):
+    (tmp_path / "edited.py").write_text("x\n", encoding="utf-8")
+    (tmp_path / "other.py").write_text("y\n", encoding="utf-8")
+    result = AgentResult(
+        status="ok",
+        outcome="what: edited the writer\nverdict: done\npaths: other.py\n",
+        files_touched=["edited.py"],
+    )
+    ingest_result(tmp_path, "coder", result, survey_paths=["other.py"])
+    files = load(tmp_path)["files"]
+    assert "edited.py" in files
+    assert "other.py" not in files
+
+
+def test_ingest_ask_caps_files(tmp_path):
+    paths = []
+    for index in range(INGEST_FILE_CAP + 3):
+        name = f"f{index}.py"
+        (tmp_path / name).write_text("x\n", encoding="utf-8")
+        paths.append(name)
+    result = AgentResult(
+        status="ok",
+        outcome="what: survey\nverdict: many files\npaths: " + ", ".join(paths) + "\n",
+    )
+    ingest_result(tmp_path, "ask", result, survey_paths=paths)
+    assert len(load(tmp_path)["files"]) == INGEST_FILE_CAP
+
+
+def test_ingest_researcher_goes_to_other(tmp_path):
+    result = AgentResult(
+        status="ok",
+        outcome="what: lib X\nverdict: skip Graphify\n",
+    )
+    ingest_result(tmp_path, "researcher", result)
+    data = load(tmp_path)
+    assert data["engineering"] == []
+    assert "skip Graphify" in data["other"][-1]["text"]
+    assert data["files"] == {}
+
+
+def test_ingest_max_turns_still_writes(tmp_path):
+    (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+    result = AgentResult(
+        status="max_turns",
+        outcome="what: partial\nverdict: still useful\npaths: a.py\n",
+    )
+    ingest_result(tmp_path, "ask", result)
+    assert load(tmp_path)["engineering"]
+    assert "a.py" in load(tmp_path)["files"]
+
+
+def test_ingest_skips_fresh_note(tmp_path):
+    (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+    remember(tmp_path, "files", path="a.py", purpose="hand-written")
+    result = AgentResult(
+        status="ok",
+        outcome="what: generic survey blurb\nverdict: v\npaths: a.py\n",
+    )
+    ingest_result(tmp_path, "ask", result)
+    assert load(tmp_path)["files"]["a.py"]["purpose"] == "hand-written"
+
+
+def test_ingest_refreshes_stale_note(tmp_path):
+    target = tmp_path / "a.py"
+    target.write_text("old\n", encoding="utf-8")
+    remember(
+        tmp_path,
+        "files",
+        path="a.py",
+        purpose="hand-written",
+        entry_points="old_fn",
+        constraints="keep x",
+    )
+    target.write_text("new\n", encoding="utf-8")
+    assert "[STALE]" in render_memory(tmp_path)
+    result = AgentResult(
+        status="ok",
+        outcome=(
+            "what: rewritten after edit\n"
+            "paths: a.py\n"
+            "facts: a.py now exports new_fn\n"
+            "verdict: caught up\n"
+        ),
+        leftover_questions=["check callers"],
+    )
+    ingest_result(tmp_path, "ask", result)
+    entry = load(tmp_path)["files"]["a.py"]
+    assert "rewritten after edit" in entry["purpose"]
+    assert entry["entry_points"] != "old_fn"
+    assert "a.py" in entry["entry_points"]
+    assert "callers" in entry["constraints"]
+    assert entry["note_sha"] == sha256_bytes(b"new\n")
+    assert "[STALE]" not in render_memory(tmp_path)
+    assert "[fresh]" in render_memory(tmp_path)
+
+
+def test_remember_merges_partial_fields(tmp_path):
+    (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+    remember(
+        tmp_path,
+        "files",
+        path="a.py",
+        purpose="alpha",
+        entry_points="foo",
+        constraints="no globals",
+    )
+    assert remember(tmp_path, "files", path="a.py", purpose="beta") == "ok"
+    entry = load(tmp_path)["files"]["a.py"]
+    assert entry["purpose"] == "beta"
+    assert entry["entry_points"] == "foo"
+    assert entry["constraints"] == "no globals"
+
+
+def test_ingest_hashes_child_tree_stores_on_main(tmp_path):
+    main = tmp_path / "main"
+    tree = tmp_path / "tree"
+    main.mkdir()
+    tree.mkdir()
+    (main / "a.py").write_text("old\n", encoding="utf-8")
+    (tree / "a.py").write_text("new\n", encoding="utf-8")
+    result = AgentResult(
+        status="ok",
+        outcome="what: changed a\nverdict: edited\n",
+        files_touched=["a.py"],
+    )
+    ingest_result(tree, "coder", result, store=main)
+    entry = load(main)["files"]["a.py"]
+    assert entry["note_sha"] == sha256_bytes(b"new\n")
+    assert "[STALE]" in render_memory(main)
+
+
+def test_file_tracker_paths():
+    tracker = FileTracker()
+    tracker.mark("a.py", "aaa")
+    tracker.mark("b.py", "bbb")
+    assert tracker.paths() == ["a.py", "b.py"]
+    assert tracker.get("a.py") == "aaa"
