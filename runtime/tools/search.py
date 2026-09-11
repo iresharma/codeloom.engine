@@ -23,11 +23,11 @@ def search(
     glob: str = "",
     max_matches: int = DEFAULT_MAX_MATCHES,
 ) -> str:
+    if not pattern:
+        raise ValueError("pattern is required")
     rg = shutil.which("rg")
     if not rg:
         raise RuntimeError("rg not found; install ripgrep")
-    if not pattern:
-        raise ValueError("pattern is required")
 
     workspace = workspace.resolve()
     target = workspace

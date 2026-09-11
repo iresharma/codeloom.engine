@@ -1,6 +1,7 @@
 """Comprehensive tests for runtime/tools/search.py to raise coverage from 16% to 85%+"""
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -255,29 +256,24 @@ class TestRewritePath:
 class TestSearchIntegration:
     """Integration tests using actual files."""
 
-    def test_search_find_py_files(self, tmp_path, monkeypatch):
+    @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+    def test_search_find_py_files(self, tmp_path):
         """Search can find python files when ripgrep is available."""
         (tmp_path / "a.py").write_text("def test():\n    pass\n")
         (tmp_path / "b.py").write_text("# no match here\n")
-        
-        # Only mock if rg isn't available
-        if not subprocess.run(["rg", "--version"], capture_output=True).returncode == 0:
-            pytest.skip("ripgrep not installed")
-        
+
         result = search(tmp_path, "def test", max_matches=50)
         assert "a.py" in result or result == "(no matches)"
 
-    def test_search_skip_patterns_applied(self, tmp_path, monkeypatch):
+    @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+    def test_search_skip_patterns_applied(self, tmp_path):
         """Cache and vendor directories are skipped."""
         cache = tmp_path / ".ruff_cache"
         cache.mkdir()
         (cache / "data.py").write_text("SKIP_ME = 1\n")
-        
+
         (tmp_path / "app.py").write_text("KEEP_ME = 1\n")
-        
-        if not subprocess.run(["rg", "--version"], capture_output=True).returncode == 0:
-            pytest.skip("ripgrep not installed")
-        
+
         result = search(tmp_path, "KEEP_ME|SKIP_ME", max_matches=50)
         if "KEEP_ME" in result:
             assert "app.py" in result
