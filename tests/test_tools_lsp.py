@@ -1,612 +1,407 @@
-"""Tests for tools/lsp.py - the async tool wrapper layer.
+"""Unit tests for tools/lsp.py with mocked LSP client.
 
-These tests mock out the runtime LSP implementation to focus on the wrapper's
-parameter handling, async-to-thread marshaling, and error cases.
+Tests cover the tool-layer wrapper functions that delegate to runtime.tools.lsp.
+These tests mock the underlying LSP interactions to provide coverage without
+requiring a live language server or the @pytest.mark.lsp marker.
 """
 
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+try:
+    import pytest_asyncio
+    has_asyncio = True
+except ImportError:
+    has_asyncio = False
 
+from runtime.store.edits import ensure_schema
+from runtime.tools.fileid import read_source
+from runtime.tools.tracker import FileTracker
 from tools.base import ToolContext
 from tools.lsp import (
     _as_int,
     _require_lsp,
-    document_symbols,
     find_references,
     get_diagnostics,
     goto_definition,
     hover,
+    document_symbols,
     rename_symbol,
 )
 
 
+@pytest.fixture
+def ctx(tmp_path):
+    """Tool context with no LSP manager."""
+    db = tmp_path / "session.db"
+    ensure_schema(db)
+    return ToolContext(
+        workspace=tmp_path,
+        lsp=None,
+        files=FileTracker(),
+        journal=db,
+        session_id="test-lsp",
+    )
+
+
+@pytest.fixture
+def ctx_with_lsp(tmp_path):
+    """Tool context with a mocked LSP manager."""
+    db = tmp_path / "session.db"
+    ensure_schema(db)
+    mock_lsp = MagicMock()
+    return ToolContext(
+        workspace=tmp_path,
+        lsp=mock_lsp,
+        files=FileTracker(),
+        journal=db,
+        session_id="test-lsp",
+    )
+
+
 class TestAsInt:
-    """Tests for _as_int parameter normalization helper."""
+    """Tests for _as_int helper function."""
 
-    def test_as_int_with_none(self):
-        assert _as_int(None, 10) == 10
+    def test_as_int_with_int(self):
+        assert _as_int(42, 1) == 42
 
-    def test_as_int_with_empty_string(self):
-        assert _as_int("", 5) == 5
+    def test_as_int_with_string_number(self):
+        assert _as_int("42", 1) == 42
 
-    def test_as_int_with_valid_string(self):
-        assert _as_int("42", 99) == 42
+    def test_as_int_with_none_returns_default(self):
+        assert _as_int(None, 99) == 99
 
-    def test_as_int_with_integer(self):
-        assert _as_int(1, 99) == 1
+    def test_as_int_with_empty_string_returns_default(self):
+        assert _as_int("", 50) == 50
 
     def test_as_int_with_zero(self):
-        assert _as_int(0, 99) == 0
+        assert _as_int(0, 1) == 0
 
-    def test_as_int_with_negative(self):
-        assert _as_int("-5", 99) == -5
+    def test_as_int_with_string_zero(self):
+        assert _as_int("0", 1) == 0
 
 
 class TestRequireLsp:
-    """Tests for _require_lsp LSP availability check."""
+    """Tests for _require_lsp helper function."""
 
-    def test_require_lsp_when_available(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-        assert _require_lsp(ctx) is None
+    def test_require_lsp_with_no_lsp(self, ctx):
+        err = _require_lsp(ctx)
+        assert err is not None
+        assert "LSP is not available" in err
 
-    def test_require_lsp_when_missing(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = None
-        result = _require_lsp(ctx)
-        assert result is not None
-        assert "LSP is not available" in result
+    def test_require_lsp_with_lsp(self, ctx_with_lsp):
+        err = _require_lsp(ctx_with_lsp)
+        assert err is None
 
 
 class TestGotoDefinition:
-    """Tests for goto_definition tool wrapper."""
+    """Tests for goto_definition tool."""
 
-    def test_goto_definition_without_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = None
-
+    def test_goto_definition_without_lsp(self, ctx):
         async def run():
-            return await goto_definition(ctx, "a.py", 1, 1)
-
-        result = asyncio.run(run())
-        assert result.startswith("error:")
-        assert "LSP is not available" in result
-
-    def test_goto_definition_with_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
-        async def run():
-            with patch("tools.lsp.run_lsp.goto_definition") as mock_run:
-                mock_run.return_value = "result from goto_definition"
-                return await goto_definition(ctx, "a.py", 1, 1)
-
-        result = asyncio.run(run())
-        assert result == "result from goto_definition"
-
-    def test_goto_definition_normalizes_line_character(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
-        async def run():
-            with patch("tools.lsp.run_lsp.goto_definition") as mock_run:
-                mock_run.return_value = "ok"
-                await goto_definition(ctx, "a.py", None, "")
-                args = mock_run.call_args[0]
-                # line and character should default to 1 (converted to 0-based)
-                assert args[3] == 1
-                assert args[4] == 1
-
+            result = await goto_definition(ctx, "test.py", 1, 1)
+            assert "LSP is not available" in result
         asyncio.run(run())
 
-    def test_goto_definition_with_string_coords(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_goto_definition_converts_int_params(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.goto_definition") as mock_run:
-                mock_run.return_value = "ok"
-                await goto_definition(ctx, "a.py", "10", "20")
-                args = mock_run.call_args[0]
-                assert args[3] == 10
-                assert args[4] == 20
+            with patch("tools.lsp.run_lsp.goto_definition") as mock_fn:
+                mock_fn.return_value = "result"
+                await goto_definition(ctx_with_lsp, "test.py", "5", "10")
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                    5,
+                    10,
+                )
+        asyncio.run(run())
 
+    def test_goto_definition_with_none_params(self, ctx_with_lsp):
+        async def run():
+            with patch("tools.lsp.run_lsp.goto_definition") as mock_fn:
+                mock_fn.return_value = "result"
+                await goto_definition(ctx_with_lsp, "test.py", None, None)
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                    1,
+                    1,
+                )
+        asyncio.run(run())
+
+    def test_goto_definition_returns_result(self, ctx_with_lsp):
+        async def run():
+            expected = "file.py:10:5  def my_func():"
+            with patch("tools.lsp.run_lsp.goto_definition") as mock_fn:
+                mock_fn.return_value = expected
+                result = await goto_definition(ctx_with_lsp, "test.py", 1, 1)
+                assert result == expected
+        asyncio.run(run())
+
+    def test_goto_definition_handles_default_line_char(self, ctx_with_lsp):
+        async def run():
+            with patch("tools.lsp.run_lsp.goto_definition") as mock_fn:
+                mock_fn.return_value = "result"
+                await goto_definition(ctx_with_lsp, "test.py", "", "")
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                    1,
+                    1,
+                )
         asyncio.run(run())
 
 
 class TestFindReferences:
-    """Tests for find_references tool wrapper."""
+    """Tests for find_references tool."""
 
-    def test_find_references_without_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = None
-
+    def test_find_references_without_lsp(self, ctx):
         async def run():
-            return await find_references(ctx, "a.py", 1, 1)
+            result = await find_references(ctx, "test.py", 1, 1)
+            assert "LSP is not available" in result
+        asyncio.run(run())
 
-        result = asyncio.run(run())
-        assert result.startswith("error:")
-        assert "LSP is not available" in result
-
-    def test_find_references_with_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_find_references_converts_int_params(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.find_references") as mock_run:
-                mock_run.return_value = "found 3 references"
-                return await find_references(ctx, "a.py", 5, 10)
+            with patch("tools.lsp.run_lsp.find_references") as mock_fn:
+                mock_fn.return_value = "result"
+                await find_references(ctx_with_lsp, "test.py", "15", "20")
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                    15,
+                    20,
+                )
+        asyncio.run(run())
 
-        result = asyncio.run(run())
-        assert result == "found 3 references"
-
-    def test_find_references_defaults(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_find_references_with_none_params(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.find_references") as mock_run:
-                mock_run.return_value = "ok"
-                await find_references(ctx, "test.py", None, "")
-                args = mock_run.call_args[0]
-                assert args[2] == "test.py"
-                assert args[3] == 1  # default line
-                assert args[4] == 1  # default character
+            with patch("tools.lsp.run_lsp.find_references") as mock_fn:
+                mock_fn.return_value = "result"
+                await find_references(ctx_with_lsp, "test.py", None, None)
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                    1,
+                    1,
+                )
+        asyncio.run(run())
 
+    def test_find_references_returns_result(self, ctx_with_lsp):
+        async def run():
+            expected = "a.py:5:2\nb.py:10:8"
+            with patch("tools.lsp.run_lsp.find_references") as mock_fn:
+                mock_fn.return_value = expected
+                result = await find_references(ctx_with_lsp, "test.py", 1, 1)
+                assert result == expected
         asyncio.run(run())
 
 
 class TestHover:
-    """Tests for hover tool wrapper."""
+    """Tests for hover tool."""
 
-    def test_hover_without_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = None
-
+    def test_hover_without_lsp(self, ctx):
         async def run():
-            return await hover(ctx, "a.py", 1, 1)
+            result = await hover(ctx, "test.py", 1, 1)
+            assert "LSP is not available" in result
+        asyncio.run(run())
 
-        result = asyncio.run(run())
-        assert result.startswith("error:")
-        assert "LSP is not available" in result
-
-    def test_hover_with_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_hover_converts_int_params(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.hover") as mock_run:
-                mock_run.return_value = "type: str"
-                return await hover(ctx, "a.py", 3, 7)
+            with patch("tools.lsp.run_lsp.hover") as mock_fn:
+                mock_fn.return_value = "hover text"
+                await hover(ctx_with_lsp, "test.py", "8", "12")
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                    8,
+                    12,
+                )
+        asyncio.run(run())
 
-        result = asyncio.run(run())
-        assert result == "type: str"
-
-    def test_hover_with_string_coords(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_hover_with_empty_string_params(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.hover") as mock_run:
-                mock_run.return_value = "ok"
-                await hover(ctx, "a.py", "15", "25")
-                args = mock_run.call_args[0]
-                assert args[3] == 15
-                assert args[4] == 25
+            with patch("tools.lsp.run_lsp.hover") as mock_fn:
+                mock_fn.return_value = "hover info"
+                await hover(ctx_with_lsp, "test.py", "", "")
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                    1,
+                    1,
+                )
+        asyncio.run(run())
 
+    def test_hover_returns_result(self, ctx_with_lsp):
+        async def run():
+            expected = "def my_func() -> str"
+            with patch("tools.lsp.run_lsp.hover") as mock_fn:
+                mock_fn.return_value = expected
+                result = await hover(ctx_with_lsp, "test.py", 1, 1)
+                assert result == expected
         asyncio.run(run())
 
 
 class TestGetDiagnostics:
-    """Tests for get_diagnostics tool wrapper."""
+    """Tests for get_diagnostics tool."""
 
-    def test_get_diagnostics_without_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = None
-
+    def test_get_diagnostics_without_lsp(self, ctx):
         async def run():
-            return await get_diagnostics(ctx, "a.py")
+            result = await get_diagnostics(ctx, "test.py")
+            assert "LSP is not available" in result
+        asyncio.run(run())
 
-        result = asyncio.run(run())
-        assert result.startswith("error:")
-        assert "LSP is not available" in result
-
-    def test_get_diagnostics_with_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_get_diagnostics_calls_runtime_function(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.get_diagnostics") as mock_run:
-                mock_run.return_value = "No diagnostics for 'a.py' (clean)."
-                return await get_diagnostics(ctx, "a.py")
+            with patch("tools.lsp.run_lsp.get_diagnostics") as mock_fn:
+                mock_fn.return_value = "No diagnostics"
+                await get_diagnostics(ctx_with_lsp, "test.py")
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                )
+        asyncio.run(run())
 
-        result = asyncio.run(run())
-        assert "No diagnostics" in result or "a.py" in result
-
-    def test_get_diagnostics_passes_path(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_get_diagnostics_returns_result(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.get_diagnostics") as mock_run:
-                mock_run.return_value = "ok"
-                await get_diagnostics(ctx, "test/file.py")
-                args = mock_run.call_args[0]
-                assert args[2] == "test/file.py"
-
+            expected = "test.py:5:2 Error: undefined variable"
+            with patch("tools.lsp.run_lsp.get_diagnostics") as mock_fn:
+                mock_fn.return_value = expected
+                result = await get_diagnostics(ctx_with_lsp, "test.py")
+                assert result == expected
         asyncio.run(run())
 
 
 class TestDocumentSymbols:
-    """Tests for document_symbols tool wrapper."""
+    """Tests for document_symbols tool."""
 
-    def test_document_symbols_without_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = None
-
+    def test_document_symbols_without_lsp(self, ctx):
         async def run():
-            return await document_symbols(ctx, "a.py")
+            result = await document_symbols(ctx, "test.py")
+            assert "LSP is not available" in result
+        asyncio.run(run())
 
-        result = asyncio.run(run())
-        assert result.startswith("error:")
-        assert "LSP is not available" in result
-
-    def test_document_symbols_with_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_document_symbols_calls_runtime_function(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.document_symbols") as mock_run:
-                mock_run.return_value = "2 symbol(s)\n  Function foo  1:1\n  Function bar  5:1"
-                return await document_symbols(ctx, "a.py")
+            with patch("tools.lsp.run_lsp.document_symbols") as mock_fn:
+                mock_fn.return_value = "5 symbol(s)"
+                await document_symbols(ctx_with_lsp, "test.py")
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                )
+        asyncio.run(run())
 
-        result = asyncio.run(run())
-        assert "symbol" in result.lower() or result.startswith("No") or result.startswith("2")
-
-    def test_document_symbols_with_nested_path(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_document_symbols_returns_result(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.document_symbols") as mock_run:
-                mock_run.return_value = "ok"
-                await document_symbols(ctx, "src/foo/bar.py")
-                args = mock_run.call_args[0]
-                assert args[2] == "src/foo/bar.py"
-
+            expected = "Function foo  10:2"
+            with patch("tools.lsp.run_lsp.document_symbols") as mock_fn:
+                mock_fn.return_value = expected
+                result = await document_symbols(ctx_with_lsp, "test.py")
+                assert result == expected
         asyncio.run(run())
 
 
 class TestRenameSymbol:
-    """Tests for rename_symbol tool wrapper."""
+    """Tests for rename_symbol tool."""
 
-    def test_rename_symbol_without_lsp(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = None
-
+    def test_rename_symbol_without_lsp(self, ctx):
         async def run():
-            return await rename_symbol(ctx, "a.py", 1, 1, "new_name")
-
-        result = asyncio.run(run())
-        assert result.startswith("error:")
-        assert "LSP is not available" in result
-
-    def test_rename_symbol_returns_string_error(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
-        async def run():
-            with patch("tools.lsp.run_lsp.rename_symbol") as mock_run:
-                mock_run.return_value = "error: rename failed"
-                return await rename_symbol(ctx, "a.py", 1, 1, "new_name")
-
-        result = asyncio.run(run())
-        assert result == "error: rename failed"
-
-    def test_rename_symbol_passes_all_params(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
-        async def run():
-            with patch("tools.lsp.run_lsp.rename_symbol") as mock_run:
-                mock_run.return_value = "ok"
-                await rename_symbol(ctx, "test.py", 10, 20, "renamed_var")
-                args = mock_run.call_args[0]
-                assert args[2] == "test.py"
-                assert args[3] == 10
-                assert args[4] == 20
-                assert args[5] == "renamed_var"
-
+            result = await rename_symbol(ctx, "test.py", 1, 1, "new_name")
+            assert "LSP is not available" in result
         asyncio.run(run())
 
-    def test_rename_symbol_with_workspace_edit_payload(self, tmp_path):
-        """Test when rename_symbol returns a workspace edit dict."""
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_rename_symbol_when_runtime_returns_string(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.rename_symbol") as mock_run, \
-                 patch("tools.lsp.normalize_workspace_edit") as mock_norm, \
-                 patch("tools.lsp.apply_workspace_edit") as mock_apply:
-                # Return a dict (workspace edit) instead of string
-                mock_run.return_value = {"changes": {}}
-                mock_norm.return_value = {}
-                mock_apply.return_value = "ok: renamed"
-                result = await rename_symbol(ctx, "a.py", 1, 1, "new_name")
-                # Should try to normalize and apply
-                assert mock_norm.called
-
+            with patch("tools.lsp.run_lsp.rename_symbol") as mock_fn:
+                mock_fn.return_value = "error: something went wrong"
+                result = await rename_symbol(ctx_with_lsp, "test.py", 1, 1, "new_name")
+                assert result == "error: something went wrong"
         asyncio.run(run())
 
-    def test_rename_symbol_normalize_error(self, tmp_path):
-        """Test when normalize_workspace_edit raises an exception."""
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_rename_symbol_converts_int_params(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.rename_symbol") as mock_run, \
-                 patch("tools.lsp.normalize_workspace_edit") as mock_norm:
-                mock_run.return_value = {"changes": {}}
-                mock_norm.side_effect = ValueError("bad workspace edit")
-                result = await rename_symbol(ctx, "a.py", 1, 1, "new_name")
-                assert result.startswith("error:")
-                assert "bad workspace edit" in result
-
+            with patch("tools.lsp.run_lsp.rename_symbol") as mock_fn:
+                mock_fn.return_value = "error: test"
+                await rename_symbol(ctx_with_lsp, "test.py", "5", "10", "new_name")
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                    5,
+                    10,
+                    "new_name",
+                )
         asyncio.run(run())
 
-    def test_rename_symbol_empty_edit(self, tmp_path):
-        """Test when normalize_workspace_edit returns empty dict."""
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_rename_symbol_handles_workspace_edit(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.rename_symbol") as mock_run, \
-                 patch("tools.lsp.normalize_workspace_edit") as mock_norm:
-                mock_run.return_value = {"changes": {}}
-                mock_norm.return_value = {}  # empty
-                result = await rename_symbol(ctx, "a.py", 1, 1, "new_name")
-                assert result.startswith("error:")
-                assert "no file edits" in result
-
+            # Mock the runtime function to return a workspace edit payload
+            workspace_edit = {
+                "changes": {
+                    "file:///test/file.py": [
+                        {
+                            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+                            "newText": "new_name",
+                        }
+                    ]
+                }
+            }
+            with patch("tools.lsp.run_lsp.rename_symbol") as mock_fn:
+                mock_fn.return_value = workspace_edit
+                with patch("tools.lsp.normalize_workspace_edit") as mock_normalize:
+                    mock_normalize.return_value = {}
+                    with patch("tools.lsp.apply_workspace_edit") as mock_apply:
+                        mock_apply.return_value = "applied"
+                        result = await rename_symbol(ctx_with_lsp, "test.py", 1, 1, "new_name")
+                        assert result == "applied"
         asyncio.run(run())
 
-    def test_rename_symbol_with_string_coords(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_rename_symbol_handles_normalize_exception(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.rename_symbol") as mock_run:
-                mock_run.return_value = "ok"
-                await rename_symbol(ctx, "a.py", "30", "40", "new_name")
-                args = mock_run.call_args[0]
-                assert args[3] == 30
-                assert args[4] == 40
-
+            workspace_edit = {"changes": {}}
+            with patch("tools.lsp.run_lsp.rename_symbol") as mock_fn:
+                mock_fn.return_value = workspace_edit
+                with patch("tools.lsp.normalize_workspace_edit") as mock_normalize:
+                    mock_normalize.side_effect = ValueError("invalid edit")
+                    result = await rename_symbol(ctx_with_lsp, "test.py", 1, 1, "new_name")
+                    assert "error: invalid edit" in result
         asyncio.run(run())
 
-
-class TestGotoDefinitionEdgeCases:
-    """Edge cases and error handling for goto_definition."""
-
-    def test_goto_definition_with_int_zero(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_rename_symbol_handles_empty_grouped_edits(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.goto_definition") as mock_run:
-                mock_run.return_value = "ok"
-                await goto_definition(ctx, "a.py", 0, 0)
-                args = mock_run.call_args[0]
-                # 0 is treated as 0, not defaulted
-                assert args[3] == 0
-                assert args[4] == 0
-
+            workspace_edit = {"changes": {}}
+            with patch("tools.lsp.run_lsp.rename_symbol") as mock_fn:
+                mock_fn.return_value = workspace_edit
+                with patch("tools.lsp.normalize_workspace_edit") as mock_normalize:
+                    mock_normalize.return_value = {}
+                    result = await rename_symbol(ctx_with_lsp, "test.py", 1, 1, "new_name")
+                    assert "error: language server returned no file edits" in result
         asyncio.run(run())
 
-
-class TestFindReferencesEdgeCases:
-    """Edge cases and error handling for find_references."""
-
-    def test_find_references_empty_string_defaults(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
+    def test_rename_symbol_with_empty_string_params(self, ctx_with_lsp):
         async def run():
-            with patch("tools.lsp.run_lsp.find_references") as mock_run:
-                mock_run.return_value = "ok"
-                await find_references(ctx, "a.py", "", None)
-                args = mock_run.call_args[0]
-                assert args[3] == 1  # default
-                assert args[4] == 1  # default
-
-        asyncio.run(run())
-
-
-class TestHoverEdgeCases:
-    """Edge cases and error handling for hover."""
-
-    def test_hover_negative_coords(self, tmp_path):
-        ctx = ToolContext(
-            workspace=tmp_path,
-            files=None,
-            journal=None,
-            session_id="test",
-            config=None,
-        )
-        ctx.lsp = MagicMock()
-
-        async def run():
-            with patch("tools.lsp.run_lsp.hover") as mock_run:
-                mock_run.return_value = "ok"
-                await hover(ctx, "a.py", -1, -5)
-                args = mock_run.call_args[0]
-                assert args[3] == -1
-                assert args[4] == -5
-
+            with patch("tools.lsp.run_lsp.rename_symbol") as mock_fn:
+                mock_fn.return_value = "error: test"
+                await rename_symbol(ctx_with_lsp, "test.py", "", "", "new_name")
+                mock_fn.assert_called_once_with(
+                    ctx_with_lsp.workspace,
+                    ctx_with_lsp.lsp,
+                    "test.py",
+                    1,
+                    1,
+                    "new_name",
+                )
         asyncio.run(run())
