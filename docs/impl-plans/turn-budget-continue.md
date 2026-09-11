@@ -59,7 +59,7 @@ Invalid `turn_continue` warns and falls back to `prompt`. `never` is for CI. The
 
 - `never` or no `ask_user` → `max_turns` (handoff). Timeout / empty / unknown answers also hand off. Do not spend a slice unattended.
 - Else `PromptBroker.ask` `kind=choice` with `continue` / `handoff` / `stop`, default `handoff`.
-- **continue** (`continues < max_continues`): `max_turns += turn_slice`, append a grant line, keep looping. Next `AgentStateChanged` carries the new ceiling.
+- **continue** (`continues < max_continues`): `max_turns += turn_slice` for this `run()` only, append a grant line, keep looping. Next `AgentStateChanged` carries the new ceiling. The original cap is restored when `run()` returns so a later orch turn does not inherit the grant.
 - **stop** → `_exit_status = stopped`.
 - Exhausted continues → forced handoff, no fourth prompt.
 

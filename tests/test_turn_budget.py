@@ -141,7 +141,8 @@ def test_continue_bumps_ceiling_keeps_history_then_finishes():
         text = await loop.run("original task")
         assert text == "finished leftover"
         assert loop._exit_status == "ok"
-        assert loop._config.max_turns == 5
+        assert loop._config.max_turns == 3
+        assert any(turn == 4 and max_turns == 5 for _, turn, max_turns in states)
         assert ask.asked and ask.asked[0]["kind"] == "choice"
         assert ask.asked[0]["choices"] == ["continue", "handoff", "stop"]
         assert ask.asked[0]["default"] == "handoff"
@@ -153,7 +154,29 @@ def test_continue_bumps_ceiling_keeps_history_then_finishes():
             CONTINUE_GRANT.format(slice=2) == item.get("content")
             for item in loop._history
         )
-        assert any(turn == 4 and max_turns == 5 for _, turn, max_turns in states)
+
+    asyncio.run(run())
+
+
+def test_continue_does_not_leak_budget_to_next_run():
+    async def run():
+        ask = _ScriptedAsk(["continue"])
+        loop = _loop(
+            _AlwaysPing(finish_after=3, text="done"),
+            max_turns=3,
+            turn_slice=2,
+            ask_user=ask,
+        )
+        await loop.run("first")
+        assert loop._config.max_turns == 3
+        loop._history.clear()
+        provider = loop._llm
+        provider.calls = 0
+        provider.finish_after = None
+        text = await loop.run("second")
+        assert loop._exit_status == "max_turns"
+        assert "stopped after 3 tool turns" in text
+        assert loop._config.max_turns == 3
 
     asyncio.run(run())
 
@@ -188,8 +211,9 @@ def test_stop_exit_status():
     async def run():
         ask = _ScriptedAsk(["stop"])
         loop = _loop(_AlwaysPing(), max_turns=2, ask_user=ask)
-        await loop.run("task")
+        text = await loop.run("task")
         assert loop._exit_status == "stopped"
+        assert text == "stopped by user request"
         assert ask.asked
 
     asyncio.run(run())
@@ -231,17 +255,25 @@ def test_unknown_answer_is_handoff():
 def test_fourth_cap_after_three_continues_is_forced_handoff():
     async def run():
         ask = _ScriptedAsk(["continue", "continue", "continue", "continue"])
+        states = []
         loop = _loop(
             _AlwaysPing(),
             max_turns=2,
             turn_slice=2,
             max_continues=3,
             ask_user=ask,
+            hooks=AgentHooks(
+                on_state=lambda state, turn, max_turns: states.append(
+                    (state, turn, max_turns)
+                )
+            ),
         )
-        await loop.run("task")
+        text = await loop.run("task")
         assert loop._exit_status == "max_turns"
+        assert "stopped after 8 tool turns" in text
         assert len(ask.asked) == 3
-        assert loop._config.max_turns == 8
+        assert loop._config.max_turns == 2
+        assert any(max_turns == 8 for _, _, max_turns in states)
 
     asyncio.run(run())
 

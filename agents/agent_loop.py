@@ -284,6 +284,7 @@ class AgentLoop:
         turn = 0
         continues = 0
         closer_ceilings: set[int] = set()
+        original_max_turns = self._config.max_turns
         try:
             await self._maybe_compact()
             while turn < self._config.max_turns:
@@ -321,6 +322,14 @@ class AgentLoop:
                 self._emit_message(last_text or "")
                 self._exit_status = "ok"
                 return last_text
+            if last_text:
+                final = last_text
+            elif self._exit_status == "stopped":
+                final = "stopped by user request"
+            else:
+                final = f"stopped after {self._config.max_turns} tool turns"
+            self._emit_message(final)
+            return final
         except asyncio.CancelledError:
             del self._history[marker:]
             self._history.append({"role": "user", "content": task})
@@ -331,9 +340,8 @@ class AgentLoop:
         except Exception:
             del self._history[marker:]
             raise
-        final = last_text or f"stopped after {self._config.max_turns} tool turns"
-        self._emit_message(final)
-        return final
+        finally:
+            self._config.max_turns = original_max_turns
 
     def _maybe_inject_closer(self, turn: int, closer_ceilings: set[int]) -> None:
         ceiling = int(self._config.max_turns or 0)
