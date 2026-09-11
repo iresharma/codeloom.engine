@@ -517,7 +517,7 @@ class Orchestrator(AgentLoop):
                 survey_paths=survey_paths,
                 store=self._ctx.workspace,
             )
-        except OSError:
+        except Exception:  # noqa: BLE001
             pass
         self._shutdown_child_lsp(agent_id)
         owns_worktree = agent_id in self._worktrees
