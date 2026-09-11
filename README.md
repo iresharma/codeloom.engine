@@ -329,7 +329,7 @@ The user talks only to the **orchestrator** (`agents/orchestrator.py`), which is
 
 A spawn is fire-and-forget. The personality tool returns immediately with `agent_id` (and `worktree` / `branch` for writers). The child runs in the background with a fresh history and an allowlisted tool set. When it finishes, `compress_for_parent` turns its transcript into an `AgentResult` (`status`, `summary`, `outcome`, `files_touched`, `leftover_questions`, `missing_checks`). `files_touched` is successful edits, not reads. `leftover_questions` is parsed from labeled `leftover:` / `leftover_questions:` lines in the LLM report (or the child's closer). That string is posted to the orch as an `engine` chat line and, if the orch is idle, starts a follow-up orch turn so it can brief the user or spawn the next step. Child tokens stream live as `ChatMessageStarted` / `ChatMessageDelta` / `ChatMessageAdded` with `agent_id` set; they never persist in orch chat history.
 
-`AgentLoop` is still an OpenAI-style tool-calling loop. The orch is capped at `EngineConfig.max_turns` (default 16). Each child uses its profile `max_turns` (default 32) so a survey or edit can finish instead of cutting off mid-investigation. The orch may emit several personality calls in one model turn; those children run concurrently. A child's own tools stay sequential so read-before-write cannot race. `EngineConfig.max_spawns_per_turn` (default 8) caps how many children may be live at once.
+`AgentLoop` is still an OpenAI-style tool-calling loop. The orch is capped at `EngineConfig.max_turns` (default 16). Each child uses its profile `max_turns` (default 32). Hitting the cap is a checkpoint, not a kill: the engine asks **continue** (same history, another `turn_slice` of 16, at most `max_continues` of 3), **handoff** (orch may spawn one writer with leftover), or **stop**. `ENGINE_TURN_CONTINUE=never` skips the prompt and hands off. The orch may emit several personality calls in one model turn; those children run concurrently. A child's own tools stay sequential so read-before-write cannot race. `EngineConfig.max_spawns_per_turn` (default 8) caps how many children may be live at once.
 
 `coder` and `tester` run in a git worktree (`workspace/.engine/worktrees/<agent_id>` on branch `engine/<profile>/<agent_id>`) so two writers — or a writer and your dirty checkout — do not collide. `reviewer` joins that worktree so `git_diff` sees the writer's changes. When the writer finishes, uncommitted edits are committed on that branch, then the engine prompts to **merge**, **open a PR**, **keep**, or **discard**. Natural-language replies such as "please merge it" count. A `WorktreeSettled` event and an `engine` chat line report what happened. Empty worktrees (no unique commits and a clean tree) are removed without asking. After a keep — or if the prompt was missed — the orch must call `settle_worktree` rather than spawn another coder; writers cannot check out the user's branch. Leftover engine worktrees are recovered on session start so a later merge/PR still finds them. `ask`, `researcher`, and `debugger` use the main workspace. If the workspace is not a git repo, spawn still starts on the main tree.
 
@@ -494,11 +494,11 @@ can edit a tool and pick it up by restarting the session — no server restart.
 | `web_fetch` | HTTP GET. HTML becomes markdown (main/article, chrome dropped). `github.com` URLs are refused. SPA pages hint at debugger `browser_open`. |
 | `web_search` | Brave Search if `BRAVE_API_KEY` is set; otherwise an error. |
 
-**Memory.** Every personality (and the orch) can record lasting workspace facts. Reads and edits auto-touch path + SHA; `remember` stores notes and decisions. Stale file notes are flagged when the on-disk hash no longer matches.
+**Memory.** Every personality (and the orch) can record lasting workspace facts. `remember` upserts a file note (`purpose` / `entry_points` / `constraints`) or a decision. Ask, coder, and researcher briefings are also ingested automatically on finish. Reads and edits only update `seen_sha` on files that already have a note. Stale file notes are flagged when the on-disk hash no longer matches.
 
 | Tool | Purpose |
 |---|---|
-| `remember` | Upsert a file blurb (`section=files` + `path`) or append an engineering / product / CI/CD / other decision. |
+| `remember` | Upsert a file blurb (`section=files` + `path`, optional `purpose` / `entry_points` / `constraints`) or append an engineering / product / CI/CD / other decision. |
 
 **Skills.** Every personality (and the orch) can load a `SKILL.md` body.
 
@@ -734,7 +734,7 @@ Everything lives in `{workspace}/.engine/`:
 |---|---|
 | `engine.sock` | Unix domain socket. Removed on clean shutdown. |
 | `session.db` | SQLite: `sessions` and `edits` tables. |
-| `memory.json` | Structured workspace memory: file notes keyed by SHA-256, plus engineering / product / CI/CD / other decisions. Injected into every agent prompt. |
+| `memory.json` | Structured workspace memory: file notes (`purpose` / `entry_points` / `constraints`) keyed by SHA-256, plus engineering / product / CI/CD / other decisions. Filled by `remember` and by ingesting ask/coder/researcher briefings. Injected into every agent prompt. |
 
 The `sessions` table holds `id`, `json`, `created_at`, `saved_at`. Saves are
 upserts. Only durable state is persisted — the file tree, git state, and
@@ -742,10 +742,12 @@ detected language are stripped before writing, since all three are recomputed
 from disk on load. Sessions are listed newest-saved-first.
 
 State is persisted after every user message, agent reply, file open, file
-close, and on shutdown. File memory is updated on `read_file` and successful
-edits (`touch`); richer notes and decisions are written only when an agent
-calls `remember`. A file note is marked `STALE` when the current disk hash
-does not match the hash stored with the note.
+close, and on shutdown. File notes and decisions are written when an agent
+calls `remember`, and when ask / coder / researcher finish (the labeled
+briefing is ingested with no extra model call). `touch` on `read_file` and
+successful edits only refreshes `seen_sha` for files that already have a
+note; empty touches are not stored. A file note is marked `STALE` when the
+current disk hash does not match the hash stored with the note.
 
 ---
 
@@ -1025,7 +1027,7 @@ describe those implementations to a model. The suite exercises
 | Limit | Value | Where |
 |---|---|---|
 | NDJSON line | 8 MiB | `protocol/codec.py` |
-| Agent tool turns | orch 16, children 32 | `EngineConfig.max_turns` / `AgentProfile.max_turns` |
+| Agent tool turns | orch 16, children 32; cap is a continue/handoff/stop checkpoint (slice 16, max 3 continues) | `EngineConfig.max_turns` / `turn_slice` / `max_continues` / `AgentProfile.max_turns` |
 | Live subagents | 8 | `EngineConfig.max_spawns_per_turn` |
 | Subscriber buffer | 4096 items / 1 MiB | `runtime/subscriber.py` |
 | Per-event soft limit | 512 KiB | `EVENT_SOFT_LIMIT` |

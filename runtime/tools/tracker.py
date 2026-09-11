@@ -12,3 +12,6 @@ class FileTracker:
 
     def get(self, rel: str) -> str | None:
         return self._shas.get(rel)
+
+    def paths(self) -> list[str]:
+        return list(self._shas)

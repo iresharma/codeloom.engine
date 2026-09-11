@@ -221,6 +221,11 @@ this personality will not do.
 `.engine/memory.json`). Subagents freeze that system text on the first model call so
 prompt-cache prefixes stay stable; `remember()` during the child's own run is visible
 as a tool result, not as a rewritten system block. The orchestrator re-renders every turn.
+Ask, coder, and researcher briefings are ingested into the main workspace
+`memory.json` when the child finishes (hashed in the child's tree, including
+worktrees). Mid-run `remember` can still write a better structured note; ingest
+will not overwrite a **fresh** file note. STALE notes (disk hash ≠ `note_sha`)
+are rewritten from the briefing.
 - `tool_names` — allowlist from `discover_tools()`. Unknown names become
 registry errors, not a crash. Never include other personality names. Include
 `MEMORY` (`remember`) unless the personality truly has nothing to persist.
@@ -230,7 +235,7 @@ list is matched against the relative path (`**/tests/**`, `**/*.md`, …).
 - `required_tools` — if these names never appear in the child's tool trace,
 `AgentResult.status` is `incomplete` (the child still exits). Used by `coder`
 (`get_diagnostics`) and `tester` (`run_command`).
-- `max_turns` — child's own cap, independent of the orch. Built-in profiles use 32. Do not lower researcher without `Stats.agent_runs` showing frequent `max_turns`; that would `incomplete` and invite a respawn.
+- `max_turns` — child's own cap, independent of the orch. Built-in profiles use 32. Hitting it prompts continue (same child, another `turn_slice`), handoff (orch may spawn one writer with leftover), or stop (no respawn). `ENGINE_TURN_CONTINUE=never` skips the prompt and hands off. Do not lower researcher without `Stats.agent_runs` showing frequent `max_turns`; spawn-once still blocks a sibling researcher, so a hard cut just wastes the survey.
 - `model` — optional OpenRouter model id for this personality. `ask` and `tester` use Haiku; researcher/coder/debugger/reviewer inherit `OPENROUTER_MODEL`. `OPENROUTER_CHILD_MODEL` overrides only profiles that leave `model` unset.
 - `needs_worktree` — if true, the child runs in a git worktree on a new branch
 under `.engine/worktrees/` so writers do not collide. `coder` and `tester`

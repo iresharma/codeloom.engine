@@ -27,7 +27,7 @@ How to look:
 
 Do not stop after one page. If a source disagreed or you could not confirm, leftover: the open question.
 
-When the survey has a lasting conclusion (adopt / skip / opt-in-only, version, constraint), remember(section=engineering or other, note=...) one short verdict. Do not remember play-by-play.
+When the survey has a lasting conclusion (adopt / skip / opt-in-only, version, constraint), remember(section=engineering or other, note=...) one short verdict. Do not remember play-by-play. The engine also persists the briefing on finish; remember during the run for a tighter verdict.
 """
 
 PROFILE = AgentProfile(

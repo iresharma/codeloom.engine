@@ -12,6 +12,7 @@ from agents.hooks import AgentHooks
 from llm.openrouter import OpenRouterLLM
 from llm.provider import Usage
 from runtime.config import EngineConfig
+from runtime.prompts import PromptTimeout
 from runtime.skills.catalog import render_catalog
 from runtime.store.memory import render_memory
 from tools.base import ToolContext
@@ -64,6 +65,18 @@ DEFAULT_SYSTEM = (
     "denial is an answer, not a retry prompt. Old tool results get "
     "trimmed; re-run the tool rather than guessing at what it said."
 )
+
+CLOSER_MESSAGE = (
+    "You have two tool turns left. Finish the current edit, or write a closer "
+    "with labeled leftover: (paths, done, next). Do not start new exploration."
+)
+CONTINUE_GRANT = (
+    "The user granted another {slice} tool turns. Continue from leftover. "
+    "Do not re-explore files you already read."
+)
+TURN_CONTINUE_CHOICES = ("continue", "handoff", "stop")
+CONTINUE_ALIASES = frozenset({"continue", "c", "yes", "y", "resume"})
+STOP_ALIASES = frozenset({"stop", "s"})
 
 
 class AgentLoop:
@@ -156,6 +169,7 @@ class AgentLoop:
         self._ctx.skills = skills
         self._ctx.unlocked_skills = self._unlocked_skills
         self._ctx.activate_skill = self.activate_skill
+        self._exit_status = "ok"
 
     def hydrate(self, messages) -> None:
         self._history = []
@@ -266,19 +280,57 @@ class AgentLoop:
         self._history.append({"role": "user", "content": task})
         schemas = self._tools.schemas()
         last_text = ""
+        self._exit_status = "ok"
+        turn = 0
+        continues = 0
+        closer_ceilings: set[int] = set()
+        original_max_turns = self._config.max_turns
         try:
             await self._maybe_compact()
-            for turn in range(self._config.max_turns):
+            while turn < self._config.max_turns:
+                self._maybe_inject_closer(turn, closer_ceilings)
                 self._state("thinking", turn + 1)
                 result = await self._complete(self._build_messages(), schemas)
                 if result.tool_calls:
                     await self._dispatch(result)
                     await self._maybe_compact()
+                    turn += 1
+                    if turn >= self._config.max_turns:
+                        action = await self._offer_continue(continues)
+                        if action == "continue":
+                            slice_n = max(
+                                1,
+                                int(getattr(self._config, "turn_slice", 16) or 16),
+                            )
+                            self._config.max_turns += slice_n
+                            continues += 1
+                            self._history.append(
+                                {
+                                    "role": "user",
+                                    "content": CONTINUE_GRANT.format(slice=slice_n),
+                                }
+                            )
+                            continue
+                        if action == "stop":
+                            self._exit_status = "stopped"
+                        else:
+                            self._exit_status = "max_turns"
+                        break
                     continue
                 last_text = result.text
                 self._history.append({"role": "assistant", "content": last_text})
                 self._emit_message(last_text or "")
                 return last_text
+            if self._exit_status == "ok":
+                self._exit_status = "max_turns"
+            if last_text:
+                final = last_text
+            elif self._exit_status == "stopped":
+                final = "stopped by user request"
+            else:
+                final = f"stopped after {self._config.max_turns} tool turns"
+            self._emit_message(final)
+            return final
         except asyncio.CancelledError:
             del self._history[marker:]
             self._history.append({"role": "user", "content": task})
@@ -289,9 +341,49 @@ class AgentLoop:
         except Exception:
             del self._history[marker:]
             raise
-        final = last_text or f"stopped after {self._config.max_turns} tool turns"
-        self._emit_message(final)
-        return final
+        finally:
+            self._config.max_turns = original_max_turns
+
+    def _maybe_inject_closer(self, turn: int, closer_ceilings: set[int]) -> None:
+        ceiling = int(self._config.max_turns or 0)
+        if ceiling < 3 or turn != ceiling - 2 or ceiling in closer_ceilings:
+            return
+        closer_ceilings.add(ceiling)
+        self._history.append({"role": "user", "content": CLOSER_MESSAGE})
+
+    async def _offer_continue(self, continues: int) -> str:
+        max_continues = int(getattr(self._config, "max_continues", 3) or 0)
+        mode = str(
+            getattr(self._config, "turn_continue", "prompt") or "prompt"
+        ).strip().lower()
+        if continues >= max_continues or mode == "never":
+            return "handoff"
+        ask = getattr(self._ctx, "ask_user", None)
+        if ask is None:
+            return "handoff"
+        slice_n = max(1, int(getattr(self._config, "turn_slice", 16) or 16))
+        ceiling = self._config.max_turns
+        question = (
+            f"Turn budget exhausted ({ceiling}/{ceiling}). Continue for another "
+            f"{slice_n} turns, hand off leftover to the orchestrator, or stop?"
+        )
+        try:
+            raw = await ask(
+                question,
+                kind="choice",
+                choices=list(TURN_CONTINUE_CHOICES),
+                default="handoff",
+                agent_id=self.agent_id,
+                profile=self.profile,
+            )
+        except PromptTimeout:
+            return "handoff"
+        answer = str(raw or "").strip().lower()
+        if answer in CONTINUE_ALIASES:
+            return "continue"
+        if answer in STOP_ALIASES:
+            return "stop"
+        return "handoff"
 
     async def _complete(self, messages: list[dict], schemas):
         self._message_id = uuid4().hex

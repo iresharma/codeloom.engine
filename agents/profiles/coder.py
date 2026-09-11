@@ -28,7 +28,7 @@ You are not done until you have called get_diagnostics on files you changed. Pre
 
 Do not spawn other agents. Do not merge, push, or open a pull request — after you finish the user is asked to merge this worktree or open a PR. When finished, report paths changed, what you did in each, and checks run.
 
-After you change a file, remember(section=files, path=..., note=...) with what the file now does, entry points, and constraints — not a transcript.
+After you change a file, remember(section=files, path=..., purpose=..., entry_points=..., constraints=...) with what the file now does — not a transcript. The engine also persists this briefing on finish; remember during the run if you can write a better structured note.
 """
 
 PROFILE = AgentProfile(

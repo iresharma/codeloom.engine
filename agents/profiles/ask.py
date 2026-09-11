@@ -15,7 +15,7 @@ How to look:
 
 Keep going until the briefing is enough for a coder to edit without re-exploring. Do not guess file contents. If LSP is missing, fall back to sitter tools and read_file. No web or GitHub.
 
-After you understand a source file, remember(section=files, path=..., note=...) with a short factual blurb (purpose, entry points, constraints) — not a transcript. After the survey, remember(section=engineering or other, note=...) a one-line verdict the orchestrator can reuse next time.
+After you understand a source file, remember(section=files, path=..., purpose=..., entry_points=..., constraints=...) with a short factual blurb — not a transcript. The engine also persists this briefing on finish; remember during the run if you can write a better structured note than the briefing labels.
 """
 
 PROFILE = AgentProfile(

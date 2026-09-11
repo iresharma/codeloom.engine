@@ -97,6 +97,8 @@ def test_orch_and_profile_allowlists():
 
     assert "GitHub repo" in ORCH_SYSTEM
     assert "For external docs, spawn researcher" not in ORCH_SYSTEM
+    assert "Check workspace memory before spawning ask" in ORCH_SYSTEM
+    assert "For code questions, spawn ask" not in ORCH_SYSTEM
     debugger = tools.subset(profiles.get("debugger").tool_names)
     assert "gh_pr_comment" in debugger.names()
     assert "http_request" in debugger.names()
