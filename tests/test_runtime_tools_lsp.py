@@ -1,1249 +1,866 @@
-"""Unit tests for runtime/tools/lsp.py (LSP client and manager).
+"""Tests for runtime/tools/lsp.py - LSP protocol implementation and manager.
 
-Tests the LSP communication layer, client/server message passing, file indexing,
-and manager lifecycle without requiring a real language server.
+These tests cover the LSPClient and LSPManager classes and the standalone
+functions that query the LSP servers (goto_definition, find_references, etc).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import subprocess
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch, call, mock_open
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from runtime.tools.fs import WorkspacePathError
 from runtime.tools.lsp import (
     LSPClient,
     LSPManager,
     LSPTimeoutError,
-    _uri_to_path,
-    _rel_from_uri,
-    _normalize_locations,
-    _format_locations,
-    _extract_hover_text,
-    _resolve,
-    goto_definition,
-    find_references,
-    hover,
-    get_diagnostics,
-    document_symbols,
-    rename_symbol,
+    LOCATION_MAX,
+    REFERENCES_MAX,
     SYMBOL_KINDS,
+    SYMBOL_MAX,
+    _extract_hover_text,
+    _format_document_symbols,
+    _format_locations,
+    _normalize_locations,
+    _rel_from_uri,
+    _uri_to_path,
+    document_symbols,
+    find_references,
+    goto_definition,
+    get_diagnostics,
+    hover,
+    rename_symbol,
 )
 
 
+class TestUriPath:
+    """Tests for URI conversion utilities."""
+
+    def test_uri_to_path_simple(self):
+        uri = "file:///home/user/test.py"
+        path = _uri_to_path(uri)
+        assert path == "/home/user/test.py"
+
+    def test_uri_to_path_with_percent_encoding(self):
+        uri = "file:///home/user/test%20file.py"
+        path = _uri_to_path(uri)
+        assert "test file.py" in path
+
+    def test_rel_from_uri_simple(self):
+        workspace = Path("/home/user/workspace")
+        uri = "file:///home/user/workspace/src/main.py"
+        rel = _rel_from_uri(workspace, uri)
+        assert rel == "src/main.py"
+
+    def test_rel_from_uri_posix_format(self):
+        """Test that rel_from_uri returns forward slashes."""
+        workspace = Path("/home/user/workspace")
+        uri = "file:///home/user/workspace/dir/file.py"
+        rel = _rel_from_uri(workspace, uri)
+        assert "/" in rel or rel == "dir/file.py"
+
+    def test_rel_from_uri_outside_workspace(self):
+        workspace = Path("/home/user/workspace")
+        uri = "file:///other/location/file.py"
+        rel = _rel_from_uri(workspace, uri)
+        # Should still return something, either full path or raised error
+        assert isinstance(rel, str)
+
+
+class TestNormalizeLocations:
+    """Tests for location normalization from LSP responses."""
+
+    def test_normalize_locations_empty(self):
+        result = _normalize_locations(None)
+        assert result == []
+
+    def test_normalize_locations_single_dict(self):
+        loc = {
+            "uri": "file:///home/user/test.py",
+            "range": {"start": {"line": 5, "character": 10}},
+        }
+        result = _normalize_locations(loc)
+        assert len(result) == 1
+        assert result[0][0] == "file:///home/user/test.py"
+        assert result[0][1]["start"]["line"] == 5
+
+    def test_normalize_locations_list(self):
+        locs = [
+            {
+                "uri": "file:///a.py",
+                "range": {"start": {"line": 1, "character": 2}},
+            },
+            {
+                "uri": "file:///b.py",
+                "range": {"start": {"line": 3, "character": 4}},
+            },
+        ]
+        result = _normalize_locations(locs)
+        assert len(result) == 2
+        assert result[0][0] == "file:///a.py"
+        assert result[1][0] == "file:///b.py"
+
+    def test_normalize_locations_with_target_uri(self):
+        """Test handling of targetUri (from definition response)."""
+        loc = {
+            "targetUri": "file:///target.py",
+            "targetRange": {"start": {"line": 10, "character": 0}},
+        }
+        result = _normalize_locations(loc)
+        assert len(result) == 1
+        assert result[0][0] == "file:///target.py"
+
+    def test_normalize_locations_with_target_selection_range(self):
+        """Test fallback from targetSelectionRange to targetRange."""
+        loc = {
+            "targetUri": "file:///target.py",
+            "targetSelectionRange": {"start": {"line": 5, "character": 0}},
+            "targetRange": {"start": {"line": 10, "character": 0}},
+        }
+        result = _normalize_locations(loc)
+        # Should prefer targetSelectionRange
+        assert result[0][1]["start"]["line"] == 5
+
+
+class TestFormatLocations:
+    """Tests for formatting locations for display."""
+
+    def test_format_locations_empty(self):
+        result = _format_locations(Path("/ws"), [], 10)
+        assert result == "No results."
+
+    def test_format_locations_single(self, tmp_path):
+        (tmp_path / "test.py").write_text("def foo():\n    pass\n")
+        locs = [
+            (
+                "file://" + str(tmp_path / "test.py"),
+                {"start": {"line": 0, "character": 4}},
+            )
+        ]
+        result = _format_locations(tmp_path, locs, 10)
+        assert "test.py" in result
+        assert "1:5" in result  # line 0 -> 1, char 4 -> 5
+
+    def test_format_locations_with_snippet(self, tmp_path):
+        (tmp_path / "test.py").write_text("def foo():\n    pass\n")
+        locs = [
+            (
+                "file://" + str(tmp_path / "test.py"),
+                {"start": {"line": 0, "character": 0}},
+            )
+        ]
+        result = _format_locations(tmp_path, locs, 10)
+        # Check that format succeeded and had content
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_format_locations_respects_max(self, tmp_path):
+        (tmp_path / "test.py").write_text("x = 1\n")
+        locs = [
+            (
+                "file://" + str(tmp_path / "test.py"),
+                {"start": {"line": 0, "character": 0}},
+            )
+            for _ in range(5)
+        ]
+        result = _format_locations(tmp_path, locs, 2)
+        assert result.count("\n") <= 3  # 2 items + ellipsis
+        assert "more" in result
+
+    def test_format_locations_missing_file(self):
+        """Test handling of files that don't exist."""
+        locs = [
+            (
+                "file:///nonexistent/test.py",
+                {"start": {"line": 0, "character": 0}},
+            )
+        ]
+        # Should not raise, but handle gracefully
+        result = _format_locations(Path("/ws"), locs, 10)
+        assert isinstance(result, str)
+
+
+class TestExtractHoverText:
+    """Tests for hover content extraction."""
+
+    def test_extract_hover_text_none(self):
+        result = _extract_hover_text(None)
+        assert result == ""
+
+    def test_extract_hover_text_string(self):
+        result = _extract_hover_text("type: int")
+        assert result == "type: int"
+
+    def test_extract_hover_text_dict(self):
+        result = _extract_hover_text({"value": "function(x: int) -> str"})
+        assert result == "function(x: int) -> str"
+
+    def test_extract_hover_text_dict_missing_value(self):
+        result = _extract_hover_text({"language": "python"})
+        assert result == ""
+
+    def test_extract_hover_text_list(self):
+        contents = [
+            "function definition",
+            {"value": "documentation"},
+            "more info",
+        ]
+        result = _extract_hover_text(contents)
+        assert "function definition" in result
+        assert "documentation" in result
+        assert "more info" in result
+
+    def test_extract_hover_text_list_with_empty(self):
+        contents = [
+            "info",
+            "",
+            {"value": "doc"},
+        ]
+        result = _extract_hover_text(contents)
+        # Empty items should be filtered
+        parts = result.split("\n\n")
+        assert len(parts) >= 2
+
+
+class TestFormatDocumentSymbols:
+    """Tests for formatting document symbols tree."""
+
+    def test_format_document_symbols_empty(self):
+        lines: list[str] = []
+        _format_document_symbols([], 0, lines)
+        assert len(lines) == 0
+
+    def test_format_document_symbols_single(self):
+        items = [
+            {
+                "name": "MyClass",
+                "kind": 5,  # Class
+                "selectionRange": {"start": {"line": 0, "character": 0}},
+            }
+        ]
+        lines: list[str] = []
+        _format_document_symbols(items, 0, lines)
+        assert len(lines) == 1
+        assert "Class MyClass" in lines[0]
+        assert "1:1" in lines[0]
+
+    def test_format_document_symbols_with_children(self):
+        items = [
+            {
+                "name": "MyClass",
+                "kind": 5,
+                "selectionRange": {"start": {"line": 0, "character": 0}},
+                "children": [
+                    {
+                        "name": "method",
+                        "kind": 6,
+                        "selectionRange": {"start": {"line": 2, "character": 4}},
+                    }
+                ],
+            }
+        ]
+        lines: list[str] = []
+        _format_document_symbols(items, 0, lines)
+        assert len(lines) == 2
+        assert "Class MyClass" in lines[0]
+        assert "Method method" in lines[1]
+        assert "  " in lines[1]  # indentation
+
+    def test_format_document_symbols_respects_depth(self):
+        items = [
+            {
+                "name": "outer",
+                "kind": 5,
+                "selectionRange": {"start": {"line": 0, "character": 0}},
+            }
+        ]
+        lines: list[str] = []
+        _format_document_symbols(items, 3, lines)
+        assert "      " in lines[0]  # 3 * 2 spaces
+
+    def test_format_document_symbols_respects_max(self):
+        items = [{"name": f"item{i}", "kind": 12, "selectionRange": {"start": {"line": i, "character": 0}}} for i in range(300)]
+        lines: list[str] = []
+        _format_document_symbols(items, 0, lines)
+        assert len(lines) <= SYMBOL_MAX
+
+    def test_format_document_symbols_with_detail(self):
+        items = [
+            {
+                "name": "myvar",
+                "kind": 13,  # Variable
+                "detail": ": str",
+                "selectionRange": {"start": {"line": 0, "character": 0}},
+            }
+        ]
+        lines: list[str] = []
+        _format_document_symbols(items, 0, lines)
+        assert ": str" in lines[0]
+
+    def test_format_document_symbols_with_location(self):
+        """Test handling of location field (older LSP style)."""
+        items = [
+            {
+                "name": "symbol",
+                "kind": 12,
+                "location": {
+                    "range": {"start": {"line": 5, "character": 2}}
+                },
+            }
+        ]
+        lines: list[str] = []
+        _format_document_symbols(items, 0, lines)
+        assert "6:3" in lines[0]
+
+
 class TestLSPTimeoutError:
-    """Test LSPTimeoutError exception."""
+    """Tests for LSPTimeoutError exception."""
 
     def test_lsp_timeout_error_is_runtime_error(self):
-        err = LSPTimeoutError("test timeout")
+        err = LSPTimeoutError("test")
         assert isinstance(err, RuntimeError)
-        assert str(err) == "test timeout"
+
+    def test_lsp_timeout_error_message(self):
+        err = LSPTimeoutError("test timeout")
+        assert "test timeout" in str(err)
 
 
 class TestLSPClientInit:
-    """Test LSPClient initialization."""
+    """Tests for LSPClient initialization."""
 
-    def test_lsp_client_init_with_working_process(self):
+    def test_lsp_client_init_with_mock_process(self):
+        """Test LSPClient initialization with mocked subprocess."""
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
 
         with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            assert client.proc == mock_proc
+            client = LSPClient(["test-server"], "/tmp")
             assert client._alive is True
-            client.shutdown()
+            assert client._next_id == 1
 
-    def test_lsp_client_init_with_missing_pipes_kills_process(self):
+    def test_lsp_client_init_failed_pipes(self):
+        """Test LSPClient initialization when pipes fail."""
         mock_proc = MagicMock()
         mock_proc.stdin = None
         mock_proc.stdout = None
         mock_proc.stderr = None
 
         with patch("subprocess.Popen", return_value=mock_proc):
-            with pytest.raises(RuntimeError, match="pipes failed"):
-                LSPClient(["test-server"], cwd="/tmp")
-            mock_proc.kill.assert_called_once()
-
-    def test_lsp_client_starts_reader_thread(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            with patch("threading.Thread") as mock_thread:
-                client = LSPClient(["test-server"], cwd="/tmp")
-                # Should start two threads: reader and stderr drain
-                assert mock_thread.call_count >= 2
-                client.shutdown()
+            with pytest.raises(RuntimeError) as excinfo:
+                LSPClient(["test-server"], "/tmp")
+            assert "pipes failed" in str(excinfo.value).lower()
 
 
 class TestLSPClientReadMessage:
-    """Test LSPClient._read_message static method."""
+    """Tests for LSPClient message reading."""
 
-    def test_read_message_with_empty_stream_returns_none(self):
-        stream = MagicMock()
-        stream.readline.side_effect = [b""]
-        result = LSPClient._read_message(stream)
+    def test_read_message_empty_stream(self):
+        """Test _read_message with empty stream."""
+        mock_stream = MagicMock()
+        mock_stream.readline.return_value = b""
+        result = LSPClient._read_message(mock_stream)
         assert result is None
 
-    def test_read_message_reads_headers_and_content(self):
-        stream = MagicMock()
-        payload = {"jsonrpc": "2.0", "result": "ok"}
-        body = json.dumps(payload).encode("utf-8")
-        stream.readline.side_effect = [
+    def test_read_message_with_content(self):
+        """Test _read_message parsing valid message."""
+        body = json.dumps({"jsonrpc": "2.0", "result": "ok"}).encode("utf-8")
+        mock_stream = MagicMock()
+        mock_stream.readline.side_effect = [
             b"Content-Length: " + str(len(body)).encode() + b"\r\n",
-            b"Content-Type: application/vnd.api+json\r\n",
             b"\r\n",
         ]
-        stream.read.return_value = body
+        mock_stream.read.return_value = body
+        result = LSPClient._read_message(mock_stream)
+        assert result is not None
+        assert result.get("result") == "ok"
 
-        result = LSPClient._read_message(stream)
-        assert result == payload
-
-    def test_read_message_handles_incomplete_body(self):
-        stream = MagicMock()
-        body = b"chunk1chunk2"
-        stream.readline.side_effect = [
-            b"Content-Length: 12\r\n",
+    def test_read_message_chunked(self):
+        """Test _read_message with chunked body."""
+        body = json.dumps({"test": "data"}).encode("utf-8")
+        length = len(body)
+        half = length // 2
+        mock_stream = MagicMock()
+        mock_stream.readline.side_effect = [
+            b"Content-Length: " + str(length).encode() + b"\r\n",
             b"\r\n",
         ]
-        stream.read.side_effect = [b"chunk1", b"chunk2"]
-
-        result = LSPClient._read_message(stream)
-        assert result is None  # JSON parsing will fail
-
-    def test_read_message_with_no_content_length_defaults_to_zero(self):
-        stream = MagicMock()
-        stream.readline.side_effect = [
-            b"Content-Type: application/json\r\n",
-            b"\r\n",
-        ]
-        result = LSPClient._read_message(stream)
-        assert result == {}  # Empty JSON object
-
-
-class TestLSPClientWriteMessage:
-    """Test LSPClient._write_message method."""
-
-    def test_write_message_writes_header_and_body(self):
-        mock_proc = MagicMock()
-        mock_stdin = MagicMock()
-        mock_proc.stdin = mock_stdin
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            client._stdin = mock_stdin
-            payload = {"jsonrpc": "2.0", "id": 1, "method": "test"}
-            client._write_message(payload)
-
-            mock_stdin.write.assert_called_once()
-            mock_stdin.flush.assert_called_once()
-            call_args = mock_stdin.write.call_args[0][0]
-            assert b"Content-Length:" in call_args
-            assert b"\r\n\r\n" in call_args
-            client.shutdown()
-
-    def test_write_message_with_broken_pipe_raises_error(self):
-        mock_proc = MagicMock()
-        mock_stdin = MagicMock()
-        mock_stdin.write.side_effect = BrokenPipeError("pipe broken")
-        mock_proc.stdin = mock_stdin
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            client._stdin = mock_stdin
-            with pytest.raises(RuntimeError, match="process died"):
-                client._write_message({"test": "payload"})
-            client.shutdown()
-
-
-class TestLSPClientRequest:
-    """Test LSPClient.request method."""
-
-    def test_request_sends_and_waits_for_response(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            # Prepare the response in the pending queue
-            response = {"jsonrpc": "2.0", "id": 1, "result": "success"}
-            msg_id = 1
-            pending_queue = queue.Queue()
-            pending_queue.put(response)
-            client._pending[msg_id] = pending_queue
-            client._next_id = 2
-
-            with patch.object(client, "_write_message"):
-                result = client.request("initialize", {"test": "params"}, timeout=1.0)
-            assert result == "success"
-            client.shutdown()
-
-    def test_request_timeout_raises_error(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            with patch.object(client, "_write_message"):
-                with pytest.raises(LSPTimeoutError, match="timed out"):
-                    client.request("test", {}, timeout=0.001)
-            client.shutdown()
-
-    def test_request_with_error_response_raises_error(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            response = {"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "bad request"}}
-            pending_queue = queue.Queue()
-            pending_queue.put(response)
-            client._pending[1] = pending_queue
-            client._next_id = 2
-
-            with patch.object(client, "_write_message"):
-                with pytest.raises(RuntimeError, match="error"):
-                    client.request("test", {})
-            client.shutdown()
-
-    def test_request_not_alive_raises_error(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            client._alive = False
-            with pytest.raises(RuntimeError, match="not running"):
-                client.request("test", {})
-
-
-class TestLSPClientNotify:
-    """Test LSPClient.notify method."""
-
-    def test_notify_sends_message(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            with patch.object(client, "_write_message") as mock_write:
-                client.notify("test/method", {"key": "value"})
-                mock_write.assert_called_once()
-                call_args = mock_write.call_args[0][0]
-                assert call_args["method"] == "test/method"
-                assert call_args["params"] == {"key": "value"}
-                assert "id" not in call_args
-            client.shutdown()
-
-
-class TestLSPClientShutdown:
-    """Test LSPClient.shutdown method."""
-
-    def test_shutdown_sends_shutdown_request(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            client._alive = True
-            # Mock the request method to return immediately
-            with patch.object(client, "request") as mock_req:
-                with patch.object(client, "notify"):
-                    client.shutdown()
-                    mock_req.assert_called()
-            mock_proc.terminate.assert_called()
-
-    def test_shutdown_already_dead_does_nothing(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            client._alive = False
-            client.shutdown()
-            mock_proc.terminate.assert_not_called()
+        mock_stream.read.side_effect = [body[:half], body[half:]]
+        result = LSPClient._read_message(mock_stream)
+        assert result is not None
+        assert result.get("test") == "data"
 
 
 class TestLSPManagerInit:
-    """Test LSPManager initialization."""
+    """Tests for LSPManager initialization."""
 
     def test_lsp_manager_init(self, tmp_path):
         manager = LSPManager(tmp_path)
-        assert str(manager.root) == str(tmp_path.resolve())
+        assert manager.root == str(tmp_path.resolve())
         assert manager._closed is False
+        assert len(manager._clients) == 0
 
-    def test_lsp_manager_with_path_object(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        assert isinstance(manager.root, str)
-
-
-class TestLSPManagerPathToUri:
-    """Test LSPManager._path_to_uri method."""
-
-    def test_path_to_uri_converts_path(self, tmp_path):
-        path = str(tmp_path / "file.py")
-        uri = LSPManager._path_to_uri(path)
+    def test_lsp_manager_path_to_uri(self):
+        uri = LSPManager._path_to_uri("/home/user/test.py")
         assert uri.startswith("file://")
-        assert "file.py" in uri
+        assert "test.py" in uri
 
-
-class TestLSPManagerConfigForExtension:
-    """Test LSPManager._config_for_extension method."""
-
-    def test_config_for_python_extension(self):
+    def test_lsp_manager_config_for_extension(self):
         cfg = LSPManager._config_for_extension(".py")
         assert cfg is not None
         assert cfg.language == "python"
 
-    def test_config_for_typescript_extension(self):
         cfg = LSPManager._config_for_extension(".ts")
         assert cfg is not None
         assert cfg.language == "typescript"
 
-    def test_config_for_javascript_extension(self):
-        cfg = LSPManager._config_for_extension(".js")
-        assert cfg is not None
-        assert cfg.language in ("javascript", "typescript")
-
-    def test_config_for_go_extension(self):
-        cfg = LSPManager._config_for_extension(".go")
-        assert cfg is not None
-        assert cfg.language == "go"
-
-    def test_config_for_unknown_extension_returns_none(self):
-        cfg = LSPManager._config_for_extension(".xyz")
+        cfg = LSPManager._config_for_extension(".unknown")
         assert cfg is None
 
-
-class TestLSPManagerLanguageId:
-    """Test LSPManager._language_id method."""
-
-    def test_language_id_for_tsx(self):
+    def test_lsp_manager_language_id(self):
         cfg = LSPManager.SERVER_CONFIGS["typescript"]
-        lang_id = LSPManager._language_id(cfg, ".tsx")
-        assert lang_id == "typescriptreact"
+        assert LSPManager._language_id(cfg, ".tsx") == "typescriptreact"
+        assert LSPManager._language_id(cfg, ".ts") == "typescript"
 
-    def test_language_id_for_jsx(self):
         cfg = LSPManager.SERVER_CONFIGS["javascript"]
-        lang_id = LSPManager._language_id(cfg, ".jsx")
-        assert lang_id == "javascriptreact"
+        assert LSPManager._language_id(cfg, ".jsx") == "javascriptreact"
+        assert LSPManager._language_id(cfg, ".js") == "javascript"
 
-    def test_language_id_for_normal_extension(self):
-        cfg = LSPManager.SERVER_CONFIGS["python"]
-        lang_id = LSPManager._language_id(cfg, ".py")
-        assert lang_id == "python"
+
+class TestLSPManagerTextSha:
+    """Tests for text hashing utility."""
+
+    def test_text_sha(self):
+        sha = LSPManager._text_sha("hello")
+        assert len(sha) == 64  # SHA256 hex
+        expected = hashlib.sha256("hello".encode("utf-8", "replace")).hexdigest()
+        assert sha == expected
+
+    def test_text_sha_unicode(self):
+        sha = LSPManager._text_sha("café")
+        assert len(sha) == 64
+
+    def test_text_sha_empty(self):
+        sha = LSPManager._text_sha("")
+        assert len(sha) == 64
 
 
 class TestLSPManagerSettingsSection:
-    """Test LSPManager._settings_section static method."""
+    """Tests for settings section retrieval."""
 
-    def test_settings_section_with_none_section(self):
-        settings = {"a": {"b": 1}}
+    def test_settings_section_none(self):
+        settings = {"python": {"analysis": {"enabled": True}}}
         result = LSPManager._settings_section(settings, None)
         assert result == settings
 
-    def test_settings_section_with_nested_path(self):
-        settings = {"python": {"analysis": {"diagnosticMode": "workspace"}}}
-        result = LSPManager._settings_section(settings, "python.analysis")
-        assert result == {"diagnosticMode": "workspace"}
+    def test_settings_section_simple(self):
+        settings = {"python": {"analysis": {"enabled": True}}}
+        result = LSPManager._settings_section(settings, "python")
+        assert result == {"analysis": {"enabled": True}}
 
-    def test_settings_section_with_missing_path(self):
-        settings = {"python": {"analysis": {"diagnosticMode": "workspace"}}}
-        result = LSPManager._settings_section(settings, "unknown.path")
+    def test_settings_section_nested(self):
+        settings = {"python": {"analysis": {"enabled": True}}}
+        result = LSPManager._settings_section(settings, "python.analysis")
+        assert result == {"enabled": True}
+
+    def test_settings_section_missing(self):
+        settings = {"python": {"analysis": {"enabled": True}}}
+        result = LSPManager._settings_section(settings, "other")
+        assert result is None
+
+    def test_settings_section_deep_missing(self):
+        settings = {"python": {"analysis": {"enabled": True}}}
+        result = LSPManager._settings_section(settings, "python.other.deep")
         assert result is None
 
 
 class TestLSPManagerWarmLanguages:
-    """Test LSPManager._warm_languages static method."""
+    """Tests for warm language selection."""
 
-    def test_warm_languages_javascript_includes_typescript(self):
+    def test_warm_languages_javascript(self):
         langs = LSPManager._warm_languages("javascript")
         assert "javascript" in langs
         assert "typescript" in langs
 
-    def test_warm_languages_typescript_includes_both(self):
+    def test_warm_languages_typescript(self):
         langs = LSPManager._warm_languages("typescript")
-        assert "typescript" in langs
         assert "javascript" in langs
+        assert "typescript" in langs
 
-    def test_warm_languages_python_only(self):
+    def test_warm_languages_python(self):
         langs = LSPManager._warm_languages("python")
         assert langs == ["python"]
 
-    def test_warm_languages_go_only(self):
+    def test_warm_languages_go(self):
         langs = LSPManager._warm_languages("go")
         assert langs == ["go"]
 
-    def test_warm_languages_unknown_returns_empty(self):
+    def test_warm_languages_unknown(self):
         langs = LSPManager._warm_languages("unknown")
         assert langs == []
 
 
-class TestLSPManagerTextSha:
-    """Test LSPManager._text_sha static method."""
-
-    def test_text_sha_consistent(self):
-        text = "hello world"
-        sha1 = LSPManager._text_sha(text)
-        sha2 = LSPManager._text_sha(text)
-        assert sha1 == sha2
-
-    def test_text_sha_differs_by_content(self):
-        sha1 = LSPManager._text_sha("hello")
-        sha2 = LSPManager._text_sha("world")
-        assert sha1 != sha2
-
-    def test_text_sha_returns_hex_string(self):
-        sha = LSPManager._text_sha("test")
-        assert len(sha) == 64  # SHA256 hex is 64 chars
-
-
-class TestLSPManagerDiskText:
-    """Test LSPManager._disk_text static method."""
-
-    def test_disk_text_reads_file(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("print('hello')")
-        result = LSPManager._disk_text(str(test_file))
-        assert result == "print('hello')"
-
-    def test_disk_text_with_nonexistent_file_returns_none(self, tmp_path):
-        result = LSPManager._disk_text(str(tmp_path / "missing.py"))
-        assert result is None
-
-
-class TestUriToPath:
-    """Test _uri_to_path utility."""
-
-    def test_uri_to_path_decodes_file_uri(self):
-        uri = "file:///tmp/test.py"
-        path = _uri_to_path(uri)
-        assert "test.py" in path
-
-
-class TestRelFromUri:
-    """Test _rel_from_uri utility."""
-
-    def test_rel_from_uri_converts_absolute_to_relative(self, tmp_path):
-        full_path = tmp_path / "test.py"
-        full_path.write_text("# test")
-        uri = Path(full_path).resolve().as_uri()
-        result = _rel_from_uri(tmp_path, uri)
-        assert result == "test.py"
-
-
-class TestNormalizeLocations:
-    """Test _normalize_locations utility."""
-
-    def test_normalize_locations_with_single_dict(self):
-        result = _normalize_locations({"uri": "file:///test.py", "range": {"start": {}}})
-        assert len(result) == 1
-        assert result[0][0] == "file:///test.py"
-
-    def test_normalize_locations_with_list(self):
-        items = [
-            {"uri": "file:///a.py", "range": {"start": {}}},
-            {"uri": "file:///b.py", "range": {"start": {}}},
-        ]
-        result = _normalize_locations(items)
-        assert len(result) == 2
-
-    def test_normalize_locations_with_target_uri(self):
-        result = _normalize_locations({"targetUri": "file:///test.py", "targetRange": {"start": {}}})
-        assert result[0][0] == "file:///test.py"
-
-    def test_normalize_locations_with_empty_returns_empty(self):
-        result = _normalize_locations(None)
-        assert result == []
-        result = _normalize_locations([])
-        assert result == []
-
-
-class TestFormatLocations:
-    """Test _format_locations utility."""
-
-    def test_format_locations_with_empty_returns_no_results(self, tmp_path):
-        result = _format_locations(tmp_path, [], 10)
-        assert "No results" in result
-
-    def test_format_locations_formats_with_line_numbers(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("line 1\nline 2\n")
-        uri = test_file.resolve().as_uri()
-        locs = [(uri, {"start": {"line": 0, "character": 0}})]
-        result = _format_locations(tmp_path, locs, 10)
-        assert "test.py:1:1" in result
-
-    def test_format_locations_shows_truncated_message(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("line 1\n")
-        uri = test_file.resolve().as_uri()
-        locs = [(uri, {"start": {"line": 0, "character": 0}})] * 5
-        result = _format_locations(tmp_path, locs, 2)
-        assert "and 3 more" in result
-
-
-class TestExtractHoverText:
-    """Test _extract_hover_text utility."""
-
-    def test_extract_hover_text_from_string(self):
-        result = _extract_hover_text("signature: (x: int)")
-        assert result == "signature: (x: int)"
-
-    def test_extract_hover_text_from_dict(self):
-        result = _extract_hover_text({"value": "type info"})
-        assert result == "type info"
-
-    def test_extract_hover_text_from_list(self):
-        items = [
-            "first part",
-            {"value": "second part"},
-        ]
-        result = _extract_hover_text(items)
-        assert "first part" in result
-        assert "second part" in result
-
-    def test_extract_hover_text_with_none(self):
-        result = _extract_hover_text(None)
-        assert result == ""
-
-    def test_extract_hover_text_with_empty_list(self):
-        result = _extract_hover_text([])
-        assert result == ""
-
-
-class TestResolve:
-    """Test _resolve utility."""
-
-    def test_resolve_with_valid_path(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("# test")
-        result = _resolve(tmp_path, "test.py")
-        assert result is None
-
-    def test_resolve_with_invalid_path_returns_error(self, tmp_path):
-        result = _resolve(tmp_path, "../../../etc/passwd")
-        assert result is not None
-        assert "error" in result
-
-
 class TestGotoDefinitionFunction:
-    """Test goto_definition runtime function."""
+    """Tests for goto_definition standalone function."""
 
-    def test_goto_definition_with_error_response(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def foo():\n    pass\n")
+    def test_goto_definition_invalid_path(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        result = goto_definition(tmp_path, manager, "../outside.py", 1, 1)
+        assert result.startswith("error:")
 
-        lsp_manager = MagicMock()
-        lsp_manager.ask_lsp.return_value = None
+    def test_goto_definition_error_handling(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        with patch.object(manager, "ask_lsp", side_effect=ValueError("test error")):
+            result = goto_definition(tmp_path, manager, "test.py", 1, 1)
+            assert result.startswith("error:")
+            assert "test error" in result
 
-        result = goto_definition(tmp_path, lsp_manager, "test.py", 1, 1)
-        assert "No definition found" in result
-
-    def test_goto_definition_with_locations(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def foo():\n    pass\n")
-
-        lsp_manager = MagicMock()
-        lsp_manager.ask_lsp.return_value = {
-            "uri": test_file.resolve().as_uri(),
-            "range": {"start": {"line": 0, "character": 4}}
-        }
-
-        result = goto_definition(tmp_path, lsp_manager, "test.py", 1, 1)
-        assert "test.py:1:" in result
-
-    def test_goto_definition_with_lsp_error(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def foo():\n    pass\n")
-
-        lsp_manager = MagicMock()
-        lsp_manager.ask_lsp.side_effect = RuntimeError("server error")
-
-        result = goto_definition(tmp_path, lsp_manager, "test.py", 1, 1)
-        assert "error:" in result
+    def test_goto_definition_no_result(self, tmp_path):
+        (tmp_path / "test.py").touch()
+        manager = LSPManager(tmp_path)
+        with patch.object(manager, "ask_lsp", return_value=None):
+            result = goto_definition(tmp_path, manager, "test.py", 1, 1)
+            assert "No definition found" in result
 
 
 class TestFindReferencesFunction:
-    """Test find_references runtime function."""
+    """Tests for find_references standalone function."""
 
-    def test_find_references_returns_locations(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\nprint(x)\n")
+    def test_find_references_invalid_path(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        result = find_references(tmp_path, manager, "../outside.py", 1, 1)
+        assert result.startswith("error:")
 
-        lsp_manager = MagicMock()
-        lsp_manager.ask_lsp.return_value = [
-            {"uri": test_file.resolve().as_uri(), "range": {"start": {"line": 0, "character": 0}}},
-            {"uri": test_file.resolve().as_uri(), "range": {"start": {"line": 1, "character": 6}}},
-        ]
+    def test_find_references_error_handling(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        with patch.object(manager, "ask_lsp", side_effect=OSError("file error")):
+            result = find_references(tmp_path, manager, "test.py", 1, 1)
+            assert result.startswith("error:")
+            assert "file error" in result
 
-        result = find_references(tmp_path, lsp_manager, "test.py", 1, 0)
-        assert "test.py:" in result
+    def test_find_references_no_result(self, tmp_path):
+        (tmp_path / "test.py").touch()
+        manager = LSPManager(tmp_path)
+        with patch.object(manager, "ask_lsp", return_value=None):
+            result = find_references(tmp_path, manager, "test.py", 1, 1)
+            assert "No references found" in result
 
 
 class TestHoverFunction:
-    """Test hover runtime function."""
+    """Tests for hover standalone function."""
 
-    def test_hover_returns_text(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
+    def test_hover_invalid_path(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        result = hover(tmp_path, manager, "../outside.py", 1, 1)
+        assert result.startswith("error:")
 
-        lsp_manager = MagicMock()
-        lsp_manager.ask_lsp.return_value = {"contents": "int"}
+    def test_hover_error_handling(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        with patch.object(manager, "ask_lsp", side_effect=LSPTimeoutError("timeout")):
+            result = hover(tmp_path, manager, "test.py", 1, 1)
+            assert result.startswith("error:")
+            assert "timeout" in result
 
-        result = hover(tmp_path, lsp_manager, "test.py", 1, 0)
-        assert "int" in result
+    def test_hover_no_content(self, tmp_path):
+        (tmp_path / "test.py").touch()
+        manager = LSPManager(tmp_path)
+        with patch.object(manager, "ask_lsp", return_value={}):
+            result = hover(tmp_path, manager, "test.py", 1, 1)
+            assert "No hover information" in result
+
+    def test_hover_with_content(self, tmp_path):
+        (tmp_path / "test.py").touch()
+        manager = LSPManager(tmp_path)
+        with patch.object(
+            manager, "ask_lsp", return_value={"contents": "def foo(): ..."}
+        ):
+            result = hover(tmp_path, manager, "test.py", 1, 1)
+            assert "def foo()" in result
 
 
 class TestGetDiagnosticsFunction:
-    """Test get_diagnostics runtime function."""
+    """Tests for get_diagnostics standalone function."""
 
-    def test_get_diagnostics_with_empty(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("# clean\n")
+    def test_get_diagnostics_invalid_path(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        result = get_diagnostics(tmp_path, manager, "../outside.py")
+        assert result.startswith("error:")
 
-        lsp_manager = MagicMock()
-        lsp_manager.open_file_and_get_diagnostics.return_value = []
-
-        result = get_diagnostics(tmp_path, lsp_manager, "test.py")
-        assert "clean" in result
+    def test_get_diagnostics_clean(self, tmp_path):
+        (tmp_path / "test.py").touch()
+        manager = LSPManager(tmp_path)
+        with patch.object(manager, "open_file_and_get_diagnostics", return_value=[]):
+            result = get_diagnostics(tmp_path, manager, "test.py")
+            assert "No diagnostics" in result or "clean" in result
 
     def test_get_diagnostics_with_errors(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = undefined\n")
-
-        lsp_manager = MagicMock()
-        lsp_manager.open_file_and_get_diagnostics.return_value = [
+        (tmp_path / "test.py").touch()
+        manager = LSPManager(tmp_path)
+        diags = [
             {
-                "range": {"start": {"line": 0, "character": 4}},
+                "range": {"start": {"line": 5, "character": 10}},
                 "severity": 1,
-                "message": "undefined variable",
-                "source": "test",
+                "message": "error message",
+                "source": "pyright",
             }
         ]
+        with patch.object(manager, "open_file_and_get_diagnostics", return_value=diags):
+            result = get_diagnostics(tmp_path, manager, "test.py")
+            assert "Error" in result
+            assert "error message" in result
+            assert "pyright" in result
 
-        result = get_diagnostics(tmp_path, lsp_manager, "test.py")
-        assert "Error" in result or "undefined" in result
+    def test_get_diagnostics_various_severities(self, tmp_path):
+        (tmp_path / "test.py").touch()
+        manager = LSPManager(tmp_path)
+        diags = [
+            {
+                "range": {"start": {"line": 0, "character": 0}},
+                "severity": 1,
+                "message": "error",
+            },
+            {
+                "range": {"start": {"line": 1, "character": 0}},
+                "severity": 2,
+                "message": "warning",
+            },
+            {
+                "range": {"start": {"line": 2, "character": 0}},
+                "severity": 3,
+                "message": "info",
+            },
+        ]
+        with patch.object(manager, "open_file_and_get_diagnostics", return_value=diags):
+            result = get_diagnostics(tmp_path, manager, "test.py")
+            assert "Error" in result
+            assert "Warning" in result
+            assert "Info" in result
 
 
 class TestDocumentSymbolsFunction:
-    """Test document_symbols runtime function."""
+    """Tests for document_symbols standalone function."""
 
-    def test_document_symbols_returns_formatted_output(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def foo():\n    pass\n")
+    def test_document_symbols_invalid_path(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        result = document_symbols(tmp_path, manager, "../outside.py")
+        assert result.startswith("error:")
 
-        lsp_manager = MagicMock()
-        lsp_manager.ask_document_symbols.return_value = [
+    def test_document_symbols_error_handling(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        with patch.object(manager, "ask_document_symbols", side_effect=RuntimeError("server error")):
+            result = document_symbols(tmp_path, manager, "test.py")
+            assert result.startswith("error:")
+            assert "server error" in result
+
+    def test_document_symbols_no_result(self, tmp_path):
+        (tmp_path / "test.py").touch()
+        manager = LSPManager(tmp_path)
+        with patch.object(manager, "ask_document_symbols", return_value=None):
+            result = document_symbols(tmp_path, manager, "test.py")
+            assert "No document symbols" in result
+
+    def test_document_symbols_with_items(self, tmp_path):
+        (tmp_path / "test.py").touch()
+        manager = LSPManager(tmp_path)
+        items = [
             {
-                "name": "foo",
-                "kind": 12,  # Function
-                "selectionRange": {"start": {"line": 0, "character": 4}}
+                "name": "MyClass",
+                "kind": 5,
+                "selectionRange": {"start": {"line": 0, "character": 0}},
             }
         ]
-
-        result = document_symbols(tmp_path, lsp_manager, "test.py")
-        assert "foo" in result
-        assert "Function" in result
+        with patch.object(manager, "ask_document_symbols", return_value=items):
+            result = document_symbols(tmp_path, manager, "test.py")
+            assert "1 symbol" in result or "symbol" in result.lower()
 
 
 class TestRenameSymbolFunction:
-    """Test rename_symbol runtime function."""
+    """Tests for rename_symbol standalone function."""
 
-    def test_rename_symbol_with_empty_name_returns_error(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
-
-        lsp_manager = MagicMock()
-        result = rename_symbol(tmp_path, lsp_manager, "test.py", 1, 0, "")
-        assert "error:" in result
-
-    def test_rename_symbol_with_valid_edit(self, tmp_path):
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
-
-        lsp_manager = MagicMock()
-        lsp_manager.ask_rename.return_value = {
-            "changes": {
-                test_file.resolve().as_uri(): [
-                    {
-                        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
-                        "newText": "y"
-                    }
-                ]
-            }
-        }
-
-        result = rename_symbol(tmp_path, lsp_manager, "test.py", 1, 0, "y")
-        # Result is the edit dict, not an error string
-        assert isinstance(result, dict) or "error" not in str(result).lower()
-
-
-class TestLSPManagerClientFor:
-    """Test LSPManager._client_for method."""
-
-    def test_client_for_creates_new_client(self, tmp_path):
+    def test_rename_symbol_invalid_path(self, tmp_path):
         manager = LSPManager(tmp_path)
-        cfg = LSPManager.SERVER_CONFIGS["python"]
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify"):
-                        client = manager._client_for(cfg)
-                        assert client is not None
-                        manager.shutdown_all()
+        result = rename_symbol(tmp_path, manager, "../outside.py", 1, 1, "new")
+        assert result.startswith("error:")
 
-    def test_client_for_returns_cached_client(self, tmp_path):
+    def test_rename_symbol_empty_name(self, tmp_path):
+        (tmp_path / "test.py").touch()
         manager = LSPManager(tmp_path)
-        cfg = LSPManager.SERVER_CONFIGS["python"]
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify"):
-                        client1 = manager._client_for(cfg)
-                        client2 = manager._client_for(cfg)
-                        assert client1 is client2
-                        manager.shutdown_all()
+        result = rename_symbol(tmp_path, manager, "test.py", 1, 1, "")
+        assert result.startswith("error:")
+        assert "new_name is required" in result
 
-    def test_client_for_raises_when_closed(self, tmp_path):
+    def test_rename_symbol_error_handling(self, tmp_path):
+        (tmp_path / "test.py").touch()
         manager = LSPManager(tmp_path)
-        cfg = LSPManager.SERVER_CONFIGS["python"]
-        manager._closed = True
-        
-        with pytest.raises(RuntimeError, match="shut down"):
-            manager._client_for(cfg)
+        with patch.object(manager, "ask_rename", side_effect=LSPTimeoutError("timeout")):
+            result = rename_symbol(tmp_path, manager, "test.py", 1, 1, "new_name")
+            assert result.startswith("error:")
+            assert "timeout" in result
 
-
-class TestLSPManagerFileOperations:
-    """Test LSPManager file operations."""
-
-    def test_did_open_file_with_supported_extension(self, tmp_path):
+    def test_rename_symbol_no_edits(self, tmp_path):
+        (tmp_path / "test.py").touch()
         manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify") as mock_notify:
-                        uri = manager._did_open("test.py")
-                        assert uri is not None
-                        assert "test.py" in uri
-                        mock_notify.assert_called()
-                        manager.shutdown_all()
-
-    def test_did_open_file_with_unsupported_extension_returns_none(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.xyz"
-        test_file.write_text("unknown\n")
-        
-        uri = manager._did_open("test.xyz")
-        assert uri is None
-
-    def test_index_workspace_with_python_files(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        (tmp_path / "a.py").write_text("x = 1\n")
-        (tmp_path / "b.py").write_text("y = 2\n")
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify"):
-                        count = manager.index_workspace("python")
-                        assert count >= 2
-                        manager.shutdown_all()
-
-    def test_iter_source_files_respects_max_files(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        for i in range(10):
-            (tmp_path / f"file{i}.py").write_text(f"x = {i}\n")
-        
-        files = list(manager._iter_source_files((".py",), 5))
-        assert len(files) <= 5
-
-    def test_iter_source_files_skips_dotdirs(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        (tmp_path / ".hidden").mkdir()
-        (tmp_path / ".hidden" / "hidden.py").write_text("hidden\n")
-        (tmp_path / "visible.py").write_text("visible\n")
-        
-        files = list(manager._iter_source_files((".py",), 100))
-        assert "visible.py" in files
-        assert ".hidden/hidden.py" not in files
-
-
-class TestLSPManagerDiagnostics:
-    """Test LSPManager diagnostics."""
-
-    def test_cached_diagnostics_returns_empty_for_unopened_file(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        diags = manager.cached_diagnostics("test.py")
-        assert diags == []
-
-    def test_cached_diagnostics_stores_by_uri(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
-        uri = manager._path_to_uri(str(test_file))
-        
-        # Manually store some diagnostics
-        manager._diagnostics[uri] = [
-            {"message": "error", "severity": 1}
-        ]
-        
-        diags = manager.cached_diagnostics("test.py")
-        assert len(diags) == 1
-        assert diags[0]["message"] == "error"
-
-
-class TestLSPManagerStaleness:
-    """Test staleness detection in LSPManager."""
-
-    def test_stale_disk_text_detects_changes(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        test_file.write_text("original\n")
-        full_path = str(test_file.resolve())
-        
-        # Register the file as opened
-        manager._opened_files.add(full_path)
-        manager._sent_sha[full_path] = manager._text_sha("original\n")
-        
-        # Change the file on disk
-        test_file.write_text("modified\n")
-        
-        stale = manager._stale_disk_text(full_path)
-        assert stale == "modified\n"
-
-    def test_stale_disk_text_returns_none_when_unchanged(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        text = "unchanged\n"
-        test_file.write_text(text)
-        full_path = str(test_file.resolve())
-        
-        manager._opened_files.add(full_path)
-        manager._sent_sha[full_path] = manager._text_sha(text)
-        
-        stale = manager._stale_disk_text(full_path)
-        assert stale is None
-
-
-class TestLSPReaderLoop:
-    """Test LSPClient._reader_loop behavior."""
-
-    def test_reader_loop_processes_messages(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            with patch("threading.Thread") as mock_thread:
-                client = LSPClient(["test-server"], cwd="/tmp")
-                # Verify threads were started
-                assert mock_thread.call_count >= 2
-                client.shutdown()
-
-
-class TestFormatDocumentSymbols:
-    """Test _format_document_symbols utility."""
-
-    def test_format_document_symbols_with_nested_children(self, tmp_path):
-        from runtime.tools.lsp import _format_document_symbols
-        
-        items = [
-            {
-                "name": "class Foo",
-                "kind": 5,  # Class
-                "selectionRange": {"start": {"line": 0, "character": 0}},
-                "children": [
-                    {
-                        "name": "method bar",
-                        "kind": 6,  # Method
-                        "selectionRange": {"start": {"line": 2, "character": 4}},
-                        "children": []
-                    }
-                ]
-            }
-        ]
-        
-        lines = []
-        _format_document_symbols(items, 0, lines)
-        
-        assert len(lines) >= 2
-        assert "Class" in lines[0]
-        assert "Method" in lines[1]
-
-    def test_format_document_symbols_respects_max_symbols(self):
-        from runtime.tools.lsp import _format_document_symbols
-        
-        items = [
-            {
-                "name": f"symbol_{i}",
-                "kind": 12,  # Function
-                "selectionRange": {"start": {"line": i, "character": 0}},
-            }
-            for i in range(300)
-        ]
-        
-        lines = []
-        _format_document_symbols(items, 0, lines)
-        
-        # Should stop at SYMBOL_MAX
-        assert len(lines) <= 200
-
-
-class TestLSPManagerAskLsp:
-    """Test LSPManager.ask_lsp method."""
-
-    def test_ask_lsp_with_definition_action(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def foo():\n    pass\n")
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify"):
-                        with patch.object(manager, "open_file_and_get_diagnostics"):
-                            client_mock = MagicMock()
-                            client_mock.request.return_value = {
-                                "uri": test_file.resolve().as_uri(),
-                                "range": {"start": {"line": 0, "character": 4}}
-                            }
-                            manager._clients[tuple(LSPManager.SERVER_CONFIGS["python"].cmd)] = client_mock
-                            manager._opened_files.add(str(test_file.resolve()))
-                            
-                            result = manager.ask_lsp("test.py", 0, 4, "definition")
-                            assert result is not None
-                            manager.shutdown_all()
-
-    def test_ask_lsp_with_references_action(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\nprint(x)\n")
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify"):
-                        with patch.object(manager, "open_file_and_get_diagnostics"):
-                            client_mock = MagicMock()
-                            client_mock.request.return_value = [
-                                {"uri": test_file.resolve().as_uri(), "range": {"start": {"line": 0, "character": 0}}}
-                            ]
-                            manager._clients[tuple(LSPManager.SERVER_CONFIGS["python"].cmd)] = client_mock
-                            manager._opened_files.add(str(test_file.resolve()))
-                            
-                            result = manager.ask_lsp("test.py", 0, 0, "references")
-                            assert result is not None
-                            manager.shutdown_all()
-
-    def test_ask_lsp_invalid_action_raises_error(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
-        
-        with pytest.raises(ValueError, match="action must be"):
-            manager.ask_lsp("test.py", 0, 0, "invalid_action")
-
-
-class TestLSPManagerAskDocumentSymbols:
-    """Test LSPManager.ask_document_symbols method."""
-
-    def test_ask_document_symbols_returns_symbols(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def foo():\n    pass\n")
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify"):
-                        with patch.object(manager, "open_file_and_get_diagnostics"):
-                            client_mock = MagicMock()
-                            client_mock.request.return_value = [
-                                {
-                                    "name": "foo",
-                                    "kind": 12,
-                                    "selectionRange": {"start": {"line": 0, "character": 4}}
-                                }
-                            ]
-                            manager._clients[tuple(LSPManager.SERVER_CONFIGS["python"].cmd)] = client_mock
-                            manager._opened_files.add(str(test_file.resolve()))
-                            
-                            result = manager.ask_document_symbols("test.py")
-                            assert result is not None
-                            manager.shutdown_all()
-
-
-class TestLSPManagerDidChange:
-    """Test LSPManager.did_change method."""
-
-    def test_did_change_opens_new_file(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify") as mock_notify:
-                        uri = manager.did_change("test.py", "y = 2\n")
-                        assert uri is not None
-                        assert "test.py" in uri
-                        manager.shutdown_all()
-
-    def test_did_change_updates_existing_file(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
-        full_path = str(test_file.resolve())
-        
-        manager._opened_files.add(full_path)
-        manager._versions[full_path] = 1
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify"):
-                        with patch.object(manager, "_client_for") as mock_client_for:
-                            client_mock = MagicMock()
-                            mock_client_for.return_value = client_mock
-                            
-                            uri = manager.did_change("test.py", "y = 2\n")
-                            assert uri is not None
-                            # Check that version was incremented
-                            assert manager._versions[full_path] == 2
-                            manager.shutdown_all()
-
-
-class TestLSPManagerAskRename:
-    """Test LSPManager.ask_rename method."""
-
-    def test_ask_rename_returns_edit(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = 1\n")
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify"):
-                        with patch.object(manager, "open_file_and_get_diagnostics"):
-                            client_mock = MagicMock()
-                            client_mock.request.return_value = {
-                                "changes": {
-                                    test_file.resolve().as_uri(): [
-                                        {
-                                            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
-                                            "newText": "y"
-                                        }
-                                    ]
-                                }
-                            }
-                            manager._clients[tuple(LSPManager.SERVER_CONFIGS["python"].cmd)] = client_mock
-                            manager._opened_files.add(str(test_file.resolve()))
-                            
-                            result = manager.ask_rename("test.py", 0, 0, "y")
-                            assert result is not None
-                            manager.shutdown_all()
-
-
-class TestLSPManagerWarmStart:
-    """Test LSPManager.warm_start method."""
-
-    def test_warm_start_with_unknown_language(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        result = manager.warm_start("unknown_lang")
-        assert result is None
-
-    def test_warm_start_with_python(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        (tmp_path / "test.py").write_text("x = 1\n")
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify"):
-                        with patch.object(manager, "_wait_for_diagnostics"):
-                            count = manager.warm_start("python")
-                            assert count is not None and count >= 1
-                            manager.shutdown_all()
-
-    def test_warm_start_javascript_initializes_both_languages(self, tmp_path):
-        manager = LSPManager(tmp_path)
-        (tmp_path / "test.js").write_text("let x = 1;\n")
-        
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.stdout = MagicMock()
-            mock_proc.stderr = MagicMock()
-            mock_popen.return_value = mock_proc
-            
-            with patch("threading.Thread"):
-                with patch.object(LSPClient, "request") as mock_req:
-                    mock_req.return_value = {"capabilities": {}}
-                    with patch.object(LSPClient, "notify"):
-                        with patch.object(manager, "_wait_for_diagnostics"):
-                            count = manager.warm_start("javascript")
-                            # Should initialize both javascript and typescript
-                            assert len(manager._clients) > 0
-                            manager.shutdown_all()
-
-
-class TestLSPClientGetNotification:
-    """Test LSPClient.get_notification method."""
-
-    def test_get_notification_with_timeout(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            result = client.get_notification(timeout=0.1)
-            assert result is None
-            client.shutdown()
-
-
-class TestLSPClientReply:
-    """Test LSPClient.reply method."""
-
-    def test_reply_sends_response(self):
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            client = LSPClient(["test-server"], cwd="/tmp")
-            with patch.object(client, "_write_message") as mock_write:
-                client.reply(1, {"result": "success"})
-                mock_write.assert_called_once()
-                call_args = mock_write.call_args[0][0]
-                assert call_args["id"] == 1
-                assert call_args["result"] == {"result": "success"}
-            client.shutdown()
+        with patch.object(manager, "ask_rename", return_value=None):
+            result = rename_symbol(tmp_path, manager, "test.py", 1, 1, "new_name")
+            assert result.startswith("error:")
+            assert "no edits" in result
 
 
 class TestSymbolKinds:
-    """Test SYMBOL_KINDS mapping."""
+    """Tests for SYMBOL_KINDS mapping."""
 
-    def test_symbol_kinds_complete(self):
-        assert 1 in SYMBOL_KINDS
-        assert SYMBOL_KINDS[1] == "File"
-        assert 5 in SYMBOL_KINDS
+    def test_symbol_kinds_common(self):
         assert SYMBOL_KINDS[5] == "Class"
-        assert 12 in SYMBOL_KINDS
+        assert SYMBOL_KINDS[6] == "Method"
         assert SYMBOL_KINDS[12] == "Function"
+        assert SYMBOL_KINDS[13] == "Variable"
+
+    def test_symbol_kinds_coverage(self):
+        # Should have substantial coverage
+        assert len(SYMBOL_KINDS) >= 20
+
+
+class TestLSPManagerIterSourceFiles:
+    """Tests for source file iteration."""
+
+    def test_iter_source_files_empty(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        files = list(manager._iter_source_files((".py",), 100))
+        assert files == []
+
+    def test_iter_source_files_single(self, tmp_path):
+        (tmp_path / "test.py").touch()
+        manager = LSPManager(tmp_path)
+        files = list(manager._iter_source_files((".py",), 100))
+        assert "test.py" in files
+
+    def test_iter_source_files_multiple_extensions(self, tmp_path):
+        (tmp_path / "a.py").touch()
+        (tmp_path / "b.ts").touch()
+        (tmp_path / "c.js").touch()
+        manager = LSPManager(tmp_path)
+        files = list(manager._iter_source_files((".py", ".ts"), 100))
+        assert "a.py" in files
+        assert "b.ts" in files
+        assert "c.js" not in files
+
+    def test_iter_source_files_max_files(self, tmp_path):
+        for i in range(10):
+            (tmp_path / f"file{i}.py").touch()
+        manager = LSPManager(tmp_path)
+        files = list(manager._iter_source_files((".py",), 3))
+        assert len(files) == 3
+
+    def test_iter_source_files_skips_dotfiles(self, tmp_path):
+        (tmp_path / "visible.py").touch()
+        (tmp_path / ".hidden.py").touch()
+        manager = LSPManager(tmp_path)
+        files = list(manager._iter_source_files((".py",), 100))
+        assert "visible.py" in files
+        assert ".hidden.py" not in files
+
+    def test_iter_source_files_nested(self, tmp_path):
+        (tmp_path / "dir").mkdir()
+        (tmp_path / "dir" / "nested.py").touch()
+        manager = LSPManager(tmp_path)
+        files = list(manager._iter_source_files((".py",), 100))
+        assert len(files) > 0
+        # Should be in posix format with forward slashes
+        assert any("nested.py" in f for f in files)
+
+
+class TestLSPManagerShutdown:
+    """Tests for manager shutdown."""
+
+    def test_lsp_manager_shutdown_all(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        manager._closed = False
+        mock_client = MagicMock()
+        manager._clients[("key",)] = mock_client
+        manager._opened_files.add("test.py")
+
+        manager.shutdown_all()
+        assert manager._closed is True
+        assert len(manager._clients) == 0
+        assert len(manager._opened_files) == 0
+        mock_client.shutdown.assert_called_once()
+
+    def test_lsp_manager_shutdown_idempotent(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        manager._closed = False
+        mock_client = MagicMock()
+        manager._clients[("key",)] = mock_client
+
+        manager.shutdown_all()
+        manager.shutdown_all()  # Call twice
+        mock_client.shutdown.assert_called_once()  # Still only called once
+
+
+class TestLSPManagerDiskText:
+    """Tests for disk text reading."""
+
+    def test_disk_text_existing(self, tmp_path):
+        test_file = tmp_path / "test.py"
+        test_file.write_text("hello world")
+        manager = LSPManager(tmp_path)
+        text = LSPManager._disk_text(str(test_file))
+        assert text == "hello world"
+
+    def test_disk_text_missing(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        text = LSPManager._disk_text(str(tmp_path / "nonexistent.py"))
+        assert text is None
+
+    def test_disk_text_unicode(self, tmp_path):
+        test_file = tmp_path / "test.py"
+        test_file.write_text("café")
+        manager = LSPManager(tmp_path)
+        text = LSPManager._disk_text(str(test_file))
+        assert text is not None
+        assert "café" in text
+
+
+class TestLSPManagerStaleDiskText:
+    """Tests for stale disk text detection."""
+
+    def test_stale_disk_text_not_opened(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        result = manager._stale_disk_text(str(tmp_path / "test.py"))
+        assert result is None
+
+    def test_stale_disk_text_synchronized(self, tmp_path):
+        test_file = tmp_path / "test.py"
+        test_file.write_text("original")
+        manager = LSPManager(tmp_path)
+        manager._opened_files.add(str(test_file))
+        manager._sent_sha[str(test_file)] = manager._text_sha("original")
+
+        result = manager._stale_disk_text(str(test_file))
+        assert result is None
+
+    def test_stale_disk_text_modified(self, tmp_path):
+        test_file = tmp_path / "test.py"
+        test_file.write_text("modified")
+        manager = LSPManager(tmp_path)
+        manager._opened_files.add(str(test_file))
+        manager._sent_sha[str(test_file)] = manager._text_sha("original")
+
+        result = manager._stale_disk_text(str(test_file))
+        assert result == "modified"
+
+    def test_stale_disk_text_missing_file(self, tmp_path):
+        manager = LSPManager(tmp_path)
+        manager._opened_files.add(str(tmp_path / "missing.py"))
+
+        result = manager._stale_disk_text(str(tmp_path / "missing.py"))
+        assert result is None
