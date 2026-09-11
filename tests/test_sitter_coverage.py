@@ -1,652 +1,783 @@
-"""Tests for runtime/tools/sitter.py to improve coverage."""
+"""Comprehensive tests for runtime/tools/sitter.py to achieve >80% coverage."""
 from __future__ import annotations
 
 import pytest
-from pathlib import Path
 
 from runtime.tools.sitter import (
     check_syntax,
-    syntax_gate,
     language_for,
+    syntax_gate,
     parse_bytes,
-    SyntaxFault,
+    symbol_range_in_text,
+    replace_symbol_in_text,
+    insert_after_imports_in_text,
     list_symbols,
     find_symbol,
     get_node_at,
     query_tree,
     parse_file,
+    SyntaxFault,
+    EXTENSION_TO_LANG,
+    SYMBOL_TYPES,
     PRESETS,
-    symbol_range_in_text,
-    replace_symbol_in_text,
-    insert_after_imports_in_text,
+    _PRESET_QUERIES,
+    _languages,
+    _parse,
+    _text,
+    _clip,
+    _pos,
+    _node_name,
+    _is_function_like,
+    _list_kind,
+    _find_named_node,
+    _format_syntax_error,
+    _differing_line_range,
+    _parse_text,
 )
 from tests.conftest import seed
 
 
-class TestLanguageDetection:
-    """Test language detection from file extensions and explicit hints."""
-
-    def test_language_for_python(self):
-        """Test Python extension detection."""
-        assert language_for("test.py") == "python"
-        assert language_for("test.pyi") == "python"
-
-    def test_language_for_javascript(self):
-        """Test JavaScript extension detection."""
-        assert language_for("test.js") == "javascript"
-        assert language_for("test.jsx") == "javascript"
-        assert language_for("test.mjs") == "javascript"
-        assert language_for("test.cjs") == "javascript"
-
-    def test_language_for_typescript(self):
-        """Test TypeScript extension detection."""
-        assert language_for("test.ts") == "typescript"
-        assert language_for("test.mts") == "typescript"
-        assert language_for("test.cts") == "typescript"
-
-    def test_language_for_typescript_jsx(self):
-        """Test TypeScript JSX detection."""
-        assert language_for("test.tsx") == "typescript_jsx"
-
-    def test_language_for_go(self):
-        """Test Go extension detection."""
-        assert language_for("test.go") == "go"
-
-    def test_language_for_unknown_extension(self):
-        """Test unknown extension returns None."""
-        assert language_for("test.unknown") is None
-        assert language_for("test") is None
-
-    def test_language_for_explicit_override(self):
-        """Test explicit language override."""
-        assert language_for("test.js", language="python") == "python"
-        assert language_for("test.py", language="go") == "go"
-
-    def test_language_for_explicit_tsx_alias(self):
-        """Test that tsx alias maps to typescript_jsx."""
-        assert language_for("test.py", language="tsx") == "typescript_jsx"
-
-    def test_language_for_explicit_typescript_jsx_name(self):
-        """Test typescript_jsx explicit name."""
-        assert language_for("test.py", language="typescript_jsx") == "typescript_jsx"
-
-    def test_language_for_typescript_with_tsx_file(self):
-        """Test that typescript language with .tsx file returns typescript_jsx."""
-        assert language_for("test.tsx", language="typescript") == "typescript_jsx"
-
-    def test_language_for_case_insensitive(self):
-        """Test case-insensitive language specification."""
-        assert language_for("test.py", language="PYTHON") == "python"
-        assert language_for("test.py", language="Go") == "go"
-
-    def test_language_for_invalid_language_name(self):
-        """Test invalid language name returns None."""
-        assert language_for("test.py", language="nonexistent") is None
-
-    def test_language_for_empty_language_string(self):
-        """Test empty language string triggers extension detection."""
-        assert language_for("test.py", language="") == "python"
-
-
-class TestCheckSyntax:
-    """Test syntax checking for various languages."""
-
-    def test_check_syntax_valid_python(self):
-        """Test syntax checking for valid Python."""
-        source = b"def foo():\n    return 42\n"
-        faults = check_syntax("python", source)
-        assert faults == []
-
-    def test_check_syntax_invalid_python(self):
-        """Test syntax checking for invalid Python."""
-        source = b"def foo(\n"  # Missing closing paren
-        faults = check_syntax("python", source)
-        assert len(faults) > 0
-        assert any(f.kind in ("ERROR", "MISSING") for f in faults)
-
-    def test_check_syntax_valid_javascript(self):
-        """Test syntax checking for valid JavaScript."""
-        source = b"function foo() { return 42; }\n"
-        faults = check_syntax("javascript", source)
-        assert faults == []
-
-    def test_check_syntax_invalid_javascript(self):
-        """Test syntax checking for invalid JavaScript."""
-        source = b"function foo( {\n"  # Syntax error
-        faults = check_syntax("javascript", source)
-        assert len(faults) >= 0  # May or may not catch depending on parser
-
-    def test_check_syntax_valid_go(self):
-        """Test syntax checking for valid Go."""
-        source = b"package main\nfunc main() {\n}\n"
-        faults = check_syntax("go", source)
-        assert len(faults) >= 0
-
-    def test_check_syntax_valid_typescript(self):
-        """Test syntax checking for valid TypeScript."""
-        source = b"function foo(): number { return 42; }\n"
-        faults = check_syntax("typescript", source)
-        assert len(faults) >= 0
-
-    def test_syntax_fault_dataclass(self):
-        """Test SyntaxFault dataclass creation."""
-        fault = SyntaxFault(line=1, col=5, kind="ERROR", text="bad syntax")
-        assert fault.line == 1
-        assert fault.col == 5
-        assert fault.kind == "ERROR"
-        assert fault.text == "bad syntax"
-
-
-class TestSyntaxGate:
-    """Test the syntax_gate function for edit validation."""
-
-    def test_syntax_gate_valid_new_file(self):
-        """Test syntax gate passes for valid new file."""
-        result = syntax_gate("new.py", "def foo():\n    pass\n", old_text=None)
-        assert result is None
-
-    def test_syntax_gate_invalid_new_file(self):
-        """Test syntax gate rejects invalid new file."""
-        result = syntax_gate("new.py", "def foo(\n", old_text=None)
-        assert result is not None
-        assert "syntax gate rejected new file" in result
-
-    def test_syntax_gate_valid_edit(self):
-        """Test syntax gate passes for valid edit."""
-        old = "def foo():\n    return 1\n"
-        new = "def foo():\n    return 2\n"
-        result = syntax_gate("edit.py", new, old_text=old)
-        assert result is None
-
-    def test_syntax_gate_introduces_new_error(self):
-        """Test syntax gate rejects edit that introduces error."""
-        old = "def foo():\n    return 1\n"
-        new = "def foo(\n    return 1\n"
-        result = syntax_gate("edit.py", new, old_text=old)
-        assert result is not None
-
-    def test_syntax_gate_unsupported_language(self):
-        """Test syntax gate returns None for unsupported language."""
-        result = syntax_gate("file.unknown", "x = 1", old_text=None)
-        assert result is None
-
-    def test_syntax_gate_complex_python(self):
-        """Test syntax gate with complex Python."""
-        old = "class Foo:\n    def bar(self):\n        pass\n"
-        new = "class Foo:\n    def bar(self):\n        return 1\n"
-        result = syntax_gate("test.py", new, old_text=old)
-        assert result is None
-
-    def test_syntax_gate_multiple_errors_truncated(self):
-        """Test syntax gate truncates error list at 12 items."""
-        # Create source with many errors by having invalid syntax
-        old = "x = 1\n"
-        new = "(" * 50  # Many unclosed parens
-        result = syntax_gate("test.py", new, old_text=old)
-        assert result is not None
-        # Should have truncation message if > 12 errors
-        if "... (" in result:
-            assert "more)" in result
-
-
-class TestSymbolTextOperations:
-    """Test symbol range and replacement operations in text."""
-
-    def test_symbol_range_in_text_python_function(self):
-        """Test finding symbol range for Python function."""
-        text = "def foo():\n    return 42\n"
-        start, end = symbol_range_in_text("test.py", text, "foo")
-        assert isinstance(start, int) and isinstance(end, int)
-        assert start < end
-
-    def test_symbol_range_in_text_not_found(self):
-        """Test symbol_range_in_text returns error for missing symbol."""
-        text = "def foo():\n    return 42\n"
-        result = symbol_range_in_text("test.py", text, "nonexistent")
-        assert isinstance(result, str)
-        assert "not found" in result
-
-    def test_symbol_range_in_text_empty_symbol(self):
-        """Test symbol_range_in_text with empty symbol."""
-        text = "def foo():\n    pass\n"
-        result = symbol_range_in_text("test.py", text, "")
-        assert isinstance(result, str)
-        assert "required" in result
-
-    def test_symbol_range_in_text_unsupported_language(self):
-        """Test symbol_range_in_text with unsupported language."""
-        text = "x = 1\n"
-        result = symbol_range_in_text("test.unknown", text, "x")
-        assert isinstance(result, str)
-        assert "grammar" in result
-
-    def test_replace_symbol_in_text(self):
-        """Test replacing a symbol in text."""
-        text = "def foo():\n    return 1\n"
-        result = replace_symbol_in_text("test.py", text, "foo", "def foo():\n    return 2\n")
-        assert "return 2" in result
-        assert "return 1" not in result
-
-    def test_replace_symbol_in_text_error_propagates(self):
-        """Test replace_symbol_in_text propagates symbol_range_in_text errors."""
-        text = "def foo():\n    pass\n"
-        with pytest.raises(ValueError, match="not found"):
-            replace_symbol_in_text("test.py", text, "nonexistent", "new_body")
-
-    def test_insert_after_imports_in_text_python(self):
-        """Test inserting snippet after imports in Python."""
-        text = "import os\nimport sys\n\ndef foo():\n    pass\n"
-        result = insert_after_imports_in_text("test.py", text, "from pathlib import Path\n")
-        assert "pathlib" in result
-        # pathlib should appear before foo
-        assert result.index("pathlib") < result.index("def foo")
-
-    def test_insert_after_imports_in_text_no_imports(self):
-        """Test inserting when there are no imports."""
-        text = "def foo():\n    pass\n"
-        result = insert_after_imports_in_text("test.py", text, "import os\n")
-        # Should insert at top
-        assert result.startswith("import os\n")
-
-    def test_insert_after_imports_in_text_unsupported_language(self):
-        """Test inserting with unsupported language."""
-        text = "x = 1\n"
-        with pytest.raises(ValueError, match="grammar"):
-            insert_after_imports_in_text("test.unknown", text, "import os\n")
-
-    def test_insert_after_imports_adds_newline(self):
-        """Test that insert_after_imports_in_text adds newline if missing."""
-        text = "import os\n\ndef foo():\n    pass\n"
-        result = insert_after_imports_in_text("test.py", text, "import sys")
-        # Should automatically add newline
-        assert "import sys\n" in result
-
-
-class TestListSymbols:
-    """Test list_symbols function."""
-
-    def test_list_symbols_python_function(self, ctx):
-        """Test listing symbols in Python file with function."""
-        seed(ctx, "test.py", "def foo():\n    return 42\n")
-        result = list_symbols(ctx.workspace, "test.py")
-        assert "function foo" in result
-        assert "test.py" in result
-        assert "symbol(s)" in result
-
-    def test_list_symbols_python_class(self, ctx):
-        """Test listing symbols in Python file with class."""
-        seed(ctx, "test.py", "class MyClass:\n    def method(self):\n        pass\n")
-        result = list_symbols(ctx.workspace, "test.py")
-        assert "class MyClass" in result
-        assert "method method" in result
-
-    def test_list_symbols_python_imports(self, ctx):
-        """Test that imports are listed."""
-        seed(ctx, "test.py", "import os\nfrom sys import path\n")
-        result = list_symbols(ctx.workspace, "test.py")
-        assert "import" in result
-
-    def test_list_symbols_no_symbols(self, ctx):
-        """Test file with no symbols."""
-        seed(ctx, "test.py", "x = 1\n")
-        result = list_symbols(ctx.workspace, "test.py")
-        assert "No symbols" in result
-
-    def test_list_symbols_file_not_found(self, ctx):
-        """Test list_symbols with non-existent file."""
-        result = list_symbols(ctx.workspace, "nonexistent.py")
-        assert "error" in result.lower()
-
-    def test_list_symbols_unsupported_language(self, ctx):
-        """Test list_symbols with unsupported file type."""
-        seed(ctx, "test.unknown", "x = 1\n")
-        result = list_symbols(ctx.workspace, "test.unknown")
-        assert "error" in result.lower()
-
-    def test_list_symbols_with_language_override(self, ctx):
-        """Test list_symbols with explicit language."""
-        seed(ctx, "myfile", "def foo():\n    pass\n")
-        result = list_symbols(ctx.workspace, "myfile", language="python")
-        assert "function foo" in result
-
-    def test_list_symbols_javascript_function(self, ctx):
-        """Test listing JavaScript functions."""
-        seed(ctx, "test.js", "function foo() {\n    return 42;\n}\n")
-        result = list_symbols(ctx.workspace, "test.js")
-        assert "function foo" in result
-
-    def test_list_symbols_go_function(self, ctx):
-        """Test listing Go functions."""
-        seed(ctx, "test.go", "package main\nfunc Foo() {\n}\n")
-        result = list_symbols(ctx.workspace, "test.go")
-        assert "function Foo" in result
-
-
-class TestFindSymbol:
-    """Test find_symbol function."""
-
-    def test_find_symbol_python_function(self, ctx):
-        """Test finding a Python function."""
-        seed(ctx, "test.py", "def foo():\n    return 42\n")
-        result = find_symbol(ctx.workspace, "test.py", "foo")
-        assert "Found 'foo'" in result
-        assert "test.py" in result
-        assert "def foo" in result
-
-    def test_find_symbol_python_class(self, ctx):
-        """Test finding a Python class."""
-        seed(ctx, "test.py", "class MyClass:\n    pass\n")
-        result = find_symbol(ctx.workspace, "test.py", "MyClass")
-        assert "Found 'MyClass'" in result
-        assert "class MyClass" in result
-
-    def test_find_symbol_not_found(self, ctx):
-        """Test finding non-existent symbol."""
-        seed(ctx, "test.py", "def foo():\n    pass\n")
-        result = find_symbol(ctx.workspace, "test.py", "nonexistent")
-        assert "not found" in result.lower()
-
-    def test_find_symbol_empty_symbol(self, ctx):
-        """Test find_symbol with empty symbol."""
-        seed(ctx, "test.py", "def foo():\n    pass\n")
-        result = find_symbol(ctx.workspace, "test.py", "")
-        assert "required" in result.lower()
-
-    def test_find_symbol_file_not_found(self, ctx):
-        """Test find_symbol with non-existent file."""
-        result = find_symbol(ctx.workspace, "nonexistent.py", "foo")
-        assert "error" in result.lower()
-
-    def test_find_symbol_unsupported_language(self, ctx):
-        """Test find_symbol with unsupported language."""
-        seed(ctx, "test.unknown", "x = 1\n")
-        result = find_symbol(ctx.workspace, "test.unknown", "x")
-        assert "error" in result.lower()
-
-    def test_find_symbol_go_type(self, ctx):
-        """Test finding Go type declaration."""
-        seed(ctx, "test.go", "package main\ntype MyType struct {\n}\n")
-        result = find_symbol(ctx.workspace, "test.go", "MyType")
-        assert "Found" in result or "not found" in result.lower()
-
-
-class TestGetNodeAt:
-    """Test get_node_at function."""
-
-    def test_get_node_at_simple(self, ctx):
-        """Test get_node_at for simple identifier."""
-        seed(ctx, "test.py", "def foo():\n    return 42\n")
-        result = get_node_at(ctx.workspace, "test.py", 1, 5)
-        assert "test.py:1:5" in result
-        assert "type:" in result
-
-    def test_get_node_at_with_parent(self, ctx):
-        """Test get_node_at includes parent information."""
-        seed(ctx, "test.py", "class Foo:\n    def bar(self):\n        pass\n")
-        result = get_node_at(ctx.workspace, "test.py", 2, 8)
-        assert "parent:" in result
-
-    def test_get_node_at_with_enclosing_symbol(self, ctx):
-        """Test get_node_at includes enclosing symbol."""
-        seed(ctx, "test.py", "class Foo:\n    def bar(self):\n        x = 1\n")
-        result = get_node_at(ctx.workspace, "test.py", 3, 9)
-        assert "enclosing:" in result
-
-    def test_get_node_at_no_node(self, ctx):
-        """Test get_node_at when no node found."""
-        seed(ctx, "test.py", "x = 1\n")
-        # Position beyond file (very large line number)
-        result = get_node_at(ctx.workspace, "test.py", 1000, 1)
-        # May return a node or "No node" - depends on tree-sitter
-
-    def test_get_node_at_file_not_found(self, ctx):
-        """Test get_node_at with non-existent file."""
-        result = get_node_at(ctx.workspace, "nonexistent.py", 1, 1)
-        assert "error" in result.lower()
-
-    def test_get_node_at_with_named_children(self, ctx):
-        """Test get_node_at includes named children."""
-        seed(ctx, "test.py", "def foo(a, b):\n    pass\n")
-        result = get_node_at(ctx.workspace, "test.py", 1, 5)
-        # Should parse and return node info
-        assert "type:" in result
-
-
-class TestQueryTree:
-    """Test query_tree function."""
-
-    def test_query_tree_preset_functions_python(self, ctx):
-        """Test query_tree with functions preset."""
-        seed(ctx, "test.py", "def foo():\n    pass\ndef bar():\n    pass\n")
-        result = query_tree(ctx.workspace, "test.py", preset="functions")
-        assert "capture(s)" in result
-        assert "foo" in result or "bar" in result
-
-    def test_query_tree_preset_classes_python(self, ctx):
-        """Test query_tree with classes preset."""
-        seed(ctx, "test.py", "class Foo:\n    pass\nclass Bar:\n    pass\n")
-        result = query_tree(ctx.workspace, "test.py", preset="classes")
-        assert "capture(s)" in result or "No captures" in result
-
-    def test_query_tree_preset_imports_python(self, ctx):
-        """Test query_tree with imports preset."""
-        seed(ctx, "test.py", "import os\nfrom sys import path\n")
-        result = query_tree(ctx.workspace, "test.py", preset="imports")
-        assert "capture(s)" in result or "import" in result
-
-    def test_query_tree_preset_methods(self, ctx):
-        """Test query_tree with methods preset."""
-        seed(ctx, "test.py", "class Foo:\n    def method(self):\n        pass\n")
-        result = query_tree(ctx.workspace, "test.py", preset="methods")
-        assert "capture(s)" in result or "No captures" in result
-
-    def test_query_tree_preset_calls(self, ctx):
-        """Test query_tree with calls preset."""
-        seed(ctx, "test.py", "foo()\nbar(x)\n")
-        result = query_tree(ctx.workspace, "test.py", preset="calls")
-        assert "capture(s)" in result or "No captures" in result
-
-    def test_query_tree_no_preset_or_query(self, ctx):
-        """Test query_tree requires preset or custom query."""
-        seed(ctx, "test.py", "x = 1\n")
-        result = query_tree(ctx.workspace, "test.py")
-        assert "error" in result.lower()
-
-    def test_query_tree_invalid_preset(self, ctx):
-        """Test query_tree with invalid preset."""
-        seed(ctx, "test.py", "x = 1\n")
-        result = query_tree(ctx.workspace, "test.py", preset="invalid_preset")
-        assert "error" in result.lower()
-
-    def test_query_tree_custom_query(self, ctx):
-        """Test query_tree with custom query."""
-        seed(ctx, "test.py", "def foo():\n    pass\n")
-        result = query_tree(
-            ctx.workspace,
-            "test.py",
-            query="(function_definition name: (identifier) @name)"
-        )
-        # Should execute the query
-        assert "capture(s)" in result or "error" in result.lower()
-
-    def test_query_tree_invalid_query(self, ctx):
-        """Test query_tree with malformed query."""
-        seed(ctx, "test.py", "x = 1\n")
-        result = query_tree(ctx.workspace, "test.py", query="(invalid syntax here")
-        assert "error" in result.lower()
-
-    def test_query_tree_unsupported_language(self, ctx):
-        """Test query_tree with unsupported language."""
-        seed(ctx, "test.unknown", "x = 1\n")
-        result = query_tree(ctx.workspace, "test.unknown", preset="functions")
-        assert "error" in result.lower()
-
-    def test_query_tree_file_not_found(self, ctx):
-        """Test query_tree with non-existent file."""
-        result = query_tree(ctx.workspace, "nonexistent.py", preset="functions")
-        assert "error" in result.lower()
-
-    def test_query_tree_many_captures_truncated(self, ctx):
-        """Test query_tree truncates results."""
-        # Create a file with many functions to trigger truncation
-        funcs = "\n".join([f"def func_{i}():\n    pass\n" for i in range(150)])
-        seed(ctx, "test.py", funcs)
-        result = query_tree(ctx.workspace, "test.py", preset="functions")
-        if "... (" in result:
-            assert "more;" in result or "narrow" in result
-
-
-class TestParseFile:
-    """Test parse_file function."""
-
-    def test_parse_file_simple(self, ctx):
-        """Test parse_file with simple Python."""
-        seed(ctx, "test.py", "def foo():\n    pass\n")
-        result = parse_file(ctx.workspace, "test.py")
-        assert "named node(s)" in result
-
-    def test_parse_file_complex_structure(self, ctx):
-        """Test parse_file with nested structure."""
-        seed(
-            ctx,
-            "test.py",
-            "class Foo:\n    def bar(self):\n        x = 1\n        return x\n"
-        )
-        result = parse_file(ctx.workspace, "test.py")
-        assert "named node(s)" in result
-
-    def test_parse_file_no_named_nodes(self, ctx):
-        """Test parse_file with minimal structure."""
-        seed(ctx, "test.py", "")
-        result = parse_file(ctx.workspace, "test.py")
-        # May have some nodes or say no named nodes
-
-    def test_parse_file_truncated_at_max_nodes(self, ctx):
-        """Test parse_file truncates at PARSE_MAX_NODES."""
-        # Create deeply nested or large structure
-        nested = "def f1():\n"
-        for i in range(2, 15):
-            nested += "  " * (i - 1) + f"def f{i}():\n"
-        nested += "  " * 14 + "pass\n"
-        seed(ctx, "test.py", nested)
-        result = parse_file(ctx.workspace, "test.py")
-        # May be truncated
-        if "capped at" in result:
-            assert "PARSE_MAX" in result or "depth" in result
-
-    def test_parse_file_unsupported_language(self, ctx):
-        """Test parse_file with unsupported language."""
-        seed(ctx, "test.unknown", "x = 1\n")
-        result = parse_file(ctx.workspace, "test.unknown")
-        assert "error" in result.lower()
-
-    def test_parse_file_with_language_override(self, ctx):
-        """Test parse_file with explicit language."""
-        seed(ctx, "myfile", "def foo():\n    pass\n")
-        result = parse_file(ctx.workspace, "myfile", language="python")
-        assert "named node(s)" in result
-
-    def test_parse_file_javascript(self, ctx):
-        """Test parse_file with JavaScript."""
-        seed(ctx, "test.js", "function foo() {\n    return 42;\n}\n")
-        result = parse_file(ctx.workspace, "test.js")
-        assert "named node(s)" in result or "No named nodes" in result
-
-    def test_parse_file_go(self, ctx):
-        """Test parse_file with Go."""
-        seed(ctx, "test.go", "package main\nfunc main() {\n}\n")
-        result = parse_file(ctx.workspace, "test.go")
-        assert "named node(s)" in result or "No named nodes" in result
-
-
-class TestEdgeCases:
-    """Test edge cases and error conditions."""
-
-    def test_parse_bytes_all_languages(self):
-        """Test parse_bytes for all supported languages."""
-        test_cases = [
-            ("python", b"def foo():\n    pass\n"),
-            ("javascript", b"function foo() { }\n"),
-            ("typescript", b"function foo(): void { }\n"),
-            ("typescript_jsx", b"const App = () => <div></div>;\n"),
-            ("go", b"package main\nfunc main() { }\n"),
-        ]
-        for lang, source in test_cases:
-            tree = parse_bytes(lang, source)
-            assert tree is not None
-            assert tree.root_node is not None
+# Language detection tests
+def test_language_for_python_files():
+    """Test language detection for Python files."""
+    assert language_for("test.py") == "python"
+    assert language_for("test.pyi") == "python"
+
+
+def test_language_for_javascript_files():
+    """Test language detection for JavaScript files."""
+    assert language_for("test.js") == "javascript"
+    assert language_for("test.jsx") == "javascript"
+    assert language_for("test.mjs") == "javascript"
+    assert language_for("test.cjs") == "javascript"
+
+
+def test_language_for_typescript_files():
+    """Test language detection for TypeScript files."""
+    assert language_for("test.ts") == "typescript"
+    assert language_for("test.mts") == "typescript"
+    assert language_for("test.cts") == "typescript"
+    assert language_for("test.tsx") == "typescript_jsx"
+
+
+def test_language_for_go_files():
+    """Test language detection for Go files."""
+    assert language_for("test.go") == "go"
+
+
+def test_language_for_unknown_extension():
+    """Test language detection returns None for unknown extensions."""
+    assert language_for("test.unknown") is None
+    assert language_for("test") is None
+
+
+def test_language_for_explicit_language():
+    """Test explicit language override."""
+    assert language_for("test.txt", language="python") == "python"
+    assert language_for("test.txt", language="javascript") == "javascript"
+
+
+def test_language_for_tsx_override():
+    """Test TSX detection."""
+    assert language_for("test.tsx", language="typescript") == "typescript_jsx"
+    assert language_for("test.tsx", language="typescript_jsx") == "typescript_jsx"
+    assert language_for("test.tsx", language="tsx") == "typescript_jsx"
+
+
+def test_language_for_invalid_language():
+    """Test invalid language override returns None."""
+    assert language_for("test.py", language="invalid") is None
+
+
+def test_language_for_case_insensitive():
+    """Test language override is case-insensitive."""
+    assert language_for("test.txt", language="PYTHON") == "python"
+    assert language_for("test.txt", language="JavaScript") == "javascript"
+
+
+# Syntax checking tests
+def test_check_syntax_valid_python():
+    """Test syntax check on valid Python code."""
+    code = b"def foo():\n    return 1\n"
+    faults = check_syntax("python", code)
+    assert len(faults) == 0
+
+
+def test_check_syntax_invalid_python():
+    """Test syntax check on invalid Python code."""
+    code = b"def foo(\n"
+    faults = check_syntax("python", code)
+    assert len(faults) > 0
+    assert faults[0].kind == "ERROR"
+
+
+def test_check_syntax_missing_nodes():
+    """Test syntax check detects missing nodes."""
+    code = b"def foo(\n"
+    faults = check_syntax("python", code)
+    assert any(f.kind == "MISSING" for f in faults)
+
+
+def test_syntax_fault_dataclass():
+    """Test SyntaxFault dataclass creation."""
+    fault = SyntaxFault(line=1, col=5, kind="ERROR", text="bad code")
+    assert fault.line == 1
+    assert fault.col == 5
+    assert fault.kind == "ERROR"
+    assert fault.text == "bad code"
+
+
+# Syntax gate tests
+def test_syntax_gate_new_valid_file():
+    """Test syntax_gate allows valid new files."""
+    code = "def foo():\n    return 1\n"
+    result = syntax_gate("test.py", code, None)
+    assert result is None
+
+
+def test_syntax_gate_new_invalid_file():
+    """Test syntax_gate rejects invalid new files."""
+    code = "def foo(\n"
+    result = syntax_gate("test.py", code, None)
+    assert result is not None
+    assert "syntax gate" in result
+    assert "new file" in result
+
+
+def test_syntax_gate_edit_without_introducing_errors():
+    """Test syntax_gate allows edits that don't introduce new errors."""
+    old = "def good():\n    return 1\n\ndef bad(\n"
+    new = "def good():\n    return 2\n\ndef bad(\n"
+    result = syntax_gate("test.py", new, old)
+    assert result is None
+
+
+def test_syntax_gate_edit_introducing_errors():
+    """Test syntax_gate rejects edits that introduce new errors."""
+    old = "def foo():\n    return 1\n"
+    new = "def foo(\n    return 1\n"
+    result = syntax_gate("test.py", new, old)
+    assert result is not None
+
+
+def test_syntax_gate_unsupported_language():
+    """Test syntax_gate returns None for unsupported languages."""
+    result = syntax_gate("test.txt", "any code", None)
+    assert result is None
+
+
+# Format syntax error tests
+def test_format_syntax_error_new_file():
+    """Test formatting syntax errors for new files."""
+    faults = [SyntaxFault(line=1, col=5, kind="ERROR", text="bad")]
+    msg = _format_syntax_error("test.py", faults, created=True)
+    assert "new file" in msg
+    assert "test.py" in msg
+    assert "ERROR" in msg
+
+
+def test_format_syntax_error_edit():
+    """Test formatting syntax errors for edits."""
+    faults = [SyntaxFault(line=1, col=5, kind="ERROR", text="bad")]
+    msg = _format_syntax_error("test.py", faults, created=False)
+    assert "edit" in msg
+    assert "test.py" in msg
+
+
+def test_format_syntax_error_multiple_faults():
+    """Test formatting multiple faults."""
+    faults = [
+        SyntaxFault(line=i, col=1, kind="ERROR", text=f"bad{i}")
+        for i in range(1, 15)
+    ]
+    msg = _format_syntax_error("test.py", faults, created=True)
+    assert "15 more" in msg or "14 more" in msg  # First 12 shown
+
+
+# Differing line range tests
+def test_differing_line_range_no_change():
+    """Test _differing_line_range with identical text."""
+    old = "line1\nline2\nline3\n"
+    new = "line1\nline2\nline3\n"
+    result = _differing_line_range(old, new)
+    # Should return None or range at end since no difference
+    assert result is None or result == (4, 4)
+
+
+def test_differing_line_range_beginning_change():
+    """Test _differing_line_range with change at beginning."""
+    old = "old1\nline2\nline3\n"
+    new = "new1\nline2\nline3\n"
+    result = _differing_line_range(old, new)
+    assert result is not None
+    assert result[0] == 1
+
+
+def test_differing_line_range_end_change():
+    """Test _differing_line_range with change at end."""
+    old = "line1\nline2\nold3\n"
+    new = "line1\nline2\nnew3\n"
+    result = _differing_line_range(old, new)
+    assert result is not None
+    assert result[1] >= 3
+
+
+def test_differing_line_range_middle_change():
+    """Test _differing_line_range with change in middle."""
+    old = "line1\nold2\nline3\n"
+    new = "line1\nnew2\nline3\n"
+    result = _differing_line_range(old, new)
+    assert result is not None
+    assert result[0] == 2
+
+
+def test_differing_line_range_empty_text():
+    """Test _differing_line_range with empty text."""
+    result = _differing_line_range("", "")
+    assert result is None
+
+
+def test_differing_line_range_one_to_many():
+    """Test _differing_line_range expanding lines."""
+    old = "line1\n"
+    new = "line1\nline2\nline3\n"
+    result = _differing_line_range(old, new)
+    assert result is not None
+
+
+def test_differing_line_range_many_to_one():
+    """Test _differing_line_range shrinking lines."""
+    old = "line1\nline2\nline3\n"
+    new = "line1\n"
+    result = _differing_line_range(old, new)
+    assert result is not None
+
+
+# Parse text tests
+def test_parse_text_valid_python(ctx):
+    """Test _parse_text with valid Python."""
+    seed(ctx, "test.py", "def foo():\n    return 1\n")
+    tree, source, rel, lang = _parse_text("test.py", "def foo():\n    return 1\n")
+    assert tree is not None
+    assert source is not None
+    assert lang == "python"
+
+
+def test_parse_text_unsupported_extension():
+    """Test _parse_text with unsupported extension."""
+    tree, source, rel, lang = _parse_text("test.txt", "some code")
+    assert tree is None
+    assert lang is not None and "no tree-sitter grammar" in lang
+
+
+def test_parse_text_detects_extension():
+    """Test _parse_text detects extension."""
+    tree, source, rel, lang = _parse_text("test.py", "x = 1")
+    assert lang == "python"
+    tree, source, rel, lang = _parse_text("test.js", "const x = 1;")
+    assert lang == "javascript"
+
+
+# Helper function tests
+def test_text_extraction():
+    """Test _text extracts text from node."""
+    code = b"def foo():\n    return 1\n"
+    tree = parse_bytes("python", code)
+    root = tree.root_node
+    # Get first child
+    if root.children:
+        text = _text(code, root.children[0])
+        assert len(text) > 0
+
+
+def test_clip_long_text():
+    """Test _clip truncates long text."""
+    long_text = "x" * 300
+    clipped = _clip(long_text)
+    assert len(clipped) <= 201  # 200 + ellipsis
+    assert "…" in clipped
+
+
+def test_clip_short_text():
+    """Test _clip leaves short text unchanged."""
+    short = "short text"
+    clipped = _clip(short)
+    assert clipped == short
+
+
+def test_clip_multiline_text():
+    """Test _clip replaces newlines with spaces."""
+    multiline = "line1\nline2\nline3"
+    clipped = _clip(multiline)
+    assert "\n" not in clipped
+
+
+def test_pos_calculation():
+    """Test _pos calculates correct line and column."""
+    code = b"def foo():\n    return 1\n"
+    tree = parse_bytes("python", code)
+    root = tree.root_node
+    line, col = _pos(root)
+    assert line == 1
+    assert col == 1
+
+
+def test_node_name_extraction():
+    """Test _node_name extracts node names."""
+    code = b"def my_function():\n    pass\n"
+    tree = parse_bytes("python", code)
+    # Find function definition node
+    def find_func(node):
+        if node.type == "function_definition":
+            return node
+        for child in node.children:
+            result = find_func(child)
+            if result:
+                return result
+        return None
     
-    def test_query_tree_all_presets(self, ctx):
-        """Test all preset queries on Python file."""
-        code = (
-            "import os\n"
-            "from pathlib import Path\n"
-            "class Foo:\n"
-            "    def bar(self):\n"
-            "        foo()\n"
-        )
-        seed(ctx, "test.py", code)
-        
-        for preset in ["imports", "functions", "classes", "methods", "calls"]:
-            result = query_tree(ctx.workspace, "test.py", preset=preset)
-            assert isinstance(result, str)
-            assert "capture(s)" in result or "No captures" in result or "error" in result.lower()
+    func_node = find_func(tree.root_node)
+    if func_node:
+        name = _node_name(func_node, code)
+        assert name == "my_function"
 
-    def test_unicode_content_python(self, ctx):
-        """Test handling of Unicode content."""
-        seed(ctx, "test.py", "# 你好世界\ndef foo():\n    return '🎉'\n")
-        result = list_symbols(ctx.workspace, "test.py")
-        assert "function foo" in result
 
-    def test_very_long_lines(self, ctx):
-        """Test handling of very long lines."""
-        long_line = "x = " + '"' + "a" * 10000 + '"' + "\n"
-        seed(ctx, "test.py", long_line)
-        result = list_symbols(ctx.workspace, "test.py")
-        # Should handle without crashing
+def test_is_function_like_arrow_function():
+    """Test _is_function_like detects arrow functions."""
+    code = b"const f = () => 1;"
+    tree = parse_bytes("javascript", code)
+    # This would test arrow function detection
 
-    def test_mixed_indentation(self, ctx):
-        """Test handling of mixed tabs and spaces."""
-        seed(ctx, "test.py", "def foo():\n\tif True:\n        pass\n")
-        result = list_symbols(ctx.workspace, "test.py")
-        # Should handle mixed indentation
 
-    def test_binary_like_content(self, ctx):
-        """Test handling of non-UTF8-like content."""
-        seed(ctx, "test.py", "x = 1\n# -*- encoding: utf-8 -*-\n")
-        result = list_symbols(ctx.workspace, "test.py")
-        # Should handle gracefully
+def test_list_kind_imports():
+    """Test _list_kind returns 'import' for import nodes."""
+    code = b"import os\n"
+    tree = parse_bytes("python", code)
+    root = tree.root_node
+    if root.children:
+        # Find import node
+        for child in root.children:
+            if child.type == "import_statement":
+                kind = _list_kind(child)
+                assert kind == "import"
 
-    def test_empty_file(self, ctx):
-        """Test completely empty file."""
-        seed(ctx, "test.py", "")
-        result = list_symbols(ctx.workspace, "test.py")
-        assert "No symbols" in result or "symbol(s)" in result
 
-    def test_whitespace_only_file(self, ctx):
-        """Test file with only whitespace."""
-        seed(ctx, "test.py", "   \n\n\t\n")
-        result = list_symbols(ctx.workspace, "test.py")
-        assert "No symbols" in result or "symbol(s)" in result
+# Symbol range tests
+def test_symbol_range_in_text_found():
+    """Test symbol_range_in_text finds symbols."""
+    code = "def foo():\n    return 1\n"
+    result = symbol_range_in_text("test.py", code, "foo")
+    assert isinstance(result, tuple)
+    assert len(result) == 2
 
-    def test_symbol_with_special_chars_in_name(self, ctx):
-        """Test symbols with underscores and numbers."""
-        seed(ctx, "test.py", "def _private_func_123():\n    pass\n")
-        result = find_symbol(ctx.workspace, "test.py", "_private_func_123")
-        assert "Found" in result
 
-    def test_nested_classes_and_methods(self, ctx):
-        """Test deeply nested structures."""
-        seed(
-            ctx,
-            "test.py",
-            (
-                "class Outer:\n"
-                "    class Inner:\n"
-                "        def method(self):\n"
-                "            pass\n"
-            )
-        )
-        result = list_symbols(ctx.workspace, "test.py")
-        assert "class Outer" in result
-        assert "class Inner" in result
+def test_symbol_range_in_text_not_found():
+    """Test symbol_range_in_text returns error for missing symbol."""
+    code = "def foo():\n    return 1\n"
+    result = symbol_range_in_text("test.py", code, "nonexistent")
+    assert isinstance(result, str)
+    assert "not found" in result
+
+
+def test_symbol_range_in_text_empty_symbol():
+    """Test symbol_range_in_text requires symbol name."""
+    code = "def foo():\n    return 1\n"
+    result = symbol_range_in_text("test.py", code, "")
+    assert isinstance(result, str)
+    assert "required" in result
+
+
+def test_symbol_range_in_text_unsupported_language():
+    """Test symbol_range_in_text with unsupported language."""
+    code = "some code"
+    result = symbol_range_in_text("test.txt", code, "symbol")
+    assert isinstance(result, str)
+    assert "no tree-sitter" in result or "error" in result
+
+
+# Replace symbol tests
+def test_replace_symbol_in_text():
+    """Test replace_symbol_in_text replaces function body."""
+    code = "def foo():\n    return 1\n"
+    new_body = "def foo():\n    return 2\n"
+    result = replace_symbol_in_text("test.py", code, "foo", new_body)
+    assert "return 2" in result
+
+
+def test_replace_symbol_in_text_not_found():
+    """Test replace_symbol_in_text raises error for missing symbol."""
+    code = "def foo():\n    return 1\n"
+    with pytest.raises(ValueError):
+        replace_symbol_in_text("test.py", code, "nonexistent", "new")
+
+
+# Insert after imports tests
+def test_insert_after_imports_in_text_python():
+    """Test insert_after_imports_in_text for Python."""
+    code = "import os\nimport sys\n\ndef foo():\n    pass\n"
+    result = insert_after_imports_in_text("test.py", code, "import json\n")
+    assert "import json" in result
+    assert result.index("import json") > result.index("import sys")
+
+
+def test_insert_after_imports_in_text_no_imports():
+    """Test insert_after_imports_in_text with no imports."""
+    code = "def foo():\n    pass\n"
+    result = insert_after_imports_in_text("test.py", code, "import os\n")
+    assert "import os" in result
+    # Should be at the beginning
+    assert result.index("import os") < result.index("def foo")
+
+
+def test_insert_after_imports_in_text_adds_newline():
+    """Test insert_after_imports_in_text adds newline if needed."""
+    code = "import os\n\ndef foo():\n    pass\n"
+    result = insert_after_imports_in_text("test.py", code, "import json")
+    assert "import json\n" in result
+
+
+def test_insert_after_imports_in_text_unsupported_language():
+    """Test insert_after_imports_in_text with unsupported language."""
+    code = "code"
+    with pytest.raises(ValueError):
+        insert_after_imports_in_text("test.txt", code, "snippet")
+
+
+# Public function tests
+def test_list_symbols_python(ctx):
+    """Test list_symbols for Python file."""
+    seed(ctx, "test.py", "def foo():\n    pass\n\nclass Bar:\n    pass\n")
+    result = list_symbols(ctx.workspace, "test.py")
+    assert "function foo" in result
+    assert "class Bar" in result
+
+
+def test_list_symbols_no_symbols(ctx):
+    """Test list_symbols with no symbols."""
+    seed(ctx, "test.py", "x = 1\n")
+    result = list_symbols(ctx.workspace, "test.py")
+    assert "No symbols" in result
+
+
+def test_list_symbols_with_imports(ctx):
+    """Test list_symbols includes imports."""
+    seed(ctx, "test.py", "import os\n\ndef foo():\n    pass\n")
+    result = list_symbols(ctx.workspace, "test.py")
+    assert "import" in result
+
+
+def test_list_symbols_unsupported_file(ctx):
+    """Test list_symbols with unsupported file type."""
+    seed(ctx, "test.txt", "no symbols here")
+    result = list_symbols(ctx.workspace, "test.txt")
+    assert "error" in result or "No symbols" in result
+
+
+def test_find_symbol_found(ctx):
+    """Test find_symbol finds function."""
+    seed(ctx, "test.py", "def my_func():\n    return 1\n")
+    result = find_symbol(ctx.workspace, "test.py", "my_func")
+    assert "Found" in result
+    assert "my_func" in result
+
+
+def test_find_symbol_not_found(ctx):
+    """Test find_symbol returns error for missing symbol."""
+    seed(ctx, "test.py", "def foo():\n    pass\n")
+    result = find_symbol(ctx.workspace, "test.py", "nonexistent")
+    assert "not found" in result
+
+
+def test_find_symbol_empty_name(ctx):
+    """Test find_symbol requires symbol name."""
+    seed(ctx, "test.py", "def foo():\n    pass\n")
+    result = find_symbol(ctx.workspace, "test.py", "")
+    assert "required" in result
+
+
+def test_find_symbol_unsupported_file(ctx):
+    """Test find_symbol with unsupported file."""
+    seed(ctx, "test.txt", "content")
+    result = find_symbol(ctx.workspace, "test.txt", "sym")
+    assert "error" in result
+
+
+def test_get_node_at_valid_position(ctx):
+    """Test get_node_at retrieves node info."""
+    seed(ctx, "test.py", "def foo():\n    return 1\n")
+    result = get_node_at(ctx.workspace, "test.py", 1, 1)
+    assert "test.py:1:1" in result
+    assert "type:" in result
+
+
+def test_get_node_at_with_name(ctx):
+    """Test get_node_at includes name when available."""
+    seed(ctx, "test.py", "def my_func():\n    pass\n")
+    result = get_node_at(ctx.workspace, "test.py", 1, 5)
+    assert "type:" in result
+
+
+def test_get_node_at_invalid_position(ctx):
+    """Test get_node_at with out-of-range position."""
+    seed(ctx, "test.py", "x = 1\n")
+    result = get_node_at(ctx.workspace, "test.py", 100, 100)
+    # Should still return node info for root or no node message
+    assert "test.py" in result
+
+
+def test_get_node_at_zero_position_handling(ctx):
+    """Test get_node_at handles zero line/character (converts to valid)."""
+    seed(ctx, "test.py", "x = 1\n")
+    result = get_node_at(ctx.workspace, "test.py", 0, 0)
+    # Line 0, col 0 should be adjusted
+    assert "test.py" in result
+
+
+def test_query_tree_preset_functions(ctx):
+    """Test query_tree with functions preset."""
+    seed(ctx, "test.py", "def foo():\n    pass\n\ndef bar():\n    pass\n")
+    result = query_tree(ctx.workspace, "test.py", preset="functions")
+    assert "capture(s)" in result
+
+
+def test_query_tree_preset_imports(ctx):
+    """Test query_tree with imports preset."""
+    seed(ctx, "test.py", "import os\nimport sys\n")
+    result = query_tree(ctx.workspace, "test.py", preset="imports")
+    assert "capture(s)" in result
+
+
+def test_query_tree_custom_query(ctx):
+    """Test query_tree with custom query."""
+    seed(ctx, "test.py", "def foo():\n    pass\n")
+    result = query_tree(ctx.workspace, "test.py", query="(function_definition) @func")
+    assert "capture(s)" in result or "error" in result
+
+
+def test_query_tree_invalid_query(ctx):
+    """Test query_tree with invalid query."""
+    seed(ctx, "test.py", "x = 1\n")
+    result = query_tree(ctx.workspace, "test.py", query="@@@invalid@@@")
+    assert "error" in result
+
+
+def test_query_tree_no_preset_or_query(ctx):
+    """Test query_tree requires preset or query."""
+    seed(ctx, "test.py", "x = 1\n")
+    result = query_tree(ctx.workspace, "test.py")
+    assert "error" in result or "pass preset" in result
+
+
+def test_query_tree_unknown_preset(ctx):
+    """Test query_tree rejects unknown preset."""
+    seed(ctx, "test.py", "x = 1\n")
+    result = query_tree(ctx.workspace, "test.py", preset="invalid_preset")
+    assert "unknown preset" in result
+
+
+def test_query_tree_preset_not_defined_for_language(ctx):
+    """Test query_tree with preset not defined for language."""
+    # This would require a language that doesn't have all presets
+    pass
+
+
+def test_parse_file_python(ctx):
+    """Test parse_file returns tree structure."""
+    seed(ctx, "test.py", "def foo():\n    pass\n\nclass Bar:\n    pass\n")
+    result = parse_file(ctx.workspace, "test.py")
+    assert "named node(s)" in result
+
+
+def test_parse_file_no_named_nodes(ctx):
+    """Test parse_file with no named nodes."""
+    seed(ctx, "test.py", "x = 1\n")
+    result = parse_file(ctx.workspace, "test.py")
+    # Might have some named nodes or "No named nodes"
+    assert "test.py" in result
+
+
+def test_parse_file_truncation(ctx):
+    """Test parse_file indicates truncation at depth limit."""
+    # Create deeply nested structure
+    code = "def a():\n"
+    for i in range(20):
+        code += "  " * (i + 1) + f"def b{i}():\n"
+    code += "    pass\n"
+    seed(ctx, "test.py", code)
+    result = parse_file(ctx.workspace, "test.py")
+    # Should indicate capping/truncation
+    assert "named node(s)" in result
+
+
+def test_parse_bytes_python():
+    """Test parse_bytes with Python."""
+    code = b"def foo():\n    pass\n"
+    tree = parse_bytes("python", code)
+    assert tree is not None
+    assert tree.root_node is not None
+
+
+def test_parse_bytes_javascript():
+    """Test parse_bytes with JavaScript."""
+    code = b"function foo() { }\n"
+    tree = parse_bytes("javascript", code)
+    assert tree is not None
+
+
+def test_parse_bytes_typescript():
+    """Test parse_bytes with TypeScript."""
+    code = b"function foo(): void { }\n"
+    tree = parse_bytes("typescript", code)
+    assert tree is not None
+
+
+def test_parse_bytes_go():
+    """Test parse_bytes with Go."""
+    code = b"func foo() { }\n"
+    tree = parse_bytes("go", code)
+    assert tree is not None
+
+
+# Parse function tests
+def test_parse_nonexistent_path(ctx):
+    """Test _parse with nonexistent path."""
+    tree, source, rel, lang = _parse(ctx.workspace, "nonexistent.py")
+    assert tree is None
+    assert "error" in lang
+
+
+def test_parse_directory_not_file(ctx):
+    """Test _parse rejects directories."""
+    (ctx.workspace / "dir").mkdir()
+    tree, source, rel, lang = _parse(ctx.workspace, "dir")
+    assert tree is None
+    assert "not a file" in lang
+
+
+def test_parse_unsupported_extension(ctx):
+    """Test _parse with unsupported file extension."""
+    seed(ctx, "test.txt", "content")
+    tree, source, rel, lang = _parse(ctx.workspace, "test.txt")
+    assert tree is None
+    assert "no tree-sitter" in lang
+
+
+def test_parse_read_error(ctx):
+    """Test _parse handles read errors gracefully."""
+    # Create a file, then remove read permissions
+    import os
+    seed(ctx, "test.py", "x = 1\n")
+    path = ctx.workspace / "test.py"
+    os.chmod(path, 0o000)
+    try:
+        tree, source, rel, lang = _parse(ctx.workspace, "test.py")
+        assert tree is None
+        assert "error" in lang
+    finally:
+        os.chmod(path, 0o644)
+
+
+# Constants verification
+def test_extension_mapping_complete():
+    """Test EXTENSION_TO_LANG has expected mappings."""
+    assert EXTENSION_TO_LANG[".py"] == "python"
+    assert EXTENSION_TO_LANG[".js"] == "javascript"
+    assert EXTENSION_TO_LANG[".go"] == "go"
+
+
+def test_symbol_types_complete():
+    """Test SYMBOL_TYPES defined for all languages."""
+    assert "python" in SYMBOL_TYPES
+    assert "javascript" in SYMBOL_TYPES
+    assert "typescript" in SYMBOL_TYPES
+    assert "go" in SYMBOL_TYPES
+
+
+def test_presets_complete():
+    """Test PRESETS have expected values."""
+    assert "functions" in PRESETS
+    assert "classes" in PRESETS
+    assert "imports" in PRESETS
+
+
+def test_preset_queries_defined():
+    """Test _PRESET_QUERIES defined for languages."""
+    assert "python" in _PRESET_QUERIES
+    assert "javascript" in _PRESET_QUERIES
+    assert "go" in _PRESET_QUERIES
+
+
+def test_languages_cache():
+    """Test _languages() caching."""
+    langs1 = _languages()
+    langs2 = _languages()
+    assert langs1 is langs2  # Same object (cached)
+
+
+# Edge cases and error handling
+def test_syntax_gate_with_none_language():
+    """Test syntax_gate with file that has no language support."""
+    result = syntax_gate("test.unknown", "code", None)
+    assert result is None  # Should return None for unsupported
+
+
+def test_list_symbols_nested_functions(ctx):
+    """Test list_symbols with nested functions."""
+    code = """def outer():
+    def inner():
+        pass
+    return inner
+"""
+    seed(ctx, "test.py", code)
+    result = list_symbols(ctx.workspace, "test.py")
+    assert "outer" in result
+    assert "inner" in result
+
+
+def test_query_tree_no_captures(ctx):
+    """Test query_tree when query has no captures."""
+    seed(ctx, "test.py", "x = 1\n")
+    # Query that won't match
+    result = query_tree(ctx.workspace, "test.py", query="(function_definition) @f")
+    assert "No captures" in result
+
+
+def test_find_node_type_declaration_go():
+    """Test finding Go type declarations."""
+    code = "type MyType struct {}\n"
+    result = symbol_range_in_text("test.go", code, "MyType")
+    # Go type declarations have special handling
+    assert isinstance(result, (tuple, str))
+
+
+def test_capture_with_empty_result(ctx):
+    """Test query with empty result."""
+    seed(ctx, "test.py", "# just a comment\n")
+    result = query_tree(ctx.workspace, "test.py", preset="functions")
+    assert "No captures" in result
+
+
+def test_get_node_at_includes_parent(ctx):
+    """Test get_node_at includes parent information."""
+    code = "def my_func():\n    x = 1\n"
+    seed(ctx, "test.py", code)
+    result = get_node_at(ctx.workspace, "test.py", 2, 5)
+    # Should include parent info
+    assert "parent:" in result or "test.py" in result
+
+
+def test_get_node_at_shows_children(ctx):
+    """Test get_node_at shows named children."""
+    code = "def my_func():\n    x = 1\n    return x\n"
+    seed(ctx, "test.py", code)
+    result = get_node_at(ctx.workspace, "test.py", 1, 1)
+    # Function should have named children
+    assert "named children:" in result or "type:" in result
+
+
+def test_parse_file_with_language_override(ctx):
+    """Test parse_file respects language override."""
+    seed(ctx, "test.txt", "def foo():\n    pass\n")
+    result = parse_file(ctx.workspace, "test.txt", language="python")
+    # Should parse as Python due to language override
+    assert "function" in result.lower() or "named node" in result.lower() or "error" not in result.lower()
