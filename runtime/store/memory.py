@@ -448,16 +448,17 @@ def _ingest_paths(
     briefing_paths: str,
 ) -> list[str]:
     if profile == "coder":
-        ordered = [str(item) for item in (getattr(result, "files_touched", None) or [])]
+        raw_items = [str(item) for item in (getattr(result, "files_touched", None) or [])]
     else:
-        ordered = []
-        seen: set[str] = set()
-        for item in _split_paths(briefing_paths) + list(survey_paths or []):
-            text = str(item or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            ordered.append(text)
+        raw_items = _split_paths(briefing_paths) + list(survey_paths or [])
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
     return ordered[:INGEST_FILE_CAP]
 
 
@@ -478,7 +479,7 @@ def _resolve_existing(workspace: Path, path: str) -> tuple[str | None, str | Non
 def _entry_for_path(rel: str, facts: str) -> str:
     bits = [rel]
     name = Path(rel).name
-    for part in re.split(r"[;.\n]", facts or ""):
+    for part in re.split(r"[;\n]|\.\s+", facts or ""):
         fragment = part.strip()
         if fragment and name in fragment:
             bits.append(_clip(fragment, FIELD_CLIP))

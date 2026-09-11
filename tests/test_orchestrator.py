@@ -295,6 +295,35 @@ def test_child_crash_is_failed_not_orch_crash(tmp_path):
     asyncio.run(run())
 
 
+def test_ingest_error_does_not_block_child_finish(tmp_path):
+    async def run():
+        import agents.orchestrator as orch_mod
+
+        session = await _bind(tmp_path, FakeProvider())()
+        queue = session.subscribe()
+        while not queue.empty():
+            queue.get_nowait()
+
+        def boom(*args, **kwargs):
+            raise TypeError("bad note")
+
+        orig = orch_mod.ingest_result
+        orch_mod.ingest_result = boom
+        try:
+            orch: Orchestrator = session._loop
+            text = await orch.spawn("ask", "ping")
+            await orch.wait_children()
+        finally:
+            orch_mod.ingest_result = orig
+        assert text.startswith("started")
+        await _wait_idle(session)
+        finished = [item for item in _queued(queue) if isinstance(item, AgentFinished)]
+        assert finished
+        assert all(item.status != "failed" for item in finished)
+
+    asyncio.run(run())
+
+
 def test_spawn_budget(tmp_path):
     async def run():
         hang = asyncio.Event()

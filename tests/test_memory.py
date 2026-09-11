@@ -318,6 +318,41 @@ def test_ingest_coder_uses_files_touched(tmp_path):
     assert "other.py" not in files
 
 
+def test_ingest_coder_dedupes_files_touched(tmp_path):
+    (tmp_path / "edited.py").write_text("x\n", encoding="utf-8")
+    extras = []
+    for index in range(INGEST_FILE_CAP):
+        name = f"f{index}.py"
+        (tmp_path / name).write_text("x\n", encoding="utf-8")
+        extras.append(name)
+    result = AgentResult(
+        status="ok",
+        outcome="what: edited\nverdict: done\n",
+        files_touched=["edited.py", "edited.py", *extras],
+    )
+    ingest_result(tmp_path, "coder", result)
+    files = load(tmp_path)["files"]
+    assert len(files) == INGEST_FILE_CAP
+    assert "edited.py" in files
+    assert extras[INGEST_FILE_CAP - 2] in files
+
+
+def test_ingest_fact_keeps_dotted_filename(tmp_path):
+    (tmp_path / "session.py").write_text("x\n", encoding="utf-8")
+    result = AgentResult(
+        status="ok",
+        outcome=(
+            "what: session root\n"
+            "paths: session.py\n"
+            "facts: retry lives in session.py near _bind_loop.\n"
+            "verdict: ok\n"
+        ),
+    )
+    ingest_result(tmp_path, "ask", result)
+    entry = load(tmp_path)["files"]["session.py"]
+    assert "retry lives in session.py" in entry["entry_points"]
+
+
 def test_ingest_ask_caps_files(tmp_path):
     paths = []
     for index in range(INGEST_FILE_CAP + 3):
