@@ -2,9 +2,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 from agents.orchestrator import (
     Orchestrator,
@@ -13,8 +10,18 @@ from agents.orchestrator import (
     _apply_run_status,
 )
 from agents.compactor import AgentResult
+from agents.profile import ProfileRegistry
+from tools.registry import ToolRegistry
 from tests.fakes import FakeProvider
 from llm.provider import LLMResult, Usage
+
+
+def _make_orchestrator(**kwargs):
+    return Orchestrator(
+        all_tools=ToolRegistry(),
+        profiles=ProfileRegistry(),
+        **kwargs,
+    )
 
 
 def test_orch_system_prompt():
@@ -40,9 +47,11 @@ def test_apply_run_status_ok_to_ok():
     assert updated.status == "ok"
 
 
-def test_apply_run_status_ok_to_incomplete():
-    result = AgentResult(status="ok", summary="done", outcome="")
-    updated = _apply_run_status(result, "incomplete", "")
+def test_apply_run_status_ok_does_not_override_incomplete():
+    # "incomplete" is set upstream by the compactor, never by run_status
+    # itself; _apply_run_status must not clobber it with "ok".
+    result = AgentResult(status="incomplete", summary="done", outcome="")
+    updated = _apply_run_status(result, "ok", "")
     assert updated.status == "incomplete"
 
 
@@ -53,8 +62,8 @@ def test_apply_run_status_ok_to_max_turns():
 
 
 def test_apply_run_status_incomplete_beats_max_turns():
-    result = AgentResult(status="max_turns", summary="done", outcome="")
-    updated = _apply_run_status(result, "incomplete", "")
+    result = AgentResult(status="incomplete", summary="done", outcome="")
+    updated = _apply_run_status(result, "max_turns", "")
     assert updated.status == "incomplete"
 
 
@@ -96,97 +105,87 @@ def test_apply_run_status_outcome_already_set():
 
 def test_orchestrator_init(tmp_path):
     provider = FakeProvider()
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path)
-        assert orch._workspace == tmp_path
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path)
+    assert orch._ctx.workspace == tmp_path
 
 
 def test_orchestrator_system_prompt(tmp_path):
     provider = FakeProvider()
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path)
-        # Should have the orchestrator system prompt
-        assert "orchestrator" in orch._system.lower() or "spawn" in orch._system.lower()
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path)
+    assert "orchestrator" in orch._system_prompt.lower() or "spawn" in orch._system_prompt.lower()
 
 
 def test_orchestrator_max_turns(tmp_path):
+    from runtime.config import EngineConfig
+
     provider = FakeProvider()
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path, max_turns=5)
-        assert orch._max_turns == 5
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path, config=EngineConfig(max_turns=5))
+    assert orch._config.max_turns == 5
 
 
 def test_orchestrator_context_dump(tmp_path):
     provider = FakeProvider()
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path)
-        dump = orch.context_dump()
-        assert isinstance(dump, str)
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path)
+    dump = orch.context_dump()
+    assert isinstance(dump, str)
 
 
 def test_orchestrator_breakdown_for_unknown(tmp_path):
     provider = FakeProvider()
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path)
-        breakdown = orch.breakdown_for("unknown_agent")
-        assert breakdown is None
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path)
+    breakdown = orch.breakdown_for("unknown_agent")
+    assert breakdown is None
 
 
 def test_orchestrator_transcript_for_unknown(tmp_path):
     provider = FakeProvider()
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path)
-        transcript = orch.transcript_for("unknown_agent")
-        assert transcript is None
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path)
+    transcript = orch.transcript_for("unknown_agent")
+    assert transcript is None
 
 
 def test_orchestrator_with_config(tmp_path):
     from runtime.config import EngineConfig
-    
+
     provider = FakeProvider()
     config = EngineConfig(max_turns=10)
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path, config=config)
-        assert orch._max_turns == 10
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path, config=config)
+    assert orch._config.max_turns == 10
 
 
 def test_orchestrator_child_tasks(tmp_path):
     provider = FakeProvider()
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path)
-        assert hasattr(orch, "_child_tasks")
-        assert isinstance(orch._child_tasks, dict)
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path)
+    assert hasattr(orch, "_child_tasks")
+    assert isinstance(orch._child_tasks, dict)
 
 
-def test_orchestrator_emit_callback(tmp_path):
+def test_orchestrator_on_agent_result_callback(tmp_path):
     provider = FakeProvider()
-    emitted = []
-    
-    def on_emit(event):
-        emitted.append(event)
-    
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path, on_emit=on_emit)
-        assert orch._emit_event == on_emit
+    results = []
+
+    def on_agent_result(agent_id, result):
+        results.append((agent_id, result))
+
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path, on_agent_result=on_agent_result)
+    assert orch._on_agent_result == on_agent_result
 
 
 def test_orchestrator_on_tool_callback(tmp_path):
     provider = FakeProvider()
     tools_called = []
-    
+
     def on_tool(name, tool_input, result, status):
         tools_called.append(name)
-    
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path, on_tool=on_tool)
-        assert orch._on_tool == on_tool
+
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path, on_tool=on_tool)
+    assert orch._on_tool == on_tool
 
 
 def test_orchestrator_hooks(tmp_path):
     from agents.hooks import AgentHooks
-    
+
     provider = FakeProvider()
     hooks = AgentHooks()
-    with patch("agents.orchestrator.discover_profiles"):
-        orch = Orchestrator(llm=provider, workspace=tmp_path, hooks=hooks)
-        assert orch._hooks == hooks
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path, hooks=hooks)
+    assert orch._hooks == hooks

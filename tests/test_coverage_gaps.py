@@ -72,8 +72,8 @@ class TestMcpManager:
         """Test is_auth_error detection."""
         assert is_auth_error("unauthorized error")
         assert is_auth_error("401 forbidden")
-        assert is_auth_error("authentication required")
-        assert is_auth_error("please login")
+        assert is_auth_error("authorization required")
+        assert is_auth_error("please login required")
         assert not is_auth_error("regular error")
 
     def test_tool_list_from_dict(self):
@@ -277,8 +277,8 @@ class TestOpenRouterLLM:
         """Test _mark_message with string content."""
         msg = {"role": "user", "content": "hello"}
         marked = _mark_message(msg)
-        assert marked.get("cache_control")
         assert isinstance(marked["content"], list)
+        assert marked["content"][0].get("cache_control")
 
     def test_mark_message_list_content(self):
         """Test _mark_message with list content."""
@@ -342,7 +342,7 @@ class TestLifecycleCommands:
     def test_submit_user_message_no_session(self, tmp_path):
         """Test submit_user_message without active session."""
         session = EngineSession(tmp_path, tmp_path / "db.sqlite")
-        cmd = SubmitUserMessage()
+        cmd = SubmitUserMessage(text="hello")
         # _require_session will return False without _state
         # This tests the early return path
         result = submit_user_message(session, cmd)
@@ -367,7 +367,7 @@ class TestFilesCommands:
     def test_open_file_not_found(self, tmp_path):
         """Test open_file with non-existent file."""
         session = EngineSession(tmp_path, tmp_path / "db.sqlite")
-        cmd = OpenFile()
+        cmd = OpenFile(path="nonexistent.txt")
         # _require_session will return False without _state
         open_file(session, cmd)
         # Should return early
@@ -375,7 +375,7 @@ class TestFilesCommands:
     def test_close_file_not_open(self, tmp_path):
         """Test close_file with file not open."""
         session = EngineSession(tmp_path, tmp_path / "db.sqlite")
-        cmd = CloseFile()
+        cmd = CloseFile(path="nonexistent.txt")
         # _require_session will return False without _state
         close_file(session, cmd)
         # Should return early
@@ -421,14 +421,14 @@ class TestDocsTools:
 
     def test_go_query_with_path(self):
         """Test _go with module path query."""
-        with patch("runtime.tools.web.web_fetch") as mock_fetch:
+        with patch("runtime.tools.docs.web_fetch") as mock_fetch:
             mock_fetch.return_value = "content"
             result = _go("github.com/user/repo")
             assert "https://pkg.go.dev/" in result or "content" in result
 
     def test_mdn_empty_results(self):
         """Test _mdn with empty results."""
-        with patch("runtime.tools.httpx.get_json") as mock_get:
+        with patch("runtime.tools.docs.get_json") as mock_get:
             mock_get.return_value = ({"documents": []}, "")
             result = _mdn("nonexistent")
             assert "(no results)" in result

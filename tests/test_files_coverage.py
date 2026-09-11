@@ -94,9 +94,10 @@ def test_open_file_duplicate(tmp_path):
         _drain(queue)
         await session.handle(OpenFile(path="a.py"))
         _drain(queue)
+        open_files = session.snapshot().open_files
         await session.aclose()
-        return session.snapshot().open_files
-    
+        return open_files
+
     files = asyncio.run(run())
     assert files.count("a.py") == 1
 
@@ -126,8 +127,9 @@ def test_close_file_success(tmp_path):
         _drain(queue)
         await session.handle(CloseFile(path="a.py"))
         events = _drain(queue)
+        open_files = session.snapshot().open_files
         await session.aclose()
-        return events, session.snapshot().open_files
+        return events, open_files
     
     events, files = asyncio.run(run())
     assert any(isinstance(e, FileClosed) and e.path == "a.py" for e in events)
@@ -254,8 +256,9 @@ def test_rename_path_with_open_file(tmp_path):
         _drain(queue)
         await session.handle(RenamePath(src="old.py", dest="new.py"))
         _drain(queue)
+        open_files = session.snapshot().open_files
         await session.aclose()
-        return session.snapshot().open_files
+        return open_files
     
     files = asyncio.run(run())
     assert "new.py" in files and "old.py" not in files
@@ -314,8 +317,9 @@ def test_delete_path_with_open_file(tmp_path):
         _drain(queue)
         await session.handle(DeletePath(path="temp.py"))
         _drain(queue)
+        open_files = session.snapshot().open_files
         await session.aclose()
-        return session.snapshot().open_files
+        return open_files
     
     files = asyncio.run(run())
     assert "temp.py" not in files

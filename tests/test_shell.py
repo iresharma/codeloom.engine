@@ -114,7 +114,7 @@ def test_auto_allows_git_status_but_not_chained(tmp_path):
     asyncio.run(run())
 
 
-def test_ulimit_prefix_uses_blocks(tmp_path):
+def test_ulimit_prefix_uses_blocks(tmp_path, monkeypatch):
     async def run():
         seen = {}
 
@@ -122,13 +122,9 @@ def test_ulimit_prefix_uses_blocks(tmp_path):
             seen["script"] = args[0]
             raise RuntimeError("stop")
 
-        asyncio.create_subprocess_shell = fake_create  # type: ignore[assignment]
-        try:
-            with pytest.raises(RuntimeError):
-                await run_command(tmp_path, "echo hi", approval="never", file_limit_mb=1)
-        finally:
-            pass
-        # May not patch successfully; assert helper instead.
+        monkeypatch.setattr(asyncio, "create_subprocess_shell", fake_create)
+        with pytest.raises(RuntimeError):
+            await run_command(tmp_path, "echo hi", approval="never", file_limit_mb=1)
         assert file_limit_blocks(1) == 2048
 
     asyncio.run(run())

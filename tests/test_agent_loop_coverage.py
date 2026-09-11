@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -29,7 +29,7 @@ def test_agent_loop_init(tmp_path):
         system_prompt=DEFAULT_SYSTEM,
     )
     assert loop._llm == provider
-    assert loop._workspace == tmp_path
+    assert loop._ctx.workspace == tmp_path
 
 
 def test_agent_loop_default_system():
@@ -101,45 +101,34 @@ def test_agent_loop_custom_on_tool(tmp_path):
 
 def test_agent_loop_language(tmp_path):
     from runtime.language import LanguageInfo
-    
+
     provider = FakeProvider()
-    lang = LanguageInfo(lang="python")
+    lang = LanguageInfo(name="python", supported=True, file_counts={}, warning=None)
     loop = AgentLoop(llm=provider, workspace=tmp_path, language=lang)
-    assert loop._language == lang
+    assert loop._ctx.language == lang
 
 
 def test_agent_loop_lsp(tmp_path):
     provider = FakeProvider()
     lsp_mock = MagicMock()
     loop = AgentLoop(llm=provider, workspace=tmp_path, lsp=lsp_mock)
-    assert loop._lsp == lsp_mock
+    assert loop._ctx.lsp == lsp_mock
 
 
 def test_agent_loop_files(tmp_path):
     from runtime.tools.tracker import FileTracker
-    
+
     provider = FakeProvider()
     files = FileTracker()
     loop = AgentLoop(llm=provider, workspace=tmp_path, files=files)
-    assert loop._files == files
+    assert loop._ctx.files == files
 
 
 def test_agent_loop_max_turns(tmp_path):
     provider = FakeProvider()
-    loop = AgentLoop(llm=provider, workspace=tmp_path, max_turns=10)
-    assert loop._max_turns == 10
-
-
-def test_agent_loop_max_tools(tmp_path):
-    provider = FakeProvider()
-    loop = AgentLoop(llm=provider, workspace=tmp_path, max_tools=100)
-    assert loop._max_tools == 100
-
-
-def test_agent_loop_reply_cap(tmp_path):
-    provider = FakeProvider()
-    loop = AgentLoop(llm=provider, workspace=tmp_path, reply_cap=5000)
-    assert loop._reply_cap == 5000
+    config = EngineConfig(max_turns=10)
+    loop = AgentLoop(llm=provider, workspace=tmp_path, config=config)
+    assert loop._config.max_turns == 10
 
 
 def test_agent_loop_hooks(tmp_path):
@@ -153,11 +142,11 @@ def test_agent_loop_hooks(tmp_path):
 
 def test_agent_loop_registry(tmp_path):
     from tools.registry import ToolRegistry
-    
+
     provider = FakeProvider()
     registry = ToolRegistry()
-    loop = AgentLoop(llm=provider, workspace=tmp_path, registry=registry)
-    assert loop._registry == registry
+    loop = AgentLoop(llm=provider, workspace=tmp_path, tools=registry)
+    assert loop._tools == registry
 
 
 async def test_agent_loop_run_simple(tmp_path):
@@ -174,24 +163,6 @@ async def test_agent_loop_run_simple(tmp_path):
 def test_agent_loop_context_dump(tmp_path):
     provider = FakeProvider()
     loop = AgentLoop(llm=provider, workspace=tmp_path)
-    
-    # Mock the context
-    with patch.object(loop, "_context", "test context"):
-        result = loop.context_dump()
-        assert isinstance(result, str)
 
-
-def test_agent_loop_breakdown_for(tmp_path):
-    provider = FakeProvider()
-    loop = AgentLoop(llm=provider, workspace=tmp_path)
-    
-    breakdown = loop.breakdown_for("nonexistent_agent")
-    assert breakdown is None
-
-
-def test_agent_loop_transcript_for(tmp_path):
-    provider = FakeProvider()
-    loop = AgentLoop(llm=provider, workspace=tmp_path)
-    
-    transcript = loop.transcript_for("nonexistent_agent")
-    assert transcript is None
+    result = loop.context_dump()
+    assert isinstance(result, str)

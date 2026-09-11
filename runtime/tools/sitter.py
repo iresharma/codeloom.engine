@@ -424,7 +424,13 @@ def _captures(language, root, query_source: str) -> list[tuple[object, object]]:
 
     try:
         query = Query(language, query_source)
-        raw = query.captures(root)
+        if hasattr(query, "captures"):
+            raw = query.captures(root)
+        else:
+            # tree-sitter >=0.22 moved captures() onto QueryCursor.
+            from tree_sitter import QueryCursor
+
+            raw = QueryCursor(query).captures(root)
     except QueryError as exc:
         raise ValueError(str(exc)) from exc
     if isinstance(raw, dict):

@@ -362,7 +362,7 @@ class TestRenameSymbol:
             with patch("tools.lsp.run_lsp.rename_symbol") as mock_fn:
                 mock_fn.return_value = workspace_edit
                 with patch("tools.lsp.normalize_workspace_edit") as mock_normalize:
-                    mock_normalize.return_value = {}
+                    mock_normalize.return_value = {"test.py": ["edit"]}
                     with patch("tools.lsp.apply_workspace_edit") as mock_apply:
                         mock_apply.return_value = "applied"
                         result = await rename_symbol(ctx_with_lsp, "test.py", 1, 1, "new_name")

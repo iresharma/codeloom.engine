@@ -96,20 +96,12 @@ def test_list_engine_worktrees_empty(tmp_path):
 
 
 def test_is_settle_prompt_yes(tmp_path):
-    from types import SimpleNamespace
-    choices = [
-        SimpleNamespace(text="merge", intent="merge"),
-        SimpleNamespace(text="pr", intent="pr"),
-    ]
+    choices = ["merge", "pr", "keep", "discard"]
     assert is_settle_prompt(choices)
 
 
 def test_is_settle_prompt_no(tmp_path):
-    from types import SimpleNamespace
-    choices = [
-        SimpleNamespace(text="yes", intent="yes"),
-        SimpleNamespace(text="no", intent="no"),
-    ]
+    choices = ["yes", "no"]
     assert not is_settle_prompt(choices)
 
 
