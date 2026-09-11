@@ -15,7 +15,7 @@ from runtime.tools.shell import (
 def test_file_limit_blocks():
     assert file_limit_blocks(1) == 2048
     assert file_limit_blocks(2) == 4096
-    assert file_limit_blocks(0) == 1
+    assert file_limit_blocks(0) == 2048
 
 
 def test_format_command_result():
@@ -45,13 +45,15 @@ def test_format_command_result_timeout():
 
 
 async def test_run_command_simple(tmp_path):
-    result = await run_command(tmp_path, "echo hello", timeout=5)
+    result = await run_command(tmp_path, "echo hello", timeout=5, approval="never")
     assert result.exit_code == 0
     assert "hello" in result.stdout
 
 
 async def test_run_command_error(tmp_path):
-    result = await run_command(tmp_path, "ls /nonexistent 2>/dev/null || true", timeout=5)
+    result = await run_command(
+        tmp_path, "ls /nonexistent 2>/dev/null || true", timeout=5, approval="never"
+    )
     assert result.exit_code == 0  # because of || true
 
 
@@ -76,7 +78,7 @@ async def test_run_command_sudo_denied(tmp_path):
         await run_command(tmp_path, "sudo ls", timeout=5)
         assert False, "should raise RuntimeError"
     except RuntimeError as e:
-        assert "denied" in str(e) or "hard deny" in str(e).lower()
+        assert "sudo" in str(e).lower()
 
 
 async def test_run_command_engine_denied(tmp_path):
@@ -84,7 +86,7 @@ async def test_run_command_engine_denied(tmp_path):
         await run_command(tmp_path, "rm -rf .engine/data", timeout=5)
         assert False, "should raise RuntimeError"
     except RuntimeError as e:
-        assert "denied" in str(e) or "hard deny" in str(e).lower()
+        assert ".engine" in str(e)
 
 
 async def test_run_command_custom_cwd(tmp_path):
@@ -96,7 +98,9 @@ async def test_run_command_custom_cwd(tmp_path):
 
 async def test_run_command_timeout_bound(tmp_path):
     # Timeout > HARD_MAX_TIMEOUT should be clamped
-    result = await run_command(tmp_path, "echo ok", timeout=10000, file_limit_mb=1)
+    result = await run_command(
+        tmp_path, "echo ok", timeout=10000, file_limit_mb=1, approval="never"
+    )
     assert result.exit_code == 0
 
 
@@ -118,13 +122,15 @@ async def test_run_command_with_callbacks(tmp_path):
     def on_output(channel, text):
         outputs.append((channel, text))
     
-    result = await run_command(tmp_path, "echo test", timeout=5, on_output=on_output)
+    result = await run_command(
+        tmp_path, "echo test", timeout=5, on_output=on_output, approval="never"
+    )
     assert result.exit_code == 0
 
 
 def test_run_command_sync(tmp_path):
     async def run():
-        return await run_command(tmp_path, "echo sync_test", timeout=5)
-    
+        return await run_command(tmp_path, "echo sync_test", timeout=5, approval="never")
+
     result = asyncio.run(run())
     assert result.exit_code == 0

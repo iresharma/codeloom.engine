@@ -171,11 +171,12 @@ class TestLSPClient:
 
         client = LSPClient(["test"], cwd="/test")
 
-        # Mock successful response
-        client._pending[1] = queue.Queue()
-        client._pending[1].put({"id": 1, "result": {"success": True}})
+        # Simulate the server replying as soon as the request is written.
+        def fake_write(payload):
+            client._pending[payload["id"]].put({"id": payload["id"], "result": {"success": True}})
 
-        result = client.request("test_method", {"param": "value"})
+        with patch.object(client, "_write_message", side_effect=fake_write):
+            result = client.request("test_method", {"param": "value"})
         assert result == {"success": True}
 
     @patch("runtime.tools.lsp.subprocess.Popen")
@@ -217,11 +218,15 @@ class TestLSPClient:
         mock_popen.return_value = mock_proc
 
         client = LSPClient(["test"], cwd="/test")
-        client._pending[1] = queue.Queue()
-        client._pending[1].put({"id": 1, "error": {"message": "error occurred"}})
 
-        with pytest.raises(RuntimeError, match="error occurred"):
-            client.request("test", {})
+        def fake_write(payload):
+            client._pending[payload["id"]].put(
+                {"id": payload["id"], "error": {"message": "error occurred"}}
+            )
+
+        with patch.object(client, "_write_message", side_effect=fake_write):
+            with pytest.raises(RuntimeError, match="error occurred"):
+                client.request("test", {})
 
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_notify(self, mock_popen):
