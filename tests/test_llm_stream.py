@@ -118,7 +118,13 @@ def test_idle_timeout_closes():
             return self
 
         async def __anext__(self):
-            await asyncio.sleep(5)
+            # _result_from_stream wraps this call in asyncio.wait_for(idle_s),
+            # so it is cancelled well before this sleep completes. The
+            # duration only needs to comfortably outlast idle_s (0.05s)
+            # below; kept at 0.2s (not near-zero) so a regression that
+            # dropped the wait_for wrapper would still be caught by
+            # pytest-timeout/CI rather than passing accidentally fast.
+            await asyncio.sleep(0.2)
             return chunk(content="x")
 
         async def __aenter__(self):
@@ -144,7 +150,10 @@ def test_cancelled_closes():
             return self
 
         async def __anext__(self):
-            await asyncio.sleep(10)
+            # The outer task is cancelled after 0.01s (below), well before
+            # this sleep can complete; the duration just needs to be long
+            # enough that __anext__ is still pending at cancellation time.
+            await asyncio.sleep(0.2)
             return chunk(content="x")
 
         async def __aenter__(self):

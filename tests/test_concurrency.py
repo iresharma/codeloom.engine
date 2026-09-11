@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 from runtime.tools.edits import apply_edit, str_replace
 from tests.conftest import seed
@@ -12,7 +11,9 @@ class FakeLsp:
         return []
 
     def diagnostics_after_change(self, rel_path: str, new_text: str, timeout: float = 5.0) -> list:
-        time.sleep(0.05)
+        # Called synchronously via asyncio.to_thread by _lsp_after; the sleep
+        # only simulated LSP round-trip latency and isn't needed for this
+        # test's concurrency assertions, so it's dropped rather than faked.
         return []
 
 

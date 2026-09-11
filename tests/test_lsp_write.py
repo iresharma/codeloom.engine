@@ -36,6 +36,7 @@ from tools.lsp import rename_symbol as rename_symbol_tool
 
 pytestmark = [
     pytest.mark.lsp,
+    pytest.mark.integration,
     pytest.mark.skipif(shutil.which("gopls") is None, reason="gopls is not installed"),
 ]
 
