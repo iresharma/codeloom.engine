@@ -635,6 +635,19 @@ def test_apply_run_status_precedence():
     _apply_run_status(ok, "max_turns", "stopped after 16 turns")
     assert ok.status == "max_turns"
 
+    stopped = AgentResult(status="ok", summary="done", outcome="done")
+    _apply_run_status(stopped, "stopped", "stopped after 16 turns")
+    assert stopped.status == "stopped"
+
+    incomplete_stop = AgentResult(
+        status="incomplete",
+        summary="missed diagnostics",
+        outcome="closer",
+        missing_checks=["get_diagnostics"],
+    )
+    _apply_run_status(incomplete_stop, "stopped", "stopped after 16 turns")
+    assert incomplete_stop.status == "incomplete"
+
     aborted = AgentResult(status="incomplete", summary="s", outcome="closer")
     _apply_run_status(aborted, "aborted", "(aborted)")
     assert aborted.status == "aborted"

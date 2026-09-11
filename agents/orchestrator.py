@@ -63,9 +63,9 @@ Answer directly when:
 
 Use remember for lasting engineering, product, or CI/CD decisions — not play-by-play or subagent transcripts. Ask/coder/researcher briefings are also persisted automatically on finish.
 
-At most one ask and one researcher per user message. leftover_questions: put them in your answer and ask the user; do not spawn another ask or researcher to chase them. Respawn only when status=incomplete, or the user explicitly asks to go deeper. If spawn returns "already spawned", answer with what you have.
+At most one ask and one researcher per user message. leftover_questions: put them in your answer and ask the user; do not spawn another ask or researcher to chase them. Respawn when status=incomplete, or status=max_turns for a writer, or the user explicitly asks to go deeper. If spawn returns "already spawned", answer with what you have.
 
-If a child returns status=incomplete, respawn once with a tighter task or tell the user. If spawn returns "spawn budget exhausted", too many children are already live — stop spawning and report what is running.
+If a child returns status=incomplete, respawn once with a tighter task or tell the user. If a child returns status=max_turns, spawn one writer (coder or tester) with the leftover / paths / files_touched from the report — do not rediscover the repo. Do not respawn ask or researcher on max_turns; tell the user the leftover. If a child returns status=stopped, tell the user; do not respawn. If spawn returns "spawn budget exhausted", too many children are already live — stop spawning and report what is running.
 
 Do not call write tools or run_command. You do not have them.
 """
@@ -86,8 +86,9 @@ def _apply_run_status(
     """Merge child.run() status onto the compressor result.
 
     aborted/failed always win. incomplete (missing required tools) beats
-    max_turns and ok. max_turns only replaces ok. A failed run keeps the
-    compressor summary and only fills outcome from the exception when empty.
+    max_turns, stopped, and ok. max_turns and stopped only replace ok. A
+    failed run keeps the compressor summary and only fills outcome from the
+    exception when empty.
     """
     if run_status in {"aborted", "failed"}:
         result.status = run_status
@@ -98,9 +99,24 @@ def _apply_run_status(
         ):
             result.outcome = run_outcome
         return result
-    if run_status == "max_turns" and result.status == "ok":
-        result.status = "max_turns"
+    if run_status in {"max_turns", "stopped"} and result.status == "ok":
+        result.status = run_status
     return result
+
+
+_CHILD_RUN_STATUSES = frozenset({"ok", "max_turns", "stopped"})
+
+
+def _child_run_status(child) -> str:
+    """Map a finished child's _exit_status onto the orch run status.
+
+    aborted/failed are set by _run_child's except blocks, not here. An
+    unexpected value becomes failed so it cannot look like a clean ok.
+    """
+    status = getattr(child, "_exit_status", None) or "ok"
+    if status in _CHILD_RUN_STATUSES:
+        return status
+    return "failed"
 
 
 class Orchestrator(AgentLoop):
@@ -487,8 +503,7 @@ class Orchestrator(AgentLoop):
         try:
             child.set_catalog_query(task)
             text = await child.run(task)
-            if str(text).startswith("stopped after"):
-                status = "max_turns"
+            status = _child_run_status(child)
             outcome = text
         except asyncio.CancelledError:
             status = "aborted"
@@ -651,13 +666,9 @@ class Orchestrator(AgentLoop):
         async def ask_user(question, kind="text", **kwargs):
             if self._child_ask_user is None:
                 return "no"
-            return await self._child_ask_user(
-                question,
-                kind=kind,
-                agent_id=agent_id,
-                profile=profile.name,
-                **kwargs,
-            )
+            kwargs["agent_id"] = agent_id
+            kwargs["profile"] = profile.name
+            return await self._child_ask_user(question, kind=kind, **kwargs)
 
         def on_output(call_id, stream, text):
             if self._child_on_output is not None:
