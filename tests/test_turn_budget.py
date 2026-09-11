@@ -6,7 +6,7 @@ import json
 from agents.agent_loop import CLOSER_MESSAGE, CONTINUE_GRANT, AgentLoop
 from agents.compactor import AgentResult
 from agents.hooks import AgentHooks
-from agents.orchestrator import ORCH_SYSTEM, _apply_run_status
+from agents.orchestrator import ORCH_SYSTEM, _apply_run_status, _child_run_status
 from llm.provider import LLMResult, ToolCall
 from protocol.commands import AnswerPrompt
 from protocol.events import AgentFinished, AgentStarted, UserPromptRequested
@@ -315,6 +315,22 @@ def test_apply_run_status_stopped_vs_incomplete():
     maxed = AgentResult(status="ok", summary="s", outcome="o")
     _apply_run_status(maxed, "max_turns", "stopped after 4 turns")
     assert maxed.status == "max_turns"
+
+
+def test_child_run_status_unknown_is_failed():
+    class _Child:
+        pass
+
+    child = _Child()
+    assert _child_run_status(child) == "ok"
+    child._exit_status = "ok"
+    assert _child_run_status(child) == "ok"
+    child._exit_status = "max_turns"
+    assert _child_run_status(child) == "max_turns"
+    child._exit_status = "stopped"
+    assert _child_run_status(child) == "stopped"
+    child._exit_status = "weird"
+    assert _child_run_status(child) == "failed"
 
 
 def test_orch_prompt_handoff_and_stop():

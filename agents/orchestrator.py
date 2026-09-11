@@ -104,6 +104,21 @@ def _apply_run_status(
     return result
 
 
+_CHILD_RUN_STATUSES = frozenset({"ok", "max_turns", "stopped"})
+
+
+def _child_run_status(child) -> str:
+    """Map a finished child's _exit_status onto the orch run status.
+
+    aborted/failed are set by _run_child's except blocks, not here. An
+    unexpected value becomes failed so it cannot look like a clean ok.
+    """
+    status = getattr(child, "_exit_status", None) or "ok"
+    if status in _CHILD_RUN_STATUSES:
+        return status
+    return "failed"
+
+
 class Orchestrator(AgentLoop):
     def __init__(
         self,
@@ -488,9 +503,7 @@ class Orchestrator(AgentLoop):
         try:
             child.set_catalog_query(task)
             text = await child.run(task)
-            status = getattr(child, "_exit_status", None) or "ok"
-            if status not in {"ok", "max_turns", "stopped"}:
-                status = "ok"
+            status = _child_run_status(child)
             outcome = text
         except asyncio.CancelledError:
             status = "aborted"
@@ -653,8 +666,8 @@ class Orchestrator(AgentLoop):
         async def ask_user(question, kind="text", **kwargs):
             if self._child_ask_user is None:
                 return "no"
-            kwargs.setdefault("agent_id", agent_id)
-            kwargs.setdefault("profile", profile.name)
+            kwargs["agent_id"] = agent_id
+            kwargs["profile"] = profile.name
             return await self._child_ask_user(question, kind=kind, **kwargs)
 
         def on_output(call_id, stream, text):

@@ -320,8 +320,9 @@ class AgentLoop:
                 last_text = result.text
                 self._history.append({"role": "assistant", "content": last_text})
                 self._emit_message(last_text or "")
-                self._exit_status = "ok"
                 return last_text
+            if self._exit_status == "ok":
+                self._exit_status = "max_turns"
             if last_text:
                 final = last_text
             elif self._exit_status == "stopped":
