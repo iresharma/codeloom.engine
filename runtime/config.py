@@ -7,6 +7,7 @@ from pathlib import Path
 from llm.openrouter import load_env_sh
 
 EXEC_APPROVALS = ("auto", "always", "never")
+TURN_CONTINUES = ("prompt", "never")
 # 2.0 never fires in-loop; overflow still force-compacts. Must ship with
 # github_file windows or surveys hit the 120k fuse.
 CHILD_COMPACT_TRIGGER = 2.0
@@ -19,6 +20,9 @@ class EngineConfig:
     llm_timeout_s: float = 600.0
     stream_idle_s: float = 90.0
     max_turns: int = 16
+    turn_slice: int = 16
+    max_continues: int = 3
+    turn_continue: str = "prompt"
     exec_approval: str = "auto"
     exec_timeout_s: int = 120
     exec_file_limit_mb: int = 2048
@@ -44,6 +48,10 @@ class EngineConfig:
             "ENGINE_LLM_IDLE_S", config.stream_idle_s, warnings
         )
         config.max_turns = _env_int("ENGINE_MAX_TURNS", config.max_turns, warnings)
+        config.turn_slice = _env_int("ENGINE_TURN_SLICE", config.turn_slice, warnings)
+        config.max_continues = _env_int(
+            "ENGINE_MAX_CONTINUES", config.max_continues, warnings
+        )
         config.exec_timeout_s = _env_int(
             "ENGINE_EXEC_TIMEOUT_S", config.exec_timeout_s, warnings
         )
@@ -74,6 +82,15 @@ class EngineConfig:
             )
             approval = "auto"
         config.exec_approval = approval
+        raw_continue = os.environ.get("ENGINE_TURN_CONTINUE", config.turn_continue)
+        continue_mode = (raw_continue or "").strip().lower()
+        if continue_mode not in TURN_CONTINUES:
+            warnings.append(
+                f"ENGINE_TURN_CONTINUE={raw_continue!r} is not prompt|never; "
+                "using prompt"
+            )
+            continue_mode = "prompt"
+        config.turn_continue = continue_mode
         config.warnings = warnings
         return config
 

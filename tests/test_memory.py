@@ -355,6 +355,18 @@ def test_ingest_max_turns_still_writes(tmp_path):
     assert "a.py" in load(tmp_path)["files"]
 
 
+def test_ingest_stopped_skips(tmp_path):
+    (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+    result = AgentResult(
+        status="stopped",
+        outcome="what: partial\nverdict: still useful\npaths: a.py\n",
+    )
+    ingest_result(tmp_path, "ask", result)
+    data = load(tmp_path)
+    assert data["engineering"] == []
+    assert data["files"] == {}
+
+
 def test_ingest_skips_fresh_note(tmp_path):
     (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
     remember(tmp_path, "files", path="a.py", purpose="hand-written")
