@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import html as html_lib
 import json
 import os
 import re
 import urllib.parse
-from html.parser import HTMLParser
+
+from bs4 import BeautifulSoup
+from markdownify import markdownify as _markdownify
 
 MAX_FETCH = 50_000
 USER_AGENT = "engine-researcher/1.0"
@@ -28,30 +29,6 @@ _SKIP = {
     "iframe",
     "template",
     "button",
-}
-_VOID = {"br", "hr", "img", "meta", "link", "input"}
-_HEADINGS = {f"h{i}": i for i in range(1, 7)}
-_BLOCK = {
-    "p",
-    "div",
-    "section",
-    "article",
-    "main",
-    "li",
-    "tr",
-    "blockquote",
-    "pre",
-    "ul",
-    "ol",
-    "table",
-    "thead",
-    "tbody",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
 }
 _SPACE = re.compile(r"[ \t]+")
 _BLANK = re.compile(r"\n{3,}")
@@ -235,23 +212,30 @@ def _from_html(url: str, text: str) -> str:
 
 
 def html_to_markdown(text: str) -> tuple[str, str]:
-    parser = _MarkdownHTML()
     try:
-        parser.feed(text or "")
-        parser.close()
+        soup = BeautifulSoup(text or "", "html.parser")
     except Exception:
-        fallback = _SPACE.sub(" ", html_lib.unescape(re.sub(r"<[^>]+>", " ", text or ""))).strip()
+        fallback = _SPACE.sub(" ", re.sub(r"<[^>]+>", " ", text or "")).strip()
         return "", fallback
-    title = _SPACE.sub(" ", parser.title).strip()
-    preferred = _normalize_md(parser.preferred)
-    general = _normalize_md(parser.general)
+    title_tag = soup.find("title")
+    title = _SPACE.sub(" ", title_tag.get_text() if title_tag else "").strip()
+    for tag in soup.find_all(_SKIP):
+        tag.decompose()
+    if soup.head:
+        soup.head.decompose()
+    root = soup.body or soup
+    general = _normalize_md(_markdownify(str(root), heading_style="ATX", bullets="-"))
+    preferred = ""
+    main_nodes = root.find_all(["main", "article"])
+    if main_nodes:
+        preferred_html = "".join(str(node) for node in main_nodes)
+        preferred = _normalize_md(_markdownify(preferred_html, heading_style="ATX", bullets="-"))
     body = preferred if len(preferred) >= min(80, len(general) // 3 + 1) and preferred else general
     return title, body
 
 
 def _normalize_md(text: str) -> str:
-    text = html_lib.unescape(text or "")
-    text = _SPACE.sub(" ", text)
+    text = _SPACE.sub(" ", text or "")
     text = text.replace(" \n", "\n").replace("\n ", "\n")
     text = _BLANK.sub("\n\n", text)
     return text.strip()
@@ -262,108 +246,3 @@ def _clip(text: str, cap: int) -> str:
     if len(text) <= cap:
         return text
     return text[:cap] + "\n...[truncated]"
-
-
-class _MarkdownHTML(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.title = ""
-        self.general = ""
-        self.preferred = ""
-        self._skip = 0
-        self._in_title = False
-        self._in_pre = False
-        self._href = ""
-        self._main_depth = 0
-        self._title_parts: list[str] = []
-        self._link_parts: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        tag = tag.lower()
-        attrs_d = {k.lower(): v or "" for k, v in attrs}
-        if tag in _SKIP:
-            self._skip += 1
-            return
-        if self._skip:
-            return
-        if tag == "title":
-            self._in_title = True
-            return
-        if tag in {"article", "main"}:
-            self._main_depth += 1
-        if tag in _HEADINGS:
-            self._write("\n\n" + "#" * _HEADINGS[tag] + " ")
-        elif tag == "p":
-            self._write("\n\n")
-        elif tag == "br":
-            self._write("\n")
-        elif tag == "hr":
-            self._write("\n\n---\n\n")
-        elif tag == "li":
-            self._write("\n- ")
-        elif tag == "pre":
-            self._in_pre = True
-            self._write("\n\n```\n")
-        elif tag == "code" and not self._in_pre:
-            self._write("`")
-        elif tag == "blockquote":
-            self._write("\n\n> ")
-        elif tag == "a":
-            self._href = attrs_d.get("href") or ""
-            self._link_parts = []
-        elif tag in _BLOCK:
-            self._write("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        tag = tag.lower()
-        if tag in _SKIP:
-            if self._skip:
-                self._skip -= 1
-            return
-        if self._skip:
-            return
-        if tag == "title":
-            self._in_title = False
-            self.title = "".join(self._title_parts)
-            return
-        if tag in {"article", "main"} and self._main_depth:
-            self._main_depth -= 1
-        if tag in _HEADINGS or tag in {"p", "blockquote"}:
-            self._write("\n\n")
-        elif tag == "pre":
-            self._in_pre = False
-            self._write("\n```\n\n")
-        elif tag == "code" and not self._in_pre:
-            self._write("`")
-        elif tag == "a":
-            label = _SPACE.sub(" ", "".join(self._link_parts)).strip()
-            href = self._href
-            self._href = ""
-            self._link_parts = []
-            if label and href:
-                self._write(f"[{label}]({href})")
-            elif label:
-                self._write(label)
-        elif tag in _BLOCK and tag not in _VOID:
-            self._write("\n")
-
-    def handle_data(self, data: str) -> None:
-        if self._in_title:
-            self._title_parts.append(data)
-            return
-        if self._skip or not data:
-            return
-        if self._href:
-            self._link_parts.append(data)
-            return
-        if self._in_pre:
-            self._write(data)
-            return
-        self._write(_SPACE.sub(" ", data))
-
-    def _write(self, chunk: str) -> None:
-        if not chunk:
-            return
-        self.general += chunk
-        if self._main_depth:
-            self.preferred += chunk
