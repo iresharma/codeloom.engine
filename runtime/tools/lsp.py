@@ -96,7 +96,7 @@ class LSPClient:
         while self._alive:
             try:
                 msg = self._read_message(self._stdout)
-            except (OSError, ValueError, json.JSONDecodeError):
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 break
             if msg is None:
                 break
@@ -109,7 +109,12 @@ class LSPClient:
         self._alive = False
 
     def _stderr_drain(self) -> None:
-        for _ in iter(self._stderr.readline, b""):
+        try:
+            while self._alive:
+                line = self._stderr.readline()
+                if not line:
+                    break
+        except (OSError, ValueError, TypeError):
             pass
 
     def request(self, method: str, params: dict, timeout: float = 15.0):

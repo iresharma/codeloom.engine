@@ -45,11 +45,11 @@ def search_candidates(
     Split out from `search()` so a caller (the search tool's judge re-rank
     stage) can see every candidate ripgrep found before any truncation.
     """
+    if not pattern:
+        raise ValueError("pattern is required")
     rg = shutil.which("rg")
     if not rg:
         raise RuntimeError("rg not found; install ripgrep")
-    if not pattern:
-        raise ValueError("pattern is required")
 
     workspace = workspace.resolve()
     target = workspace
