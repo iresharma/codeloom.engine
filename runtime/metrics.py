@@ -14,6 +14,7 @@ from runtime.config import EngineConfig
 TOKEN_KINDS = ("prompt", "completion", "reasoning", "cached", "total")
 LLM_BUCKETS = (1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0)
 TOOL_BUCKETS = (0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 15.0, 30.0, 60.0, 120.0)
+JUDGE_BUCKETS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.5, 3.0)
 
 
 class EngineMetrics:
@@ -217,6 +218,43 @@ class EngineMetrics:
             registry=self.registry,
         )
 
+        self._judge_info = Gauge(
+            "engine_judge_info",
+            "Constant 1 labeled with the TypeSafe model for this session",
+            ["model"],
+            registry=self.registry,
+        )
+        self._judge_requests = Gauge(
+            "engine_judge_requests",
+            "TypeSafe System One calls by tag and result",
+            ["tag", "result"],
+            registry=self.registry,
+        )
+        self._judge_latency = Histogram(
+            "engine_judge_request_duration_seconds",
+            "TypeSafe System One wall time, excluding cache hits",
+            ["tag"],
+            registry=self.registry,
+            buckets=JUDGE_BUCKETS,
+        )
+        self._judge_tokens = Gauge(
+            "engine_judge_tokens",
+            "TypeSafe token usage by kind",
+            ["kind"],
+            registry=self.registry,
+        )
+        self._judge_cost = Gauge(
+            "engine_judge_cost_usd",
+            "TypeSafe reported cost for this session in USD",
+            registry=self.registry,
+        )
+        self._judge_decisions = Gauge(
+            "engine_judge_decisions",
+            "Judged outcomes emitted as JudgementMade",
+            ["tag", "outcome", "enforced"],
+            registry=self.registry,
+        )
+
         for kind in TOKEN_KINDS:
             self._run_tokens.labels(kind=kind).set(0)
 
@@ -229,7 +267,7 @@ class EngineMetrics:
         workspace: Path | str = "",
         on_warning: Callable[[str], None] | None = None,
     ) -> EngineMetrics:
-        return cls(
+        metrics = cls(
             url=config.pushgateway_url,
             job=config.metrics_job,
             interval_s=config.metrics_push_interval_s,
@@ -237,6 +275,8 @@ class EngineMetrics:
             workspace=workspace,
             on_warning=on_warning,
         )
+        metrics.set_judge_model(config.judge_model)
+        return metrics
 
     def sample(self, name: str, labels: dict[str, str] | None = None) -> float | None:
         return self.registry.get_sample_value(name, labels or {})
@@ -375,6 +415,44 @@ class EngineMetrics:
 
     def observe_error(self, kind: str) -> None:
         self._errors.labels(kind=kind or "session").inc()
+        self.request_push()
+
+    def set_judge_model(self, model: str) -> None:
+        self._judge_info.labels(model=model or "jev-latest").set(1)
+
+    def observe_judge_request(self, tag: str, verdict, failed: bool) -> None:
+        tag = tag or "unknown"
+        cache_hit = bool(verdict is not None and getattr(verdict, "cache_hit", False))
+        if failed:
+            result = "error"
+        elif cache_hit:
+            result = "cache"
+        else:
+            result = "ok"
+        self._judge_requests.labels(tag=tag, result=result).inc()
+        if result == "ok" and verdict is not None:
+            latency_s = max(0.0, float(getattr(verdict, "latency_ms", 0) or 0) / 1000.0)
+            self._judge_latency.labels(tag=tag).observe(latency_s)
+            usage = getattr(verdict, "usage", None)
+            if usage is not None:
+                inp = int(getattr(usage, "input_tokens", 0) or 0)
+                out = int(getattr(usage, "output_tokens", 0) or 0)
+                cost = float(getattr(usage, "cost", 0) or 0)
+                self._judge_tokens.labels(kind="input").inc(inp)
+                self._judge_tokens.labels(kind="output").inc(out)
+                self._judge_tokens.labels(kind="total").inc(inp + out)
+                if cost:
+                    self._judge_cost.inc(cost)
+        self.request_push()
+
+    def observe_judge_decision(
+        self, tag: str, outcome: str, enforced: bool
+    ) -> None:
+        self._judge_decisions.labels(
+            tag=tag or "unknown",
+            outcome=outcome or "unknown",
+            enforced="true" if enforced else "false",
+        ).inc()
         self.request_push()
 
     def set_live_agents(self, count: int) -> None:

@@ -118,7 +118,11 @@ class EngineSession:
         self._mcp_cool_s = 30.0
         self._auth_tasks: list[asyncio.Task] = []
         self._registry = None
-        self._judge = JudgeManager(self._config, on_failure=self._on_judge_failure)
+        self._judge = JudgeManager(
+            self._config,
+            on_failure=self._on_judge_failure,
+            on_request=self._on_judge_request,
+        )
         self._metrics: EngineMetrics | None = None
         try:
             self._llm = OpenRouterLLM.from_env(self._workspace, config=self._config)
@@ -726,6 +730,11 @@ class EngineSession:
     def _on_judge_failure(self, message: str) -> None:
         self._emit(WarningOccurred(message=message))
 
+    def _on_judge_request(self, tag: str, verdict, failed: bool) -> None:
+        if self._metrics is None:
+            return
+        self._metrics.observe_judge_request(tag, verdict, failed)
+
     def _on_judgement(
         self,
         *,
@@ -737,6 +746,8 @@ class EngineSession:
         latency_ms: int,
         agent_id: str = "",
     ) -> None:
+        if self._metrics is not None:
+            self._metrics.observe_judge_decision(tag, outcome, enforced)
         self._emit(
             JudgementMade(
                 tag=tag,

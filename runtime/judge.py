@@ -96,12 +96,13 @@ class Verdict:
 
 
 class JudgeManager:
-    def __init__(self, config: EngineConfig, *, on_failure=None):
+    def __init__(self, config: EngineConfig, *, on_failure=None, on_request=None):
         self._model = config.judge_model
         self._timeout_s = max(0.05, config.judge_timeout_ms / 1000.0)
         self._cache_size = max(1, config.judge_cache_size)
         self._cache: OrderedDict[str, Any] = OrderedDict()
         self._on_failure = on_failure
+        self._on_request = on_request
         self._failure_emitted = False
         self.calls = 0
         self.cache_hits = 0
@@ -152,7 +153,9 @@ class JudgeManager:
             self._cache.move_to_end(key)
             self.cache_hits += 1
             logger.info("judge tag=%s cache_hit=true", tag)
-            return Verdict(cached, latency_ms=0, cache_hit=True)
+            verdict = Verdict(cached, latency_ms=0, cache_hit=True)
+            self._emit_request(tag, verdict, failed=False)
+            return verdict
         self.calls += 1
         started = time.monotonic()
         try:
@@ -164,9 +167,11 @@ class JudgeManager:
             )
         except TypeSafeError as exc:
             self._report_failure(tag, exc)
+            self._emit_request(tag, None, failed=True)
             return None
         except Exception as exc:  # noqa: BLE001 - a judge failure must never propagate
             self._report_failure(tag, exc)
+            self._emit_request(tag, None, failed=True)
             return None
         latency_ms = int((time.monotonic() - started) * 1000)
         self._cache[key] = response
@@ -181,7 +186,17 @@ class JudgeManager:
             getattr(usage, "input_tokens", None),
             getattr(usage, "output_tokens", None),
         )
-        return Verdict(response, latency_ms=latency_ms, cache_hit=False)
+        verdict = Verdict(response, latency_ms=latency_ms, cache_hit=False)
+        self._emit_request(tag, verdict, failed=False)
+        return verdict
+
+    def _emit_request(self, tag: str, verdict: Verdict | None, failed: bool) -> None:
+        if self._on_request is None:
+            return
+        try:
+            self._on_request(tag, verdict, failed)
+        except Exception:  # noqa: BLE001 - a callback failure must not escape ask()
+            logger.warning("judge on_request callback failed", exc_info=True)
 
     def _report_failure(self, tag: str, exc: Exception) -> None:
         self.failures += 1

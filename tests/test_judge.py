@@ -176,6 +176,39 @@ def test_ask_reports_first_failure_only():
     assert "timeout" in seen[0]
 
 
+def test_ask_emits_on_request_for_ok_cache_and_error():
+    seen: list[tuple] = []
+
+    def on_request(tag, verdict, failed):
+        seen.append((tag, getattr(verdict, "cache_hit", None), failed))
+
+    client = _FakeClient(response=_FakeResponse())
+    manager = _manager_with_fake_client(client)
+    manager._on_request = on_request
+    state = {"command": "ls"}
+
+    asyncio.run(manager.ask(state, {}, tag="exec_approval"))
+    asyncio.run(manager.ask(state, {}, tag="exec_approval"))
+    manager._client = _FakeClient(exc=RuntimeError("down"))
+    asyncio.run(manager.ask({"other": 1}, {}, tag="call_verify"))
+
+    assert seen[0] == ("exec_approval", False, False)
+    assert seen[1] == ("exec_approval", True, False)
+    assert seen[2] == ("call_verify", None, True)
+
+
+def test_on_request_exception_does_not_escape_ask():
+    client = _FakeClient(response=_FakeResponse())
+    manager = _manager_with_fake_client(client)
+
+    def boom(*_args):
+        raise RuntimeError("metrics")
+
+    manager._on_request = boom
+    verdict = asyncio.run(manager.ask({"x": 1}, {}, tag="t"))
+    assert isinstance(verdict, Verdict)
+
+
 def test_aclose_closes_underlying_client():
     client = _FakeClient(response=_FakeResponse())
     manager = _manager_with_fake_client(client)

@@ -846,6 +846,9 @@ coloured card on the tools panel, and puts the last verdict in the status
 line. F7 filters the protocol log to `JudgementMade` only. The engine
 process prints `judge: <mode> model=… exec=…` (or `judge: off`) at
 startup so you can see whether the key loaded before you attach a client.
+When `ENGINE_PUSHGATEWAY_URL` is set, the same session snapshot includes
+TypeSafe gauges: requests by tag/result (`ok` / `cache` / `error`),
+latency, tokens, reported cost, and decisions by tag/outcome/enforced.
 
 **Scope note on the plan's Phase 8.** The plan proposes TypeSafe as a
 subagent *dispatcher* — selecting, ordering, and admission-controlling a
