@@ -94,6 +94,26 @@ class Verdict:
     def usage(self) -> Any:
         return getattr(self._response, "usage", None)
 
+    def all_answers(self) -> dict[str, dict[str, Any]]:
+        """Every answer the response actually carries, keyed by question
+        name -- the full response object, for callers that want more than
+        one named accessor's worth (e.g. a trace/debug log)."""
+        out: dict[str, dict[str, Any]] = {}
+        for key, answer in (getattr(self._response, "nouls", None) or {}).items():
+            out[key] = {"noul": answer.noul}
+        for key, answer in (getattr(self._response, "choices", None) or {}).items():
+            out[key] = {
+                "choice": answer.choice,
+                "confidence": getattr(answer, "confidence", None),
+                "probabilities": dict(getattr(answer, "probabilities", {}) or {}),
+            }
+        for key, answer in (getattr(self._response, "scores", None) or {}).items():
+            out[key] = {
+                "score": answer.score,
+                "confidence": getattr(answer, "confidence", None),
+            }
+        return out
+
 
 class JudgeManager:
     def __init__(self, config: EngineConfig, *, on_failure=None, on_request=None):
@@ -154,7 +174,7 @@ class JudgeManager:
             self.cache_hits += 1
             logger.info("judge tag=%s cache_hit=true", tag)
             verdict = Verdict(cached, latency_ms=0, cache_hit=True)
-            self._emit_request(tag, verdict, failed=False)
+            self._emit_request(tag, verdict, failed=False, state=state, questions=questions)
             return verdict
         self.calls += 1
         started = time.monotonic()
@@ -167,11 +187,11 @@ class JudgeManager:
             )
         except TypeSafeError as exc:
             self._report_failure(tag, exc)
-            self._emit_request(tag, None, failed=True)
+            self._emit_request(tag, None, failed=True, state=state, questions=questions)
             return None
         except Exception as exc:  # noqa: BLE001 - a judge failure must never propagate
             self._report_failure(tag, exc)
-            self._emit_request(tag, None, failed=True)
+            self._emit_request(tag, None, failed=True, state=state, questions=questions)
             return None
         latency_ms = int((time.monotonic() - started) * 1000)
         self._cache[key] = response
@@ -187,14 +207,22 @@ class JudgeManager:
             getattr(usage, "output_tokens", None),
         )
         verdict = Verdict(response, latency_ms=latency_ms, cache_hit=False)
-        self._emit_request(tag, verdict, failed=False)
+        self._emit_request(tag, verdict, failed=False, state=state, questions=questions)
         return verdict
 
-    def _emit_request(self, tag: str, verdict: Verdict | None, failed: bool) -> None:
+    def _emit_request(
+        self,
+        tag: str,
+        verdict: Verdict | None,
+        failed: bool,
+        *,
+        state: Any = None,
+        questions: dict | None = None,
+    ) -> None:
         if self._on_request is None:
             return
         try:
-            self._on_request(tag, verdict, failed)
+            self._on_request(tag, verdict, failed, state=state, questions=questions)
         except Exception:  # noqa: BLE001 - a callback failure must not escape ask()
             logger.warning("judge on_request callback failed", exc_info=True)
 

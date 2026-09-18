@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from agents.hooks import AgentHooks
@@ -74,6 +75,7 @@ from runtime.tools.fs import WorkspacePathError, list_tree, read_text
 from runtime.tools.git import read_state as read_git
 from runtime.tools.lsp import LSPManager, LSPTimeoutError
 from runtime.judge import JudgeManager
+from runtime.trace import TraceWriter
 from runtime.mcp.config import load_mcp_config, load_trust, save_trust
 from runtime.mcp.manager import McpManager
 from runtime.mcp.tokens import apply_tokens, load_tokens, save_token
@@ -122,6 +124,11 @@ class EngineSession:
             self._config,
             on_failure=self._on_judge_failure,
             on_request=self._on_judge_request,
+        )
+        self._trace = (
+            TraceWriter(self._workspace / ".engine" / "trace.jsonl")
+            if self._config.trace_calls
+            else None
         )
         self._metrics: EngineMetrics | None = None
         try:
@@ -245,6 +252,9 @@ class EngineSession:
         self._state.stats.last_turn_cost = 0.0
         self._aborting = False
         self._turn_started = time.monotonic()
+        # Emit thinking before the task runs so headless clients do not
+        # treat classify_turn / compact as "orch idle, no children".
+        self._on_state("thinking", 0)
         self._turn_task = asyncio.get_running_loop().create_task(self._run_turn(text))
 
     def _maybe_pump(self) -> None:
@@ -664,8 +674,14 @@ class EngineSession:
         if not profile:
             profile = "orchestrator" if not agent_id else "unknown"
         return AgentHooks(
-            on_tool=lambda call_id, name, arguments, result: self._on_tool(
-                call_id, name, arguments, result, agent_id=agent_id, profile=profile
+            on_tool=lambda call_id, name, arguments, result, reasoning="": self._on_tool(
+                call_id,
+                name,
+                arguments,
+                result,
+                agent_id=agent_id,
+                profile=profile,
+                reasoning=reasoning,
             ),
             on_tool_start=lambda call_id, name, arguments: self._on_tool_start(
                 call_id, name, arguments, agent_id=agent_id
@@ -730,7 +746,26 @@ class EngineSession:
     def _on_judge_failure(self, message: str) -> None:
         self._emit(WarningOccurred(message=message))
 
-    def _on_judge_request(self, tag: str, verdict, failed: bool) -> None:
+    def _on_judge_request(
+        self,
+        tag: str,
+        verdict,
+        failed: bool,
+        *,
+        state: Any = None,
+        questions: dict | None = None,
+    ) -> None:
+        if self._trace is not None:
+            self._trace.write(
+                "judge",
+                tag=tag,
+                failed=failed,
+                cache_hit=verdict.cache_hit if verdict is not None else None,
+                latency_ms=verdict.latency_ms if verdict is not None else None,
+                request=state,
+                questions=sorted((questions or {}).keys()),
+                response=verdict.all_answers() if verdict is not None else {},
+            )
         if self._metrics is None:
             return
         self._metrics.observe_judge_request(tag, verdict, failed)
@@ -837,11 +872,25 @@ class EngineSession:
         result: str,
         agent_id: str = "",
         profile: str = "",
+        reasoning: str = "",
     ) -> None:
         preview = result if len(result) <= 400 else result[:400] + "…"
         started = self._tool_started.pop(call_id, 0)
         duration = int((time.monotonic() - started) * 1000) if started else 0
         ok = not str(result).startswith("error:")
+        if self._trace is not None:
+            self._trace.write(
+                "tool",
+                call_id=call_id,
+                name=name,
+                agent_id=agent_id,
+                profile=profile,
+                arguments=arguments,
+                result=result,
+                ok=ok,
+                duration_ms=duration,
+                reasoning=reasoning,
+            )
         self._emit(
             ToolCallFinished(
                 call_id=call_id,

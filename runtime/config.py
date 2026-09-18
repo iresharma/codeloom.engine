@@ -69,6 +69,7 @@ class EngineConfig:
     judge_mode_intent: str = ""
     judge_mode_write: str = ""
     judge_mode_merge: str = ""
+    trace_calls: bool = False
 
     def judge_mode_for(self, site: str) -> str:
         """Effective judge mode for a call site: its own override, or the
@@ -176,6 +177,7 @@ class EngineConfig:
                 f"judge_mode_{site}",
                 _env_judge_site(f"ENGINE_JUDGE_{site.upper()}", warnings),
             )
+        config.trace_calls = _env_bool("ENGINE_TRACE_CALLS", config.trace_calls, warnings)
 
         # An explicit-but-invalid value (a typo, a stale config) is not a
         # deliberate opt-out of the judged default -- it's treated the same

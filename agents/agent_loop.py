@@ -127,7 +127,7 @@ class AgentLoop:
         tools: ToolRegistry | None = None,
         workspace: Path | None = None,
         system_prompt: str = DEFAULT_SYSTEM,
-        on_tool: Callable[[str, str, dict, str], None] | None = None,
+        on_tool: Callable[..., None] | None = None,
         language=None,
         lsp=None,
         files=None,
@@ -877,9 +877,10 @@ class AgentLoop:
                 ],
             }
         )
+        reasoning = result.text or ""
         if self._concurrent_tools and len(result.tool_calls) > 1:
             outputs = await asyncio.gather(
-                *[self._execute_call(call) for call in result.tool_calls]
+                *[self._execute_call(call, reasoning=reasoning) for call in result.tool_calls]
             )
             for call, output in zip(result.tool_calls, outputs):
                 self._history.append(
@@ -891,7 +892,7 @@ class AgentLoop:
                 )
         else:
             for call in result.tool_calls:
-                output = await self._execute_call(call)
+                output = await self._execute_call(call, reasoning=reasoning)
                 self._history.append(
                     {
                         "role": "tool",
@@ -903,7 +904,7 @@ class AgentLoop:
         if errors:
             raise RuntimeError("history pairing broken: " + "; ".join(errors))
 
-    async def _execute_call(self, call) -> str:
+    async def _execute_call(self, call, reasoning: str = "") -> str:
         arguments = call.arguments()
         if self._hooks.on_tool_start is not None:
             self._hooks.on_tool_start(call.id, call.name, arguments)
@@ -917,11 +918,11 @@ class AgentLoop:
             output = await self._screen_result(call.name, arguments, output)
         except asyncio.CancelledError:
             if self._hooks.on_tool is not None:
-                self._hooks.on_tool(call.id, call.name, arguments, "cancelled")
+                self._hooks.on_tool(call.id, call.name, arguments, "cancelled", reasoning=reasoning)
             raise
         duration = int((time.monotonic() - started) * 1000)
         if self._hooks.on_tool is not None:
-            self._hooks.on_tool(call.id, call.name, arguments, output)
+            self._hooks.on_tool(call.id, call.name, arguments, output, reasoning=reasoning)
         _ = duration
         return output
 

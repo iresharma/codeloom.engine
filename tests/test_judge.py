@@ -104,6 +104,18 @@ def test_verdict_accessors_and_defaults():
     assert verdict.probabilities("missing") == {}
 
 
+def test_verdict_all_answers_covers_every_question_kind():
+    verdict = Verdict(_FakeResponse(), latency_ms=1)
+    answers = verdict.all_answers()
+    assert answers["is_safe"] == {"noul": 0.9}
+    assert answers["kind"] == {
+        "choice": "yes",
+        "confidence": 0.8,
+        "probabilities": {"yes": 0.8},
+    }
+    assert answers["severity"] == {"score": 1.5, "confidence": 0.7}
+
+
 def test_ask_returns_verdict_on_success():
     client = _FakeClient(response=_FakeResponse())
     manager = _manager_with_fake_client(client)
@@ -178,9 +190,11 @@ def test_ask_reports_first_failure_only():
 
 def test_ask_emits_on_request_for_ok_cache_and_error():
     seen: list[tuple] = []
+    seen_state: list = []
 
-    def on_request(tag, verdict, failed):
+    def on_request(tag, verdict, failed, *, state=None, questions=None):
         seen.append((tag, getattr(verdict, "cache_hit", None), failed))
+        seen_state.append(state)
 
     client = _FakeClient(response=_FakeResponse())
     manager = _manager_with_fake_client(client)
@@ -191,6 +205,8 @@ def test_ask_emits_on_request_for_ok_cache_and_error():
     asyncio.run(manager.ask(state, {}, tag="exec_approval"))
     manager._client = _FakeClient(exc=RuntimeError("down"))
     asyncio.run(manager.ask({"other": 1}, {}, tag="call_verify"))
+
+    assert seen_state == [state, state, {"other": 1}]
 
     assert seen[0] == ("exec_approval", False, False)
     assert seen[1] == ("exec_approval", True, False)
