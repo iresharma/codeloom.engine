@@ -117,6 +117,44 @@ def test_apply_worktree_pr_uses_gh(tmp_path):
     assert not dest.exists()
 
 
+def test_apply_worktree_pr_prefixes_metrics_instance(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENGINE_METRICS_INSTANCE", "baseline")
+    _init_git(tmp_path)
+    path, branch, err = add_agent_worktree(tmp_path, "pr790", "coder")
+    assert not err
+    dest = Path(path)
+    (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
+    real_exec = __import__("runtime.tools.git", fromlist=["_exec"])._exec
+    captured: list[list[str]] = []
+
+    def fake_exec(workspace, args, timeout=60, env=None):
+        if args[:2] == ["git", "push"] or args[:1] == ["gh"]:
+            if args[:1] == ["gh"]:
+                captured.append(list(args))
+            stdout = "https://example.com/pr/1\n" if args[0] == "gh" else ""
+            return subprocess.CompletedProcess(args, 0, stdout, "")
+        return real_exec(workspace, args, timeout=timeout)
+
+    with patch("runtime.tools.git._exec", fake_exec):
+        ok, detail, url = apply_worktree(
+            tmp_path,
+            dest,
+            branch,
+            "pr",
+            message="engine(coder): add flag",
+            title="add flag",
+            body="adds flag.py",
+        )
+    assert ok
+    assert url == "https://example.com/pr/1"
+    assert captured
+    args = captured[0]
+    title = args[args.index("--title") + 1]
+    body = args[args.index("--body") + 1]
+    assert title == "[baseline] add flag"
+    assert body.startswith("A/B side: baseline")
+
+
 async def _wait_prompt(session, timeout: float = 2.0):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:

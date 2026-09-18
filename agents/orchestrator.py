@@ -608,6 +608,11 @@ class Orchestrator(AgentLoop):
                     await asyncio.to_thread(
                         remove_agent_worktree, self._ctx.workspace, wt
                     )
+        merged_text = None
+        if self._on_agent_result is not None and not self._aborting_all:
+            # Merge-gate judge call while the child is still listed live so
+            # a headless client does not see idle+no-children and exit.
+            merged_text = await self._apply_merge_gate(profile.name, task, result)
         if self._on_agent_finished is not None:
             self._on_agent_finished(
                 agent_id,
@@ -616,8 +621,7 @@ class Orchestrator(AgentLoop):
                 result.summary,
                 usage=child._usage,
             )
-        if self._on_agent_result is not None and not self._aborting_all:
-            merged_text = await self._apply_merge_gate(profile.name, task, result)
+        if merged_text is not None:
             self._on_agent_result(agent_id, profile.name, merged_text)
             self._recent_results.append((profile.name, result.summary or result.outcome or ""))
             if len(self._recent_results) > 5:

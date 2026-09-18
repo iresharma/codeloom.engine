@@ -215,6 +215,12 @@ def apply_worktree(
         )
         if pushed.returncode != 0:
             return False, (pushed.stderr or pushed.stdout or "git push failed").strip(), ""
+        pr_title = title or message
+        pr_body = body or message
+        instance = (os.environ.get("ENGINE_METRICS_INSTANCE") or "").strip()
+        if instance:
+            pr_title = f"[{instance}] {pr_title}"
+            pr_body = f"A/B side: {instance}\n\n{pr_body}"
         created = _exec(
             workspace,
             [
@@ -224,9 +230,9 @@ def apply_worktree(
                 "--head",
                 branch,
                 "--title",
-                title or message,
+                pr_title,
                 "--body",
-                body or message,
+                pr_body,
             ],
             timeout=120,
         )

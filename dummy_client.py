@@ -176,8 +176,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=1800.0,
-        help="headless idle timeout in seconds (default 1800)",
+        default=0.0,
+        help="headless wall-clock timeout in seconds; 0 waits until idle (default)",
+    )
+    parser.add_argument(
+        "--settle",
+        choices=("keep", "pr", "merge", "discard"),
+        default="keep",
+        help="auto-answer for worktree settle (default keep)",
     )
     return parser.parse_args()
 
@@ -511,6 +517,12 @@ def _format_file_edited(event: FileEdited) -> str:
     return header + "\n" + body
 
 
+def _print_event(event) -> None:
+    text = format_event(event)
+    if text:
+        print(text, flush=True)
+
+
 def main() -> None:
     args = parse_args()
     workspace = Path(args.workspace).expanduser().resolve()
@@ -531,7 +543,13 @@ def main() -> None:
 
         try:
             asyncio.run(
-                run_once(workspace, args.message, timeout=args.timeout)
+                run_once(
+                    workspace,
+                    args.message,
+                    timeout=args.timeout,
+                    settle=args.settle,
+                    on_event=_print_event,
+                )
             )
         except HeadlessError as exc:
             print(str(exc), file=sys.stderr)
