@@ -37,6 +37,7 @@ class EngineConfig:
     metrics_job: str = "engine"
     metrics_instance: str = ""
     metrics_push_interval_s: float = 2.0
+    trace_calls: bool = False
     warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -114,6 +115,7 @@ class EngineConfig:
             )
             continue_mode = "prompt"
         config.turn_continue = continue_mode
+        config.trace_calls = _env_bool("ENGINE_TRACE_CALLS", config.trace_calls, warnings)
         config.warnings = warnings
         return config
 

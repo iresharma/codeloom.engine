@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 @dataclass
 class AgentHooks:
-    on_tool: Callable[[str, str, dict, str], None] | None = None
+    on_tool: Callable[..., None] | None = None
     on_tool_start: Callable[[str, str, dict], None] | None = None
     on_delta: Callable[[str, str, str], None] | None = None
     on_message_start: Callable[[str], None] | None = None

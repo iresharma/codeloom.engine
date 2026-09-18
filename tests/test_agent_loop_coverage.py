@@ -90,13 +90,39 @@ def test_agent_loop_with_tools(tmp_path):
 
 def test_agent_loop_custom_on_tool(tmp_path):
     calls = []
-    
+
     def on_tool(name, tool_input, result, status):
         calls.append((name, status))
-    
+
     provider = FakeProvider()
     loop = AgentLoop(llm=provider, workspace=tmp_path, on_tool=on_tool)
     assert loop._on_tool == on_tool
+
+
+def test_execute_call_forwards_reasoning_to_on_tool(tmp_path):
+    import asyncio
+
+    from tools.registry import discover_tools
+
+    seen: list[str] = []
+
+    def on_tool(call_id, name, arguments, result, reasoning=""):
+        seen.append(reasoning)
+
+    provider = FakeProvider(
+        results=[
+            LLMResult(
+                text="I should look at the file tree before editing anything.",
+                tool_calls=[ToolCall(id="1", name="list_files", arguments_json="{}")],
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2, requests=1),
+            ),
+            LLMResult(text="done", usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2, requests=1)),
+        ]
+    )
+    loop = AgentLoop(llm=provider, workspace=tmp_path, tools=discover_tools(), on_tool=on_tool)
+    asyncio.run(loop.run("look around"))
+
+    assert seen == ["I should look at the file tree before editing anything."]
 
 
 def test_agent_loop_language(tmp_path):

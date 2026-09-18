@@ -78,6 +78,7 @@ from runtime.mcp.tokens import apply_tokens, load_tokens, save_token
 from runtime.skills.catalog import SkillCatalog
 from runtime.skills.discover import discover_skills
 from runtime.tools.tracker import FileTracker
+from runtime.trace import TraceWriter
 from tools.registry import discover_tools
 
 
@@ -116,6 +117,11 @@ class EngineSession:
         self._mcp_cool_s = 30.0
         self._auth_tasks: list[asyncio.Task] = []
         self._registry = None
+        self._trace = (
+            TraceWriter(self._workspace / ".engine" / "trace.jsonl")
+            if self._config.trace_calls
+            else None
+        )
         self._metrics: EngineMetrics | None = None
         try:
             self._llm = OpenRouterLLM.from_env(self._workspace, config=self._config)
@@ -552,8 +558,14 @@ class EngineSession:
         if not profile:
             profile = "orchestrator" if not agent_id else "unknown"
         return AgentHooks(
-            on_tool=lambda call_id, name, arguments, result: self._on_tool(
-                call_id, name, arguments, result, agent_id=agent_id, profile=profile
+            on_tool=lambda call_id, name, arguments, result, reasoning="": self._on_tool(
+                call_id,
+                name,
+                arguments,
+                result,
+                agent_id=agent_id,
+                profile=profile,
+                reasoning=reasoning,
             ),
             on_tool_start=lambda call_id, name, arguments: self._on_tool_start(
                 call_id, name, arguments, agent_id=agent_id
@@ -692,11 +704,25 @@ class EngineSession:
         result: str,
         agent_id: str = "",
         profile: str = "",
+        reasoning: str = "",
     ) -> None:
         preview = result if len(result) <= 400 else result[:400] + "…"
         started = self._tool_started.pop(call_id, 0)
         duration = int((time.monotonic() - started) * 1000) if started else 0
         ok = not str(result).startswith("error:")
+        if self._trace is not None:
+            self._trace.write(
+                "tool",
+                call_id=call_id,
+                name=name,
+                agent_id=agent_id,
+                profile=profile,
+                arguments=arguments,
+                result=result,
+                ok=ok,
+                duration_ms=duration,
+                reasoning=reasoning,
+            )
         self._emit(
             ToolCallFinished(
                 call_id=call_id,
