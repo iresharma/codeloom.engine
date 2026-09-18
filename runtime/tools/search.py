@@ -38,6 +38,7 @@ def search(
     command = [
         rg,
         "--line-number",
+        "--with-filename",
         "--no-heading",
         "--color=never",
         "--no-messages",
