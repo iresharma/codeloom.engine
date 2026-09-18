@@ -10,7 +10,18 @@ EXEC_APPROVALS = ("auto", "always", "never", "judged")
 TURN_CONTINUES = ("prompt", "never")
 JUDGE_MODES = ("off", "advisory", "enforcing")
 TYPESAFE_PLACEHOLDERS = {"", "...", "your-key", "changeme"}
-JUDGE_SITES = ("exec", "tools", "search", "screen")
+JUDGE_SITES = (
+    "exec",
+    "tools",
+    "search",
+    "screen",
+    "compaction",
+    "diagnostics",
+    "loop",
+    "intent",
+    "write",
+    "merge",
+)
 # 2.0 never fires in-loop; overflow still force-compacts. Must ship with
 # github_file windows or surveys hit the 120k fuse.
 CHILD_COMPACT_TRIGGER = 2.0
@@ -33,6 +44,8 @@ class EngineConfig:
     compact_trigger: float = 0.7
     keep_full_tools: int = 3
     child_model: str = ""
+    model_cheap: str = ""
+    model_strong: str = ""
     max_spawns_per_turn: int = 8
     subscriber_capacity: int = 4096
     subscriber_bytes: int = 1 << 20
@@ -46,11 +59,25 @@ class EngineConfig:
     judge_mode_tools: str = ""
     judge_mode_search: str = ""
     judge_mode_screen: str = ""
+    judge_mode_compaction: str = ""
+    judge_mode_diagnostics: str = ""
+    judge_mode_loop: str = ""
+    judge_mode_intent: str = ""
+    judge_mode_write: str = ""
+    judge_mode_merge: str = ""
 
     def judge_mode_for(self, site: str) -> str:
-        """Effective judge mode for a call site: its own override, or the global default."""
+        """Effective judge mode for a call site: its own override, or the
+        global default -- except "write" (Phase 7's semantic write gate),
+        which the plan says to "ship last, ship advisory": it never
+        silently inherits a blanket ENGINE_JUDGE=enforcing set for other
+        sites, only an explicit ENGINE_JUDGE_WRITE=enforcing opts it in."""
         override = getattr(self, f"judge_mode_{site}", "")
-        return override or self.judge_mode
+        if override:
+            return override
+        if site == "write" and self.judge_mode == "enforcing":
+            return "advisory"
+        return self.judge_mode
 
     @property
     def judge_usable(self) -> bool:
@@ -85,6 +112,8 @@ class EngineConfig:
         config.child_model = (
             os.environ.get("OPENROUTER_CHILD_MODEL") or ""
         ).strip()
+        config.model_cheap = (os.environ.get("ENGINE_MODEL_CHEAP") or "").strip()
+        config.model_strong = (os.environ.get("ENGINE_MODEL_STRONG") or "").strip()
         config.max_spawns_per_turn = _env_int(
             "ENGINE_MAX_SPAWNS_PER_TURN", config.max_spawns_per_turn, warnings
         )

@@ -144,6 +144,66 @@ def test_invalid_judge_site_override_is_ignored_with_warning(monkeypatch, tmp_pa
     assert any("ENGINE_JUDGE_SCREEN" in item for item in config.warnings)
 
 
+def test_phase6_judge_site_overrides(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "advisory")
+    monkeypatch.setenv("ENGINE_JUDGE_COMPACTION", "enforcing")
+    monkeypatch.setenv("ENGINE_JUDGE_DIAGNOSTICS", "off")
+    monkeypatch.setenv("ENGINE_JUDGE_LOOP", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("compaction") == "enforcing"
+    assert config.judge_mode_for("diagnostics") == "off"
+    assert config.judge_mode_for("loop") == "enforcing"
+
+
+def test_phase5_intent_judge_site_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "advisory")
+    monkeypatch.setenv("ENGINE_JUDGE_INTENT", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("intent") == "enforcing"
+
+
+def test_model_cheap_and_strong_default_empty(monkeypatch, tmp_path):
+    monkeypatch.delenv("ENGINE_MODEL_CHEAP", raising=False)
+    monkeypatch.delenv("ENGINE_MODEL_STRONG", raising=False)
+    config = EngineConfig.from_env(tmp_path)
+    assert config.model_cheap == ""
+    assert config.model_strong == ""
+
+
+def test_model_cheap_and_strong_read_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_MODEL_CHEAP", "openai/gpt-4o-mini")
+    monkeypatch.setenv("ENGINE_MODEL_STRONG", "anthropic/claude-opus")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.model_cheap == "openai/gpt-4o-mini"
+    assert config.model_strong == "anthropic/claude-opus"
+
+
+def test_write_gate_never_silently_inherits_global_enforcing(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode == "enforcing"
+    assert config.judge_mode_for("write") == "advisory"
+    assert config.judge_mode_for("exec") == "enforcing"  # other sites unaffected
+
+
+def test_write_gate_respects_off_and_explicit_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "off")
+    off_config = EngineConfig.from_env(tmp_path)
+    assert off_config.judge_mode_for("write") == "off"
+
+    monkeypatch.setenv("ENGINE_JUDGE", "enforcing")
+    monkeypatch.setenv("ENGINE_JUDGE_WRITE", "enforcing")
+    explicit_config = EngineConfig.from_env(tmp_path)
+    assert explicit_config.judge_mode_for("write") == "enforcing"
+
+
+def test_merge_gate_judge_site_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "advisory")
+    monkeypatch.setenv("ENGINE_JUDGE_MERGE", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("merge") == "enforcing"
+
+
 def test_no_typesafe_key_is_byte_identical_to_baseline(monkeypatch, tmp_path):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.delenv("TYPESAFE_JEV_API_KEY", raising=False)

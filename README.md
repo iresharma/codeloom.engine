@@ -761,6 +761,7 @@ current disk hash does not match the hash stored with the note.
 | `OPENROUTER_API_KEY` | — | Required for chat. Placeholder values (`...`, `your-key`, `changeme`, `<OPENROUTER_API_KEY>`) are treated as unset. |
 | `OPENROUTER_MODEL` | `openai/gpt-4o-mini` | Any OpenRouter model with tool-calling support. |
 | `OPENROUTER_CHILD_MODEL` | (unset) | Fallback model for profiles that do not set `AgentProfile.model`. |
+| `ENGINE_MODEL_CHEAP` / `ENGINE_MODEL_STRONG` | (both unset; inherit `OPENROUTER_MODEL`) | Phase 5's intent router picks `ENGINE_MODEL_STRONG` for turns classified `edit` + multi-file; nothing changes until set. |
 | `ENGINE_LLM_STREAM` | `1` | Set `0` to disable token streaming. |
 | `ENGINE_LLM_TIMEOUT_S` | `600` | LLM request timeout. |
 | `ENGINE_LLM_IDLE_S` | `90` | Stream idle timeout. |
@@ -775,7 +776,7 @@ current disk hash does not match the hash stored with the note.
 | `ENGINE_JUDGE_MODEL` | `jev-latest` | TypeSafe model string. |
 | `ENGINE_JUDGE_TIMEOUT_MS` | `800` | Hard per-call ceiling; a slow judge degrades to no opinion, not a slow turn. |
 | `ENGINE_JUDGE_CACHE_SIZE` | `512` | LRU entries keyed by a hash of state + questions. |
-| `ENGINE_JUDGE_EXEC` / `_TOOLS` / `_SEARCH` / `_SCREEN` | (inherits `ENGINE_JUDGE`) | Per-site override, so e.g. exec approval can enforce while result screening stays advisory. |
+| `ENGINE_JUDGE_EXEC` / `_TOOLS` / `_SEARCH` / `_SCREEN` / `_COMPACTION` / `_DIAGNOSTICS` / `_LOOP` / `_INTENT` / `_WRITE` / `_MERGE` | (inherits `ENGINE_JUDGE`, except `_WRITE` — see below) | Per-site override, so e.g. exec approval can enforce while result screening stays advisory. |
 
 Set them in the environment or in `env.sh` at the workspace root. `env.sh`
 parsing is deliberately minimal — it handles `export`, `#` comments, and quoted
@@ -796,9 +797,15 @@ variable.
 
 The engine can optionally consult [TypeSafe](https://typesafe.ai)'s System
 One API (`typesafe-sdk`, model `jev-latest`) at a handful of choke points:
-`run_command` approval, tool-call verification, search re-ranking, and
-tool-result screening for prompt injection. TypeSafe is a fast calibrated
-classifier, not an agent — the engine sends one `state` blob plus typed
+`run_command` approval, tool-call verification, search re-ranking,
+tool-result screening for prompt injection, compaction-by-relevance,
+post-write diagnostics triage, loop progress control, intent routing
+(a "locate" turn can resolve via search + rerank alone, skipping the full
+agent loop; see `agents/resolver.py`), a semantic write gate, and a
+subagent merge gate (scores a subagent's result — drop / summarize / admit
+in full — before it re-enters the orchestrator's context; see
+`Orchestrator._apply_merge_gate`). TypeSafe is a fast
+calibrated classifier, not an agent — the engine sends one `state` blob plus typed
 questions (`Noul` for yes/no, `Choice` for picking one of a closed set,
 `Score` for an ordinal rating) and gets back a probability and confidence per
 question. It never generates an edit, a search query, or a file path;
@@ -815,6 +822,19 @@ they can escalate `auto` to a prompt or a refusal, but they can never
 override `guard_write_path`, the syntax gate, the staleness check, or the
 write denylist.
 
+The write gate (Phase 7) is the highest-stakes call site, so it gets extra
+caution: it always runs its judge call *before* `_apply_sync`'s synchronous
+prepare-then-commit, never between the staleness check and the atomic
+replace, so a slow or concurrent judge call can never reopen the
+write-modify-write race (`tests/test_concurrency.py` exercises this with a
+judge that actively yields mid-call). It also never inherits a blanket
+`ENGINE_JUDGE=enforcing` set for other sites — only an explicit
+`ENGINE_JUDGE_WRITE=enforcing` lets it block, and even then only on a
+detected hardcoded secret; every other signal (scope creep, deletes
+unrelated code, a disabled test, a weak intent match) only ever adds a
+`[engine: judge flagged this diff -- ...]` note to the result, never a
+refusal.
+
 Every judged decision emits a `JudgementMade` event (`tag`, `subject`,
 `outcome`, `signals`, `enforced`, `latency_ms`) so a blocked or escalated
 action is never an inexplicable refusal — `dummy_client.py` renders it as
@@ -823,6 +843,22 @@ coloured card on the tools panel, and puts the last verdict in the status
 line. F7 filters the protocol log to `JudgementMade` only. The engine
 process prints `judge: <mode> model=… exec=…` (or `judge: off`) at
 startup so you can see whether the key loaded before you attach a client.
+
+**Scope note on the plan's Phase 8.** The plan proposes TypeSafe as a
+subagent *dispatcher* — selecting, ordering, and admission-controlling a
+fixed catalogue of subagents in place of the LLM — on the premise that no
+subagent system exists yet. That premise doesn't hold here: the
+orchestrator/subagent system (`agents/orchestrator.py`, six profiles under
+`agents/profiles/`, worktree isolation, settle flows, a tested concurrent
+write lock) already works, and the orchestrator LLM already handles
+selection and ordering through normal tool calls. Replacing that would
+compete with a working system for uncertain benefit, and the plan itself
+leaves Phase 8's necessity as an open question. What does port cleanly is
+the piece the plan calls more important than the dispatch anyway: the
+**merge gate**, scoring a subagent's result (`accomplished_its_brief`,
+`worth_parent_context`, `contradicts_siblings`) before it re-enters the
+orchestrator's context, so a low-value result gets admitted as one line
+instead of its full transcript.
 
 To exercise the live call sites from `dummy_client.py`:
 
@@ -957,10 +993,10 @@ pytest tests/test_apply.py  # one module
 
 `pytest.ini` sets `pythonpath = .` and `testpaths = tests`, so no install step
 is needed. The default run is capped at 4 pytest-xdist workers (`-n logical
---maxprocesses=4 --dist loadfile`). Uncapped `-n auto` on a 12-core machine
-used to leave several multi-gigabyte Python processes behind after the suite
-(or after Ctrl-C). Pass `-n0` to disable workers entirely for a single-file
-debug run.
+--maxprocesses=4 --dist loadfile`); CI overrides that with `-n 2 --dist
+loadscope`. Uncapped `-n auto` on a 12-core machine used to leave several
+multi-gigabyte Python processes behind after the suite (or after Ctrl-C).
+Pass `-n0` to disable workers entirely for a single-file debug run.
 
 To check coverage locally:
 

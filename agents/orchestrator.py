@@ -13,8 +13,8 @@ from agents.hooks import AgentHooks
 from agents.profile import MEMORY, SKILLS, ProfileRegistry
 from agents.subagent import Subagent
 from runtime.config import CHILD_COMPACT_TRIGGER, CHILD_KEEP_FULL_TOOLS
-from runtime.store.memory import ingest_result
 from runtime.prompts import PromptTimeout
+from runtime.store.memory import ingest_result
 from runtime.tools.git import (
     SETTLE_CHOICES,
     add_agent_worktree,
@@ -176,6 +176,7 @@ class Orchestrator(AgentLoop):
         self._aborting_all = False
         self._batch_id = ""
         self._batch_name = ""
+        self._recent_results: list[tuple[str, str]] = []
         self._skills = kwargs.get("skills")
         self._on_skill_activated = kwargs.get("on_skill_activated")
         self._finished_transcripts: dict[str, dict] = {}
@@ -442,6 +443,7 @@ class Orchestrator(AgentLoop):
         self._batch_id = uuid4().hex
         self._batch_name = batch_nickname(task)
         self._inbox_turn = str(task).lstrip().startswith("[agent ")
+        self._recent_results = []
         try:
             return await super().run(task)
         finally:
@@ -614,7 +616,11 @@ class Orchestrator(AgentLoop):
                 usage=child._usage,
             )
         if self._on_agent_result is not None and not self._aborting_all:
-            self._on_agent_result(agent_id, profile.name, result.as_text())
+            merged_text = await self._apply_merge_gate(profile.name, task, result)
+            self._on_agent_result(agent_id, profile.name, merged_text)
+            self._recent_results.append((profile.name, result.summary or result.outcome or ""))
+            if len(self._recent_results) > 5:
+                self._recent_results = self._recent_results[-5:]
         self._store_transcript(agent_id, child)
         self._child_tasks.pop(agent_id, None)
         self._children.pop(agent_id, None)
@@ -632,6 +638,55 @@ class Orchestrator(AgentLoop):
                     branch=branch or self._worktree_branches.get(agent_id, ""),
                     summary=summary,
                 )
+
+    async def _apply_merge_gate(self, profile: str, task: str, result: AgentResult) -> str:
+        """Phase 8 (scoped; see docs/impl-plans/jev-exp-1.md), the merge
+        gate: score a subagent's result before it re-enters the parent's
+        context. `_recent_results` is a best-effort sibling window (the
+        last few results finished by *this* orchestrator instance, not
+        strictly the same spawn batch) -- good enough for the common case
+        of two subagents spawned together finishing close in time, without
+        threading a new batch-id parameter through `_run_child`."""
+        full_text = result.as_text()
+        judge = self._ctx.judge
+        if judge is None or not getattr(judge, "enabled", False):
+            return full_text
+        site_mode = self._config.judge_mode_for("merge")
+        if site_mode == "off":
+            return full_text
+        from runtime.judge_decisions import (
+            classify_merge,
+            merge_questions,
+            merge_signals,
+        )
+
+        siblings = [summary for _, summary in self._recent_results if summary][-5:]
+        verdict = await judge.ask(
+            {"task": task, "result": full_text[:8000], "sibling_summaries": siblings},
+            merge_questions(),
+            tag="merge_gate",
+        )
+        if verdict is None:
+            return full_text
+        enforced = site_mode == "enforcing"
+        level, contradicts = classify_merge(verdict)
+        if self._ctx.on_judgement is not None and (level != "full" or contradicts):
+            self._ctx.on_judgement(
+                tag="merge_gate",
+                subject=f"{profile}: {task}"[:200],
+                outcome="contradicts_siblings" if contradicts else level,
+                signals=merge_signals(verdict),
+                enforced=enforced,
+                latency_ms=verdict.latency_ms,
+                agent_id="",
+            )
+        if not enforced:
+            return full_text
+        if level == "one_line":
+            return f"status: {result.status}\nsummary: {result.summary or result.outcome}"
+        if level == "summary":
+            return f"status: {result.status}\nsummary: {result.summary or result.outcome}\noutcome: {result.outcome}"
+        return full_text
 
     async def _settle_worktree(
         self,

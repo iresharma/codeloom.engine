@@ -10,6 +10,7 @@ from uuid import uuid4
 from agents.compactor import (
     LENGTH_CONTINUE_CAP,
     OUTPUT_CUTOFF_CONTINUE,
+    _content_as_text,
     _is_output_cutoff,
     _last_assistant_text,
     compact,
@@ -21,14 +22,20 @@ from llm.openrouter import OpenRouterLLM
 from llm.provider import Usage
 from runtime.config import EngineConfig
 from runtime.judge_decisions import (
+    LOOP_EXTEND_INCREMENT,
+    LOOP_EXTEND_MAX_TOTAL,
     SCREEN_SIZE_FLOOR,
     SCREEN_SKIP_TOOLS,
     SCREEN_WINDOW,
     VERIFY_TOOLS,
+    classify_loop,
     classify_screen,
     classify_tool_call,
+    loop_questions,
+    loop_signals,
     screen_questions,
     screen_signals,
+    should_extend_turns,
     tool_call_signals,
     tool_verify_questions,
 )
@@ -212,6 +219,8 @@ class AgentLoop:
         self._ctx.unlocked_skills = self._unlocked_skills
         self._ctx.activate_skill = self.activate_skill
         self._exit_status = "ok"
+        self._loop_extended_by = 0
+        self._stopped_by_judge = False
 
     def hydrate(self, messages) -> None:
         self._history = []
@@ -226,6 +235,59 @@ class AgentLoop:
     def set_catalog_query(self, text: str) -> None:
         self._catalog_query = text
         self._ctx.user_request = text
+
+    def use_model(self, model: str | None) -> None:
+        """Phase 5 (docs/impl-plans/jev-exp-1.md): a one-shot model
+        override for the next `run()`/`run_with_context()` call. `run()`
+        already snapshots and restores `max_turns` around a turn; the
+        caller resets this the same way (pass None to clear it)."""
+        self._model = model or None
+
+    async def run_with_context(self, task: str, resolution) -> str:
+        """Phase 5's read-path resolver hands back gathered context
+        instead of an answer. Feed it into history as if the model had
+        already made those tool calls, then let the model write the prose
+        in a single completion -- no client can tell this from the normal
+        tool-calling path since the same on_tool_start/on_tool hooks fire."""
+        marker = len(self._history)
+        self._history.append({"role": "user", "content": task})
+        for call in resolution.trace:
+            call_id = uuid4().hex
+            arguments = dict(call.arguments)
+            if self._hooks.on_tool_start is not None:
+                self._hooks.on_tool_start(call_id, call.name, arguments)
+            self._history.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
+                    ],
+                }
+            )
+            self._history.append(
+                {"role": "tool", "tool_call_id": call_id, "content": call.result}
+            )
+            self._tools_called.add(call.name)
+            if self._hooks.on_tool is not None:
+                self._hooks.on_tool(call_id, call.name, arguments, call.result)
+        try:
+            self._state("thinking", 1)
+            result = await self._complete(self._build_messages(), self._tools.schemas())
+        except Exception:
+            del self._history[marker:]
+            raise
+        last_text = result.text
+        self._history.append({"role": "assistant", "content": last_text})
+        self._emit_message(last_text or "")
+        return _last_assistant_text(self._history) or last_text
 
     def unlock_skill(self, name: str) -> bool:
         catalog = self._skills
@@ -452,6 +514,8 @@ class AgentLoop:
         last_text = ""
         length_continues = 0
         self._exit_status = "ok"
+        self._loop_extended_by = 0
+        self._stopped_by_judge = False
         turn = 0
         continues = 0
         closer_ceilings: set[int] = set()
@@ -466,6 +530,10 @@ class AgentLoop:
                     await self._dispatch(result)
                     await self._maybe_compact()
                     turn += 1
+                    if await self._maybe_judge_loop_progress(turn, task):
+                        self._exit_status = "stopped"
+                        self._stopped_by_judge = True
+                        break
                     if turn >= self._config.max_turns:
                         action = await self._offer_continue(continues)
                         if action == "continue":
@@ -505,6 +573,11 @@ class AgentLoop:
                 self._exit_status = "max_turns"
             if last_text:
                 final = _last_assistant_text(self._history) or last_text
+            elif self._exit_status == "stopped" and self._stopped_by_judge:
+                final = (
+                    "stopped early: repeating an approach without making "
+                    "progress toward the goal"
+                )
             elif self._exit_status == "stopped":
                 final = "stopped by user request"
             else:
@@ -565,6 +638,84 @@ class AgentLoop:
         if answer in STOP_ALIASES:
             return "stop"
         return "handoff"
+
+    def _recent_turns_summary(self, limit: int = 6) -> str:
+        parts = []
+        for message in self._history[-limit:]:
+            role = message.get("role", "")
+            calls = message.get("tool_calls") or []
+            if calls:
+                names = ", ".join(
+                    (call.get("function") or {}).get("name", "") for call in calls
+                )
+                parts.append(f"{role} called: {names}")
+            else:
+                text = _content_as_text(message.get("content"))
+                parts.append(f"{role}: {text[:300]}")
+        return "\n".join(parts)
+
+    async def _maybe_judge_loop_progress(self, turn: int, goal: str) -> bool:
+        """Phase 6c (docs/impl-plans/jev-exp-1.md). Returns True when the
+        loop should stop early. A repeats_prior_call signal from Phase 2's
+        tool-call verification would feed in here rather than triggering
+        its own action -- not yet wired since nothing currently aggregates
+        that per-turn."""
+        judge = self._ctx.judge
+        if judge is None or not getattr(judge, "enabled", False):
+            return False
+        site_mode = self._config.judge_mode_for("loop")
+        if site_mode == "off":
+            return False
+        recent = self._recent_turns_summary()
+        state = {"goal": goal, "recent_turns": recent}
+        verdict = await judge.ask(state, loop_questions(), tag="loop_control")
+        if verdict is None:
+            return False
+        enforced = site_mode == "enforcing"
+        action = classify_loop(verdict)
+        near_ceiling = turn >= self._config.max_turns - 2
+        extend = near_ceiling and should_extend_turns(verdict)
+        if action != "continue" or extend:
+            outcome = action if action != "continue" else "extend"
+            if self._ctx.on_judgement is not None:
+                self._ctx.on_judgement(
+                    tag="loop_control",
+                    subject=(goal or "")[:200],
+                    outcome=outcome,
+                    signals=loop_signals(verdict),
+                    enforced=enforced,
+                    latency_ms=verdict.latency_ms,
+                    agent_id=self.agent_id,
+                )
+        if not enforced:
+            return False
+        if action == "needs_input":
+            await self._handle_loop_needs_input()
+            return False
+        if extend and self._loop_extended_by < LOOP_EXTEND_MAX_TOTAL:
+            increment = min(
+                LOOP_EXTEND_INCREMENT, LOOP_EXTEND_MAX_TOTAL - self._loop_extended_by
+            )
+            self._config.max_turns += increment
+            self._loop_extended_by += increment
+        return action == "stop_early"
+
+    async def _handle_loop_needs_input(self) -> None:
+        ask = getattr(self._ctx, "ask_user", None)
+        if ask is None:
+            return
+        try:
+            answer = await ask(
+                "This looks like it needs a decision only you can make to "
+                "continue. What would you like me to do?",
+                kind="text",
+                agent_id=self.agent_id,
+                profile=self.profile,
+            )
+        except PromptTimeout:
+            return
+        if answer:
+            self._history.append({"role": "user", "content": str(answer)})
 
     async def _complete(self, messages: list[dict], schemas):
         self._message_id = uuid4().hex
@@ -639,6 +790,11 @@ class AgentLoop:
             ratio=self._estimate_ratio,
             trigger_ratio=trigger,
             keep_full=keep_full,
+            judge=self._ctx.judge,
+            goal=self._ctx.user_request,
+            judge_mode=self._config.judge_mode_for("compaction"),
+            on_judgement=self._ctx.on_judgement,
+            agent_id=self.agent_id,
         )
         if info.get("strategy") == "noop":
             return

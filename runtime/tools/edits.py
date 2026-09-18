@@ -623,8 +623,10 @@ def _new_diagnostics(before: list, after: list) -> list:
     return [item for item in after if key(item) not in seen]
 
 
-def _format_new_diags(rel: str, diags: list) -> str:
+def _format_new_diags(rel: str, diags: list, suppressed: int = 0) -> str:
     if not diags:
+        if suppressed:
+            return f"no new diagnostics ({suppressed} suppressed as pre-existing/low-severity)"
         return "no new diagnostics"
     names = {1: "Error", 2: "Warning", 3: "Info", 4: "Hint"}
     lines = ["new diagnostics:"]
@@ -637,18 +639,79 @@ def _format_new_diags(rel: str, diags: list) -> str:
         source = item.get("source")
         prefix = f"[{source}] " if source else ""
         lines.append(f"{rel}:{line_no}:{col_no} {sev}: {prefix}{msg}")
+    if suppressed:
+        lines.append(f"... ({suppressed} more suppressed as pre-existing/low-severity)")
     return "\n".join(lines)
 
 
-def _lsp_after(ctx: ToolContext, result: ApplyResult, before: list) -> str:
+def _diag_text(item: dict) -> str:
+    msg = (item.get("message") or "").strip()
+    source = item.get("source")
+    return f"[{source}] {msg}" if source else msg
+
+
+def _lsp_after_diagnostics(ctx: ToolContext, result: ApplyResult, before: list) -> tuple[str, list]:
+    lsp = ctx.lsp
+    after = lsp.diagnostics_after_change(result.rel, result.new_text)
+    return result.rel, _new_diagnostics(before, after)
+
+
+async def _screen_diagnostics(
+    ctx: ToolContext, diff: str, tool_name: str, diags: list
+) -> tuple[list, int]:
+    """Phase 6b (docs/impl-plans/jev-exp-1.md): surface only diagnostics
+    that clear the bar. Never silently drops a count -- the caller always
+    knows how many were suppressed, even under advisory mode where nothing
+    is actually filtered."""
+    judge = getattr(ctx, "judge", None)
+    config = ctx.config
+    if not diags or judge is None or not getattr(judge, "enabled", False) or config is None:
+        return diags, 0
+    site_mode = config.judge_mode_for("diagnostics")
+    if site_mode == "off":
+        return diags, 0
+    from runtime.judge_decisions import classify_diagnostic, diagnostics_questions
+
+    items = [{"id": str(index + 1), "text": _diag_text(item)} for index, item in enumerate(diags)]
+    verdict = await judge.ask(
+        {"diff": diff[:4000]}, diagnostics_questions(items), tag="diagnostics_triage"
+    )
+    if verdict is None:
+        return diags, 0
+    keep: list = []
+    suppressed = 0
+    for item, meta in zip(diags, items):
+        if classify_diagnostic(verdict, meta["id"]):
+            keep.append(item)
+        else:
+            suppressed += 1
+    enforced = site_mode == "enforcing"
+    on_judgement = getattr(ctx, "on_judgement", None)
+    if on_judgement is not None and suppressed:
+        on_judgement(
+            tag="diagnostics_triage",
+            subject=f"{tool_name}: {len(diags)} diagnostics"[:200],
+            outcome=f"suppressed {suppressed}/{len(diags)}",
+            signals={},
+            enforced=enforced,
+            latency_ms=verdict.latency_ms,
+            agent_id=getattr(ctx, "agent_id", ""),
+        )
+    if not enforced:
+        return diags, 0
+    return keep, suppressed
+
+
+async def _lsp_after(ctx: ToolContext, result: ApplyResult, before: list, tool_name: str = "") -> str:
     lsp = ctx.lsp
     if lsp is None or not result.ok:
         return ""
     try:
-        after = lsp.diagnostics_after_change(result.rel, result.new_text)
+        rel, diags = await asyncio.to_thread(_lsp_after_diagnostics, ctx, result, before)
     except Exception as exc:  # noqa: BLE001
         return f"lsp diagnostics: error: {exc}"
-    return _format_new_diags(result.rel, _new_diagnostics(before, after))
+    diags, suppressed = await _screen_diagnostics(ctx, result.diff, tool_name, diags)
+    return _format_new_diags(rel, diags, suppressed=suppressed)
 
 
 def _profile_write_error(ctx: ToolContext, path: str) -> str | None:
@@ -699,17 +762,98 @@ async def _apply_edit_body(
             before = ctx.lsp.cached_diagnostics(path)
         except Exception:  # noqa: BLE001
             before = []
+    blocked, gate_note = await _judge_write_gate(ctx, path, mutate, tool_name, creating=creating)
+    if blocked is not None:
+        return blocked
     result = _apply_sync(ctx, path, mutate, tool_name, creating=creating)
     if not result.ok:
         return result.message
     extra = ""
     if ctx.lsp is not None and result.diff:
-        extra = await asyncio.to_thread(_lsp_after, ctx, result, before)
+        extra = await _lsp_after(ctx, result, before, tool_name)
+    if gate_note:
+        extra = f"{gate_note}\n{extra}" if extra else gate_note
     if ctx.on_edit is not None and result.diff:
         ctx.on_edit(result.rel, result.diff, tool_name, result.edit_id)
     if ctx.on_edit is not None and result.created and not result.diff:
         ctx.on_edit(result.rel, result.diff or "", tool_name, result.edit_id)
     return _format_success(result, extra)
+
+
+def _preview_diff(ctx: ToolContext, path: str, mutate: Callable[[FileSource], str], *, creating: bool) -> str | None:
+    """A throwaway diff for the write gate's judge call only. Never feeds
+    into the actual commit -- `_apply_sync` below redoes `_prepare` fresh,
+    staleness check included, in one uninterrupted synchronous call. This
+    is what keeps invariant 5 intact: the only `await` (the judge call) sits
+    entirely before any real staleness check or write, never between one."""
+    try:
+        prepared = _prepare(ctx, path, mutate, creating=creating)
+    except (EditError, WorkspacePathError, FileNotFoundError, OSError, ValueError):
+        return None
+    if prepared.noop:
+        return ""
+    return prepared.diff
+
+
+async def _judge_write_gate(
+    ctx: ToolContext,
+    path: str,
+    mutate: Callable[[FileSource], str],
+    tool_name: str,
+    *,
+    creating: bool = False,
+) -> tuple[str | None, str]:
+    """Phase 7 (docs/impl-plans/jev-exp-1.md): the semantic write gate.
+    Returns (block_error, note) -- block_error is non-None only when the
+    edit must be refused outright (Stage 2: a hardcoded secret, enforcing
+    mode only); note is a non-blocking heads-up appended to a successful
+    result. Runs entirely before `_apply_sync`, never inside it."""
+    judge = getattr(ctx, "judge", None)
+    config = ctx.config
+    if judge is None or not getattr(judge, "enabled", False) or config is None:
+        return None, ""
+    site_mode = config.judge_mode_for("write")
+    if site_mode == "off":
+        return None, ""
+    diff = _preview_diff(ctx, path, mutate, creating=creating)
+    if not diff:
+        return None, ""
+    from runtime.judge_decisions import (
+        classify_write,
+        write_gate_questions,
+        write_signals,
+    )
+
+    verdict = await judge.ask(
+        {
+            "user_request": getattr(ctx, "user_request", ""),
+            "path": path,
+            "diff": diff[:8000],
+            "tool": tool_name,
+        },
+        write_gate_questions(),
+        tag="write_gate",
+    )
+    if verdict is None:
+        return None, ""
+    enforced = site_mode == "enforcing"
+    decision, reason = classify_write(verdict)
+    if decision == "allow":
+        return None, ""
+    on_judgement = getattr(ctx, "on_judgement", None)
+    if on_judgement is not None:
+        on_judgement(
+            tag="write_gate",
+            subject=f"{tool_name}:{path}"[:200],
+            outcome=decision,
+            signals=write_signals(verdict),
+            enforced=enforced,
+            latency_ms=verdict.latency_ms,
+            agent_id=getattr(ctx, "agent_id", ""),
+        )
+    if enforced and decision == "block":
+        return f"error: refused — {reason}", ""
+    return None, f"[engine: judge flagged this diff -- {reason}]"
 
 
 def _apply_workspace_sync(
@@ -792,6 +936,9 @@ async def _apply_workspace_edit_body(
     edits_by_path: list[tuple[str, list[TextEdit]]],
     tool_name: str,
 ) -> str:
+    blocked, gate_note = await _judge_workspace_write_gate(ctx, edits_by_path, tool_name)
+    if blocked is not None:
+        return blocked
     results, err = _apply_workspace_sync(ctx, edits_by_path, tool_name)
     if err:
         return err
@@ -799,13 +946,87 @@ async def _apply_workspace_edit_body(
     for result in results:
         extra = ""
         if ctx.lsp is not None and result.diff:
-            extra = await asyncio.to_thread(_lsp_after, ctx, result, [])
+            extra = await _lsp_after(ctx, result, [], tool_name)
         if ctx.on_edit is not None and result.diff:
             ctx.on_edit(result.rel, result.diff, tool_name, result.edit_id)
         extras.append(_format_success(result, extra))
     if not extras:
         return "error: rename produced no edits"
-    return "\n\n".join(extras)
+    body = "\n\n".join(extras)
+    return f"{gate_note}\n{body}" if gate_note else body
+
+
+def _preview_workspace_diff(
+    ctx: ToolContext, edits_by_path: list[tuple[str, list[TextEdit]]]
+) -> str | None:
+    """One combined diff across every file in the batch -- a multi-file
+    rename is one logical edit, so it gets one judgment, not one per file."""
+    parts: list[str] = []
+    for path, edits in edits_by_path:
+        try:
+            prepared = _prepare(
+                ctx,
+                path,
+                lambda src, captured=edits: apply_text_edits(src.text, captured),
+                check_stale=False,
+            )
+        except (EditError, WorkspacePathError, FileNotFoundError, OSError, ValueError):
+            continue
+        if prepared.diff:
+            parts.append(prepared.diff)
+    return "\n\n".join(parts) if parts else None
+
+
+async def _judge_workspace_write_gate(
+    ctx: ToolContext, edits_by_path: list[tuple[str, list[TextEdit]]], tool_name: str
+) -> tuple[str | None, str]:
+    judge = getattr(ctx, "judge", None)
+    config = ctx.config
+    if judge is None or not getattr(judge, "enabled", False) or config is None:
+        return None, ""
+    site_mode = config.judge_mode_for("write")
+    if site_mode == "off":
+        return None, ""
+    diff = _preview_workspace_diff(ctx, edits_by_path)
+    if not diff:
+        return None, ""
+    from runtime.judge_decisions import (
+        classify_write,
+        write_gate_questions,
+        write_signals,
+    )
+
+    paths = ", ".join(path for path, _ in edits_by_path)
+    verdict = await judge.ask(
+        {
+            "user_request": getattr(ctx, "user_request", ""),
+            "path": paths,
+            "diff": diff[:8000],
+            "tool": tool_name,
+        },
+        write_gate_questions(),
+        tag="write_gate",
+    )
+    if verdict is None:
+        return None, ""
+    enforced = site_mode == "enforcing"
+    decision, reason = classify_write(verdict)
+    if decision == "allow":
+        return None, ""
+    on_judgement = getattr(ctx, "on_judgement", None)
+    if on_judgement is not None:
+        on_judgement(
+            tag="write_gate",
+            subject=f"{tool_name}:{paths}"[:200],
+            outcome=decision,
+            signals=write_signals(verdict),
+            enforced=enforced,
+            latency_ms=verdict.latency_ms,
+            agent_id=getattr(ctx, "agent_id", ""),
+        )
+    if enforced and decision == "block":
+        return f"error: refused — {reason}", ""
+    return None, f"[engine: judge flagged this diff -- {reason}]"
 
 
 def normalize_workspace_edit(workspace: Path, payload: dict) -> list[tuple[str, list[TextEdit]]]:
@@ -982,7 +1203,7 @@ async def undo_last(ctx: ToolContext) -> str:
         try:
             src = read_source(ctx.workspace, result.rel)
             result.new_text = src.text
-            extra = await asyncio.to_thread(_lsp_after, ctx, result, [])
+            extra = await _lsp_after(ctx, result, [], "undo_edit")
         except (FileNotFoundError, WorkspacePathError, OSError):
             extra = ""
     if ctx.on_edit is not None:

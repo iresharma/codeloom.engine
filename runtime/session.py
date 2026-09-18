@@ -64,7 +64,7 @@ from runtime.commands import HANDLERS
 from runtime.config import EngineConfig
 from runtime.language import LanguageInfo
 from runtime.language import detect as detect_language
-from runtime.prompts import PromptBroker
+from runtime.prompts import PromptBroker, PromptTimeout
 from runtime.store import SessionState
 from runtime.store.sqlite import init as init_store
 from runtime.store.sqlite import save as save_snapshot
@@ -258,7 +258,8 @@ class EngineSession:
         # boundary. After an abort, task.cancelled() is False and
         # exception() is None. Use self._aborting, not the task flags.
         try:
-            reply = await self._loop.run(text)
+            handled = await self._maybe_route_turn(text)
+            reply = handled if handled is not None else await self._loop.run(text)
             if not self._aborting:
                 # Same id as ChatMessageStarted/Delta so clients that
                 # already rendered the stream do not reprint the text.
@@ -272,6 +273,8 @@ class EngineSession:
         except Exception as exc:  # noqa: BLE001
             self._emit(ErrorOccurred(message=f"llm error: {exc}"))
         finally:
+            if self._loop is not None:
+                self._loop.use_model(None)
             self._state.stats.elapsed_s += max(0.0, time.monotonic() - self._turn_started)
             self._persist()
             self._turn_task = None
@@ -280,6 +283,99 @@ class EngineSession:
             self._on_state("idle", 0)
             self._maybe_pump()
             self._flush_settles_if_idle()
+
+    async def _maybe_route_turn(self, text: str) -> str | None:
+        """Phase 5 (docs/impl-plans/jev-exp-1.md): classify the turn before
+        handing it to the full agent loop. Returns the final reply text
+        when this method fully handled the turn (meta action, resolved
+        locate query, or a clarified retry); returns None to fall through
+        to `self._loop.run(text)` unchanged -- the always-safe default."""
+        if self._loop is None:
+            return None
+        site_mode = self._config.judge_mode_for("intent")
+        if site_mode == "off":
+            return None
+        from agents.resolver import classify_turn
+
+        classified = await classify_turn(self._judge, text)
+        if classified is None:
+            return None
+        enforced = site_mode == "enforcing"
+        if classified.route != "default":
+            self._on_judgement(
+                tag="intent_route",
+                subject=text[:200],
+                outcome=classified.route,
+                signals=classified.signals,
+                enforced=enforced,
+                latency_ms=classified.latency_ms,
+            )
+        if not enforced:
+            return None
+        if classified.route == "ambiguous":
+            return await self._route_ambiguous(text)
+        if classified.route == "meta":
+            reply = await self._handle_meta_action(classified.meta_action)
+            if reply is not None:
+                return reply
+            return None
+        if classified.route == "locate":
+            return await self._route_locate(text)
+        if classified.route == "edit_multi_file":
+            from runtime.judge_decisions import EDIT_MULTI_FILE_MAX_TURNS_BONUS
+
+            self._config.max_turns += EDIT_MULTI_FILE_MAX_TURNS_BONUS
+            if self._config.model_strong:
+                self._loop.use_model(self._config.model_strong)
+            return None
+        return None
+
+    async def _route_ambiguous(self, text: str) -> str:
+        try:
+            answer = await self._prompts.ask(
+                "Your last message looks underspecified -- could you "
+                "clarify what you'd like me to do?",
+                kind="text",
+            )
+        except PromptTimeout:
+            answer = ""
+        combined = f"{text}\n\n(clarification: {answer})" if answer else text
+        return await self._loop.run(combined)
+
+    async def _route_locate(self, text: str) -> str | None:
+        from agents.resolver import resolve_locate
+
+        resolution = await resolve_locate(self._workspace, self._judge, text)
+        if resolution is None:
+            return None
+        return await self._loop.run_with_context(text, resolution)
+
+    async def _handle_meta_action(self, meta_action: str) -> str | None:
+        ctx = getattr(self._loop, "_ctx", None)
+        if ctx is None:
+            return None
+        if meta_action == "undo":
+            from runtime.tools.edits import undo_last
+
+            return await undo_last(ctx)
+        if meta_action == "what_changed":
+            state = read_git(self._workspace, diffs=False)
+            if state.branch is None and not state.dirty:
+                return "not a git repository"
+            return "\n".join(
+                [
+                    f"branch: {state.branch or '(unknown)'}",
+                    f"dirty: {state.dirty}",
+                    "staged: " + (", ".join(state.staged) or "(none)"),
+                    "unstaged: " + (", ".join(state.unstaged) or "(none)"),
+                    "untracked: " + (", ".join(state.untracked) or "(none)"),
+                ]
+            )
+        if meta_action == "list_edits":
+            from runtime.tools.edits import list_edits_text
+
+            return list_edits_text(ctx, limit=20)
+        return None
 
     def _flush_settles_if_idle(self) -> None:
         if self._turn_task is not None and not self._turn_task.done():
