@@ -193,6 +193,67 @@ def test_wait_until_idle_waits_for_orch_after_child_finishes():
     assert time.monotonic() - started >= 0.35
 
 
+def test_wait_until_idle_waits_for_worktree_settle_to_finish():
+    from protocol.events import WorktreeSettled
+
+    events = [
+        AgentStateChanged(state="idle", turn=1, max_turns=16),
+        UserPromptRequested(
+            prompt_id="p1",
+            question="settle worktree a?",
+            kind="choice",
+            choices=["merge", "pr", "keep", "discard"],
+            agent_id="agent-a",
+        ),
+        UserPromptRequested(
+            prompt_id="p2",
+            question="settle worktree b?",
+            kind="choice",
+            choices=["merge", "pr", "keep", "discard"],
+            agent_id="agent-b",
+        ),
+    ]
+    # both settles "finish" (e.g. git push + gh pr create) well after the
+    # short default quiet window would have already declared the session done
+    late_events = [
+        WorktreeSettled(
+            agent_id="agent-a", profile="coder", action="pr", detail="", branch="b1", ok=True
+        ),
+        WorktreeSettled(
+            agent_id="agent-b", profile="coder", action="pr", detail="", branch="b2", ok=True
+        ),
+    ]
+
+    sent = []
+
+    async def get_event():
+        if events:
+            await asyncio.sleep(0.01)
+            return events.pop(0)
+        if late_events:
+            await asyncio.sleep(0.2)
+            return late_events.pop(0)
+        await asyncio.sleep(30)
+        raise AssertionError("get_event called after events exhausted")
+
+    async def send(command):
+        sent.append(command)
+
+    started = time.monotonic()
+
+    async def run():
+        await wait_until_idle(get_event, send, timeout=0, quiet_s=0.05, settle="pr")
+
+    asyncio.run(run())
+    elapsed = time.monotonic() - started
+    # both WorktreeSettled events land ~0.2s apart; a naive 0.05s quiet
+    # window after answering the second prompt would have returned early
+    assert elapsed >= 0.4
+    assert len(sent) == 2
+    assert {c.prompt_id for c in sent} == {"p1", "p2"}
+    assert all(c.text == "pr" for c in sent)
+
+
 def test_drive_session_exits_when_orch_idle(tmp_path):
     async def run():
         provider = FakeProvider(
