@@ -5,12 +5,19 @@ wired into a real turn, driven through session.start_turn like a live client wou
 from __future__ import annotations
 
 import asyncio
+import shutil
+
+import pytest
 
 from protocol.events import ToolCallFinished, ToolCallStarted
 from runtime.config import EngineConfig
 from tests.conftest import FakeJudge, FakeVerdict
 from tests.fakes import FakeProvider
 from tests.test_orchestrator import _bind, _wait_idle
+
+# The locate-resolution test below shells out to real ripgrep. See the same
+# guard in tests/test_resolver.py.
+needs_rg = pytest.mark.skipif(shutil.which("rg") is None, reason="rg (ripgrep) is not installed")
 
 
 async def _bound(tmp_path, provider=None, **config_kw):
@@ -79,6 +86,7 @@ def test_meta_advisory_mode_does_not_change_behavior(tmp_path):
     asyncio.run(run())
 
 
+@needs_rg
 def test_locate_resolution_seeds_context_and_skips_exploration(tmp_path):
     async def run():
         (tmp_path / "retry.py").write_text(

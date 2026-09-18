@@ -4,6 +4,9 @@ read-path resolver, exercised directly against agents/resolver.py."""
 from __future__ import annotations
 
 import asyncio
+import shutil
+
+import pytest
 
 from agents.resolver import (
     ClassifiedTurn,
@@ -13,6 +16,12 @@ from agents.resolver import (
     resolve_locate,
 )
 from tests.conftest import FakeJudge, FakeVerdict
+
+# resolve_locate shells out to real ripgrep (unlike the rest of the offline
+# suite, which mocks search). rg is a documented hard requirement (README),
+# so CI installs it -- this is defense in depth for any environment that
+# doesn't, mirroring the existing gopls skip pattern in test_lsp_write.py.
+needs_rg = pytest.mark.skipif(shutil.which("rg") is None, reason="rg (ripgrep) is not installed")
 
 # ---------------------------------------------------------------------
 # extract_keywords: pure, deterministic -- TypeSafe never generates the
@@ -155,6 +164,7 @@ def test_resolve_locate_no_keywords_returns_none(tmp_path):
     assert judge.calls == []  # never even asked
 
 
+@needs_rg
 def test_resolve_locate_below_candidate_floor_returns_none(tmp_path):
     (tmp_path / "onlyone.py").write_text("def zzzzuniquepattern(): pass\n")
     judge = FakeJudge()
@@ -163,6 +173,7 @@ def test_resolve_locate_below_candidate_floor_returns_none(tmp_path):
     assert judge.calls == []  # fewer than RESOLVER_CANDIDATE_FLOOR hits
 
 
+@needs_rg
 def test_resolve_locate_none_rerank_verdict_returns_none(tmp_path):
     _seed_workspace(tmp_path)
     judge = FakeJudge()  # no "search_rerank" response scripted
@@ -170,6 +181,7 @@ def test_resolve_locate_none_rerank_verdict_returns_none(tmp_path):
     assert result is None
 
 
+@needs_rg
 def test_resolve_locate_low_rank_confidence_returns_none(tmp_path):
     _seed_workspace(tmp_path)
     judge = FakeJudge()
@@ -180,6 +192,7 @@ def test_resolve_locate_low_rank_confidence_returns_none(tmp_path):
     assert result is None
 
 
+@needs_rg
 def test_resolve_locate_answers_gate_rejects_insufficient_context(tmp_path):
     _seed_workspace(tmp_path)
     judge = FakeJudge()
@@ -191,6 +204,7 @@ def test_resolve_locate_answers_gate_rejects_insufficient_context(tmp_path):
     assert result is None
 
 
+@needs_rg
 def test_resolve_locate_success_returns_resolution_with_trace(tmp_path):
     _seed_workspace(tmp_path)
     judge = FakeJudge()
