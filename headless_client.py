@@ -16,6 +16,7 @@ from protocol.events import (
     SessionEnded,
     SnapshotReady,
     UserPromptRequested,
+    WorktreeSettled,
 )
 from runtime.tools.git import is_settle_prompt
 
@@ -77,7 +78,10 @@ async def wait_until_idle(
 
     `timeout` <= 0 or None waits until idle with no wall-clock cap.
     After a child finishes, wait `post_child_quiet_s` for the orch to pump
-    the report before treating the session as done.
+    the report before treating the session as done. After answering a
+    worktree-settle prompt, wait for the matching `WorktreeSettled` event
+    (not a fixed window) before the session can be considered idle, since
+    settle can push a branch and open a PR over the network.
     """
     deadline = _deadline_at(timeout)
     orch_state = "idle"
@@ -85,6 +89,7 @@ async def wait_until_idle(
     pending = False
     saw_busy = False
     expect_pump = False
+    settling: set[str] = set()
     idle_since: float | None = None
 
     def mark(busy: bool) -> None:
@@ -97,7 +102,7 @@ async def wait_until_idle(
             idle_since = time.monotonic()
 
     def refresh() -> None:
-        mark(orch_state != "idle" or live > 0 or pending)
+        mark(orch_state != "idle" or live > 0 or pending or bool(settling))
 
     def needed_quiet() -> float:
         return post_child_quiet_s if expect_pump else quiet_s
@@ -132,6 +137,16 @@ async def wait_until_idle(
             on_event(event)
         if isinstance(event, UserPromptRequested):
             pending = True
+            is_settle = is_settle_prompt(event.choices)
+            if is_settle and event.agent_id:
+                # apply_worktree (git push, gh pr create) runs in a
+                # background thread after this answer and can take well
+                # over the default quiet window; wait for the matching
+                # WorktreeSettled instead of guessing a duration, so two
+                # worktrees settling in sequence don't get the session
+                # (and then the engine process, via the bench harness)
+                # declared done and killed mid-`gh pr create`.
+                settling.add(event.agent_id)
             refresh()
             await send(
                 AnswerPrompt(
@@ -156,6 +171,9 @@ async def wait_until_idle(
             refresh()
         elif isinstance(event, AgentStarted):
             mark(True)
+            refresh()
+        elif isinstance(event, WorktreeSettled):
+            settling.discard(event.agent_id)
             refresh()
         elif isinstance(event, ErrorOccurred) and not saw_busy:
             raise HeadlessError(event.message)
