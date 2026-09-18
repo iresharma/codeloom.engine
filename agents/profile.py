@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from tools.base import Tool
 
-SpawnFn = Callable[[str, str], Awaitable[str]]
+SpawnFn = Callable[..., Awaitable[str]]
 
 NAV = ["list_files", "read_file", "search"]
 SKILLS = ["activate_skill", "read_skill"]
@@ -156,23 +156,36 @@ class ProfileRegistry:
 def _spawn_tool(profile: AgentProfile, spawn: SpawnFn) -> Tool:
     name = profile.name
 
-    async def execute(ctx, task: str) -> str:  # noqa: ARG001
-        return await spawn(name, task)
+    async def execute(ctx, task: str, continue_from: str = "") -> str:  # noqa: ARG001
+        return await spawn(name, task, continue_from=continue_from)
+
+    properties = {
+        "task": {
+            "type": "string",
+            "description": (
+                "The task for this agent. Be specific: paths, "
+                "expected outcome, constraints."
+            ),
+        }
+    }
+    if profile.needs_worktree:
+        properties["continue_from"] = {
+            "type": "string",
+            "description": (
+                "Optional: an existing writer agent_id whose worktree this "
+                "agent should continue in, instead of starting a fresh one. "
+                "Use this for a reviewer-requested fix -- a fresh worktree "
+                "branches off the original base commit and cannot see that "
+                "agent's diff no matter what the task text says."
+            ),
+        }
 
     return Tool(
         name=name,
         description=profile.description,
         parameters={
             "type": "object",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "description": (
-                        "The task for this agent. Be specific: paths, "
-                        "expected outcome, constraints."
-                    ),
-                }
-            },
+            "properties": properties,
             "required": ["task"],
         },
         fn=execute,
