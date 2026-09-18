@@ -53,6 +53,7 @@ class EngineConfig:
     metrics_job: str = "engine"
     metrics_instance: str = ""
     metrics_push_interval_s: float = 2.0
+    trace_calls: bool = False
     warnings: list[str] = field(default_factory=list)
     typesafe_api_key: str = ""
     judge_mode: str = "advisory"
@@ -69,7 +70,6 @@ class EngineConfig:
     judge_mode_intent: str = ""
     judge_mode_write: str = ""
     judge_mode_merge: str = ""
-    trace_calls: bool = False
 
     def judge_mode_for(self, site: str) -> str:
         """Effective judge mode for a call site: its own override, or the
