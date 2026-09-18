@@ -770,6 +770,8 @@ class Orchestrator(AgentLoop):
             on_skill_activated=self._on_skill_activated,
             model=child_model,
             on_memory=self._ctx.on_memory,
+            judge=self._ctx.judge,
+            on_judgement=self._ctx.on_judgement,
         )
 
 

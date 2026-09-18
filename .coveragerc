@@ -8,6 +8,10 @@ source =
 omit =
     tests/*
     */__init__.py
+parallel = true
+concurrency =
+    multiprocessing
+    thread
 
 [report]
 exclude_lines =

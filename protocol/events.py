@@ -304,6 +304,18 @@ class ContextBreakdown(ProtocolMessage):
 
 @event
 @dataclass
+class JudgementMade(ProtocolMessage):
+    tag: str
+    subject: str
+    outcome: str
+    signals: dict
+    enforced: bool
+    latency_ms: int
+    agent_id: str = ""
+
+
+@event
+@dataclass
 class MemoryUpdated(ProtocolMessage):
     files: list[MemoryFileNote] = field(default_factory=list)
     engineering: list[MemoryDecision] = field(default_factory=list)

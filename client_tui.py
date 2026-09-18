@@ -14,7 +14,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, RichLog, Rule, Static
+from textual.widgets import Button, Footer, Header, Input, RichLog, Rule, Select, Static
 
 import dummy_client
 from protocol.codec import STREAM_LIMIT, decode_event, encode
@@ -28,6 +28,7 @@ from protocol.events import (
     ChatMessageDelta,
     ChatMessageStarted,
     CommandOutputChunk,
+    JudgementMade,
     SnapshotReady,
     StatsUpdated,
     ToolCallFinished,
@@ -162,31 +163,108 @@ class ChatPanel(VerticalScroll):
         self.scroll_end(animate=False)
 
 
+PROTOCOL_ALL = "All"
+_MAX_PROTOCOL_ENTRIES = 2000
+
+
 class ProtocolLog(RichLog):
     def __init__(self, **kwargs) -> None:
-        super().__init__(highlight=False, markup=True, max_lines=2000, **kwargs)
+        super().__init__(highlight=False, markup=True, max_lines=_MAX_PROTOCOL_ENTRIES, **kwargs)
         self._has_entry = False
 
-    def log_outbound(self, command) -> None:
-        self._separate()
-        self.write(f"[bold #d4b44a]→[/] {escape(dummy_client.format_command(command))}")
-
-    def log_inbound(self, text: str) -> None:
+    def write_entry(self, text: str) -> None:
         if not text:
             return
-        self._separate()
-        self.write(escape(text))
-
-    def log_note(self, text: str) -> None:
-        if not text:
-            return
-        self._separate()
-        self.write(f"[dim]{escape(text)}[/dim]")
-
-    def _separate(self) -> None:
         if self._has_entry:
             self.write(RichRule(style="#5a4e28"))
         self._has_entry = True
+        self.write(text)
+
+    def reset(self) -> None:
+        self.clear()
+        self._has_entry = False
+
+
+class ProtocolPanel(Vertical):
+    """The protocol panel: a type filter above a scrolling log of every
+    command sent and every event received that isn't already shown
+    elsewhere (chat, tools, agents). Kept as (kind, markup) pairs so the
+    filter can be changed after the fact without losing history.
+    JudgementMade is dual-routed: a coloured card on the tools panel and
+    a filterable entry here (F7 jumps to that kind).
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._entries: list[tuple[str, str]] = []
+        self._kinds: list[str] = [PROTOCOL_ALL]
+        self._filter = PROTOCOL_ALL
+
+    def compose(self) -> ComposeResult:
+        yield Select(
+            [(PROTOCOL_ALL, PROTOCOL_ALL)],
+            value=PROTOCOL_ALL,
+            allow_blank=False,
+            id="protocol-filter",
+        )
+        yield ProtocolLog(id="protocol-log")
+
+    def log_outbound(self, command) -> None:
+        kind = type(command).__name__
+        text = f"[bold #d4b44a]→[/] {escape(dummy_client.format_command(command))}"
+        self._add(kind, text)
+
+    def log_inbound(self, event, text: str) -> None:
+        if isinstance(event, JudgementMade):
+            self._add(type(event).__name__, format_judgement_markup(event))
+            return
+        self._add(type(event).__name__, escape(text))
+
+    def log_note(self, text: str) -> None:
+        if text:
+            self._add("note", f"[dim]{escape(text)}[/dim]")
+
+    def set_filter(self, kind: str) -> None:
+        if kind not in self._kinds:
+            self._kinds.append(kind)
+            self._refresh_options()
+        self._filter = kind
+        select = self.query_one("#protocol-filter", Select)
+        select.value = kind
+        self._rerender()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "protocol-filter":
+            return
+        self._filter = str(event.value)
+        self._rerender()
+
+    def _add(self, kind: str, text: str) -> None:
+        if not text:
+            return
+        self._entries.append((kind, text))
+        if len(self._entries) > _MAX_PROTOCOL_ENTRIES:
+            self._entries = self._entries[-_MAX_PROTOCOL_ENTRIES:]
+        if kind not in self._kinds:
+            self._kinds.append(kind)
+            self._refresh_options()
+        if self._filter in (PROTOCOL_ALL, kind):
+            self._log().write_entry(text)
+
+    def _refresh_options(self) -> None:
+        select = self.query_one("#protocol-filter", Select)
+        select.set_options((kind, kind) for kind in self._kinds)
+        select.value = self._filter
+
+    def _rerender(self) -> None:
+        log = self._log()
+        log.reset()
+        for kind, text in self._entries:
+            if self._filter in (PROTOCOL_ALL, kind):
+                log.write_entry(text)
+
+    def _log(self) -> ProtocolLog:
+        return self.query_one("#protocol-log", ProtocolLog)
 
 
 class ToolCard(Static):
@@ -243,11 +321,53 @@ class ToolCard(Static):
         return "\n".join(lines)
 
 
+_JUDGE_OUTCOME_STYLE = {
+    "allow": "#7dcea0",
+    "prompt": "#e6c36a",
+    "block": "#e07a7a",
+    "ranked": "#8ec8d8",
+    "flag": "#d4884a",
+    "redact": "#e07a7a",
+}
+
+
+def format_judgement_markup(event: JudgementMade) -> str:
+    color = _JUDGE_OUTCOME_STYLE.get(event.outcome.lower(), "#d4b44a")
+    flag = "enforced" if event.enforced else "advisory"
+    who = f"  [dim]{escape(event.agent_id[:8])}[/dim]" if event.agent_id else ""
+    lines = [
+        f"[b]judge[/b] {escape(event.tag)} → [{color} bold]{escape(event.outcome)}[/]  "
+        f"[dim]{flag} · {event.latency_ms}ms[/dim]{who}",
+        f"  {escape(event.subject)}",
+    ]
+    if event.signals:
+        bits = "  ".join(f"{escape(str(key))}={value:.2f}" for key, value in event.signals.items())
+        lines.append(f"  [dim]{bits}[/dim]")
+    return "\n".join(lines)
+
+
+def _judge_class(outcome: str) -> str:
+    if outcome in _JUDGE_OUTCOME_STYLE:
+        return f"judge-{outcome}"
+    return "judge-other"
+
+
+class JudgeCard(Static):
+    def __init__(self, event: JudgementMade) -> None:
+        self.event = event
+        super().__init__(
+            format_judgement_markup(event),
+            classes=f"judge-card {_judge_class(event.outcome.lower())}",
+            markup=True,
+        )
+
+
 class ToolsPanel(VerticalScroll):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._cards: dict[str, ToolCard] = {}
         self._last_shell: ToolCard | None = None
+        self._judgements = 0
 
     def start_call(self, event: ToolCallStarted) -> None:
         card = ToolCard(
@@ -282,8 +402,13 @@ class ToolsPanel(VerticalScroll):
         card.finish(event.ok, event.duration_ms, event.preview)
         self.scroll_end(animate=False)
 
-    def _mount_card(self, card: ToolCard) -> None:
-        if self.query(ToolCard):
+    def add_judgement(self, event: JudgementMade) -> None:
+        self._judgements += 1
+        self.border_title = f"tools · {self._judgements} judged"
+        self._mount_card(JudgeCard(event))
+
+    def _mount_card(self, card: Static) -> None:
+        if self.children:
             self.mount(Rule(classes="item-sep"))
         self.mount(card)
         self.scroll_end(animate=False)
@@ -510,6 +635,18 @@ class DummyClientApp(App):
         border-title-color: #d4b44a;
         border-title-style: bold;
         background: #16140e;
+    }
+
+    #protocol-filter {
+        height: 3;
+        background: #16140e;
+        color: #d4b44a;
+        border: tall #4a4320;
+    }
+
+    #protocol-log {
+        height: 1fr;
+        background: #16140e;
         scrollbar-color: #4a4320;
     }
 
@@ -612,10 +749,42 @@ class DummyClientApp(App):
     .tool-error {
         color: #f0c4c4;
     }
+
+    .judge-card {
+        padding: 0 1 1 1;
+        margin-bottom: 1;
+        background: #1a1810;
+    }
+
+    .judge-allow {
+        color: #7dcea0;
+    }
+
+    .judge-prompt {
+        color: #e6c36a;
+    }
+
+    .judge-block {
+        color: #e07a7a;
+    }
+
+    .judge-ranked {
+        color: #8ec8d8;
+    }
+
+    .judge-flag,
+    .judge-redact {
+        color: #d4884a;
+    }
+
+    .judge-other {
+        color: #d4b44a;
+    }
     """
     BINDINGS = [
         Binding("f5", "snapshot", "snapshot", show=True, priority=True),
         Binding("f6", "context", "context", show=True, priority=True),
+        Binding("f7", "judgements", "judgements", show=True, priority=True),
         Binding("ctrl+c", "quit", "quit", show=False, priority=True),
         Binding("ctrl+q", "quit", "quit", show=False),
     ]
@@ -630,6 +799,7 @@ class DummyClientApp(App):
         self._turn = 0
         self._max_turns = 0
         self._stats_line = ""
+        self._last_judge = ""
         self._open_snapshot_modal = False
 
     def compose(self) -> ComposeResult:
@@ -642,7 +812,7 @@ class DummyClientApp(App):
                 agents = AgentsPanel(id="agents")
                 agents.border_title = "agents · 0"
                 yield agents
-                protocol = ProtocolLog(id="protocol")
+                protocol = ProtocolPanel(id="protocol")
                 protocol.border_title = "protocol"
                 yield protocol
                 tools = ToolsPanel(id="tools")
@@ -665,7 +835,7 @@ class DummyClientApp(App):
                 str(self.socket_path), limit=STREAM_LIMIT
             )
         except (ConnectionRefusedError, FileNotFoundError, OSError) as exc:
-            self.query_one("#protocol", ProtocolLog).log_note(
+            self.query_one("#protocol", ProtocolPanel).log_note(
                 f"could not connect to {self.socket_path}: {exc}"
             )
             self._agent_state = "offline"
@@ -689,6 +859,9 @@ class DummyClientApp(App):
 
     async def action_context(self) -> None:
         await self.send_command(RequestOrchContext())
+
+    def action_judgements(self) -> None:
+        self.query_one("#protocol", ProtocolPanel).set_filter("JudgementMade")
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "snapshot-btn":
@@ -734,7 +907,7 @@ class DummyClientApp(App):
         self._dispatch(message.event)
 
     def on_stream_notice(self, message: StreamNotice) -> None:
-        self.query_one("#protocol", ProtocolLog).log_note(message.text)
+        self.query_one("#protocol", ProtocolPanel).log_note(message.text)
         if message.text.startswith("disconnected") or message.text.startswith("bad event stream"):
             self._agent_state = "offline"
             self._refresh_status()
@@ -745,7 +918,7 @@ class DummyClientApp(App):
         if not text:
             return
         command = dummy_client.command_from_line(text, self.workspace)
-        protocol = self.query_one("#protocol", ProtocolLog)
+        protocol = self.query_one("#protocol", ProtocolPanel)
         for note in dummy_client.drain_notes():
             protocol.log_note(note)
         if command is dummy_client.CLIENT_EXIT:
@@ -761,7 +934,7 @@ class DummyClientApp(App):
             self._open_snapshot_modal = True
             if command.replay:
                 command = RequestSnapshot(replay=False)
-        protocol = self.query_one("#protocol", ProtocolLog)
+        protocol = self.query_one("#protocol", ProtocolPanel)
         protocol.log_outbound(command)
         if self._writer is None:
             protocol.log_note("not connected")
@@ -776,6 +949,11 @@ class DummyClientApp(App):
 
     def _dispatch(self, event) -> None:
         dest = dummy_client.route_event(event)
+        if dest == "judge":
+            self._dispatch_judge(event)
+            text = dummy_client.format_event(event)
+            self.query_one("#protocol", ProtocolPanel).log_inbound(event, text)
+            return
         if dest == "chat":
             self._dispatch_chat(event)
         elif dest == "tools":
@@ -792,13 +970,13 @@ class DummyClientApp(App):
                         event.snapshot.agents
                     )
                 text = dummy_client.format_event(event)
-                self.query_one("#protocol", ProtocolLog).log_note(
+                self.query_one("#protocol", ProtocolPanel).log_note(
                     f"snapshot ({event.snapshot.message_count} messages)"
                 )
                 self.push_screen(InspectModal("snapshot", text))
                 return
             text = dummy_client.format_event(event)
-            self.query_one("#protocol", ProtocolLog).log_inbound(text)
+            self.query_one("#protocol", ProtocolPanel).log_inbound(event, text)
         if isinstance(event, SnapshotReady) and event.snapshot.agents is not None:
             self.query_one("#agents", AgentsPanel).set_agents(event.snapshot.agents)
         if isinstance(event, AgentStateChanged):
@@ -856,10 +1034,17 @@ class DummyClientApp(App):
         elif isinstance(event, ChatMessageAdded):
             panel.finish_stream(event)
 
+    def _dispatch_judge(self, event) -> None:
+        if not isinstance(event, JudgementMade):
+            return
+        self.query_one("#tools", ToolsPanel).add_judgement(event)
+        self._last_judge = f"judge {event.tag} → {event.outcome}"
+        self._refresh_status()
+
     def _dispatch_context(self, event) -> None:
         if not isinstance(event, OrchContext):
             return
-        self.query_one("#protocol", ProtocolLog).log_note(
+        self.query_one("#protocol", ProtocolPanel).log_note(
             f"orch context ({len(event.text)} chars)"
         )
         self.push_screen(InspectModal("orch context", event.text))
@@ -870,6 +1055,8 @@ class DummyClientApp(App):
             parts.append(f"turn {self._turn}/{self._max_turns}")
         if self._stats_line:
             parts.append(self._stats_line)
+        if self._last_judge:
+            parts.append(self._last_judge)
         self.sub_title = "  ·  ".join(parts)
         self._refresh_prompt()
 

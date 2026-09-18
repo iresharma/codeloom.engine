@@ -39,6 +39,15 @@ async def main() -> None:
 
     session = EngineSession(workspace, db_path=engine_dir / "session.db")
     await session.start()
+    if session._judge.enabled:
+        print(
+            f"judge: {session._config.judge_mode} "
+            f"model={session._config.judge_model} "
+            f"exec={session._config.exec_approval}",
+            flush=True,
+        )
+    else:
+        print("judge: off", flush=True)
     server = EngineServer(session, socket_path=engine_dir / "engine.sock")
     loop = asyncio.get_running_loop()
     force = False

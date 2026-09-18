@@ -107,7 +107,11 @@ async def run_command(
         if not workdir.is_dir():
             raise WorkspacePathError(f"cwd is not a directory: {cwd}")
 
-    env = {key: value for key, value in os.environ.items() if not key.startswith("OPENROUTER_")}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("OPENROUTER_") and not key.startswith("TYPESAFE_")
+    }
     env["PYTHONUNBUFFERED"] = "1"
     env["CI"] = "1"
     env["TERM"] = "dumb"

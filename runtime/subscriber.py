@@ -26,6 +26,7 @@ from protocol.events import (
     FileEdited,
     FileTreeUpdated,
     GitStateUpdated,
+    JudgementMade,
     MemoryUpdated,
     PathChanged,
     ToolCallFinished,
@@ -64,6 +65,7 @@ SIZE_FIELDS: dict[type, tuple[str, ...]] = {
     OrchContext: ("text",),
     WorktreeSettled: ("detail",),
     McpAuthRequired: ("url",),
+    JudgementMade: ("subject",),
 }
 
 SMALL_STRING_FIELDS = frozenset(
@@ -100,6 +102,8 @@ SMALL_STRING_FIELDS = frozenset(
         "dest",
         "pr_url",
         "server",
+        "tag",
+        "outcome",
     }
 )
 

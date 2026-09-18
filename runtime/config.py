@@ -6,8 +6,11 @@ from pathlib import Path
 
 from llm.openrouter import load_env_sh
 
-EXEC_APPROVALS = ("auto", "always", "never")
+EXEC_APPROVALS = ("auto", "always", "never", "judged")
 TURN_CONTINUES = ("prompt", "never")
+JUDGE_MODES = ("off", "advisory", "enforcing")
+TYPESAFE_PLACEHOLDERS = {"", "...", "your-key", "changeme"}
+JUDGE_SITES = ("exec", "tools", "search", "screen")
 # 2.0 never fires in-loop; overflow still force-compacts. Must ship with
 # github_file windows or surveys hit the 120k fuse.
 CHILD_COMPACT_TRIGGER = 2.0
@@ -34,6 +37,24 @@ class EngineConfig:
     subscriber_capacity: int = 4096
     subscriber_bytes: int = 1 << 20
     warnings: list[str] = field(default_factory=list)
+    typesafe_api_key: str = ""
+    judge_mode: str = "advisory"
+    judge_model: str = "jev-latest"
+    judge_timeout_ms: int = 800
+    judge_cache_size: int = 512
+    judge_mode_exec: str = ""
+    judge_mode_tools: str = ""
+    judge_mode_search: str = ""
+    judge_mode_screen: str = ""
+
+    def judge_mode_for(self, site: str) -> str:
+        """Effective judge mode for a call site: its own override, or the global default."""
+        override = getattr(self, f"judge_mode_{site}", "")
+        return override or self.judge_mode
+
+    @property
+    def judge_usable(self) -> bool:
+        return bool(self.typesafe_api_key) and self.judge_mode != "off"
 
     @classmethod
     def from_env(cls, workspace: Path) -> EngineConfig:
@@ -73,14 +94,49 @@ class EngineConfig:
         config.subscriber_bytes = _env_int(
             "ENGINE_SUBSCRIBER_BYTES", config.subscriber_bytes, warnings
         )
+        config.typesafe_api_key = typesafe_api_key_from_env()
+        raw_judge_mode = os.environ.get("ENGINE_JUDGE", config.judge_mode)
+        judge_mode = (raw_judge_mode or "").strip().lower()
+        if judge_mode not in JUDGE_MODES:
+            warnings.append(
+                f"ENGINE_JUDGE={raw_judge_mode!r} is not off|advisory|enforcing; "
+                "using advisory"
+            )
+            judge_mode = "advisory"
+        config.judge_mode = judge_mode
+        if judge_mode == "enforcing" and not config.typesafe_api_key:
+            warnings.append(
+                "ENGINE_JUDGE=enforcing but no TypeSafe API key is set "
+                "(TYPESAFE_API_KEY or TYPESAFE_JEV_API_KEY); the judge is off"
+            )
+        config.judge_model = (
+            os.environ.get("ENGINE_JUDGE_MODEL") or config.judge_model
+        ).strip()
+        config.judge_timeout_ms = _env_int(
+            "ENGINE_JUDGE_TIMEOUT_MS", config.judge_timeout_ms, warnings
+        )
+        config.judge_cache_size = _env_int(
+            "ENGINE_JUDGE_CACHE_SIZE", config.judge_cache_size, warnings
+        )
+        for site in JUDGE_SITES:
+            setattr(
+                config,
+                f"judge_mode_{site}",
+                _env_judge_site(f"ENGINE_JUDGE_{site.upper()}", warnings),
+            )
+
+        approval_set = "ENGINE_EXEC_APPROVAL" in os.environ
         raw_approval = os.environ.get("ENGINE_EXEC_APPROVAL", config.exec_approval)
         approval = (raw_approval or "").strip().lower()
         if approval not in EXEC_APPROVALS:
             warnings.append(
-                f"ENGINE_EXEC_APPROVAL={raw_approval!r} is not auto|always|never; "
-                "using auto"
+                f"ENGINE_EXEC_APPROVAL={raw_approval!r} is not "
+                "auto|always|never|judged; using auto"
             )
             approval = "auto"
+            approval_set = True
+        if not approval_set and config.judge_usable and config.judge_mode_for("exec") != "off":
+            approval = "judged"
         config.exec_approval = approval
         raw_continue = os.environ.get("ENGINE_TURN_CONTINUE", config.turn_continue)
         continue_mode = (raw_continue or "").strip().lower()
@@ -93,6 +149,15 @@ class EngineConfig:
         config.turn_continue = continue_mode
         config.warnings = warnings
         return config
+
+
+def typesafe_api_key_from_env() -> str:
+    """TYPESAFE_API_KEY wins; TYPESAFE_JEV_API_KEY is the dashboard alias."""
+    for name in ("TYPESAFE_API_KEY", "TYPESAFE_JEV_API_KEY"):
+        raw = os.environ.get(name, "").strip()
+        if raw and raw not in TYPESAFE_PLACEHOLDERS:
+            return raw
+    return ""
 
 
 def _env_int(name: str, default: int, warnings: list[str]) -> int:
@@ -115,6 +180,20 @@ def _env_float(name: str, default: float, warnings: list[str]) -> float:
     except ValueError:
         warnings.append(f"{name}={raw!r} is not a number; using {default}")
         return default
+
+
+def _env_judge_site(name: str, warnings: list[str]) -> str:
+    """Per-site judge mode override: empty string means 'inherit the global mode'."""
+    raw = os.environ.get(name, "")
+    value = (raw or "").strip().lower()
+    if value == "":
+        return ""
+    if value not in JUDGE_MODES:
+        warnings.append(
+            f"{name}={raw!r} is not off|advisory|enforcing; ignoring override"
+        )
+        return ""
+    return value
 
 
 def _env_bool(name: str, default: bool, warnings: list[str]) -> bool:

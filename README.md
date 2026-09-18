@@ -46,6 +46,7 @@ socket is a dataclass with a `type` field.
   - [Language servers](#language-servers)
 - [Persistence](#persistence)
 - [Configuration](#configuration)
+- [TypeSafe judge](#typesafe-judge)
 - [The reference client](#the-reference-client)
 - [Testing](#testing)
 - [Project layout](#project-layout)
@@ -87,8 +88,9 @@ pure `str -> str` function and inherits all of it.
 
 | Requirement | Notes |
 |---|---|
-| Python 3.9+ | The protocol layer has an explicit fallback for 3.9's lack of runtime PEP 604 unions |
+| Python 3.10+ | Required by `typesafe-sdk` (the TypeSafe judge integration); the protocol layer relies on runtime PEP 604 unions |
 | An OpenRouter API key | Required for the agent loop; the engine boots without one but chat is disabled |
+| A TypeSafe API key | Optional; enables the judge (see [TypeSafe judge](#typesafe-judge)). Absent, the engine runs exactly as it does without it |
 | `rg` (ripgrep) | Required by the `search` tool |
 | `git` | Optional; enables git state reporting and improves language detection |
 | `gh` (GitHub CLI) | Optional; GitHub tools (`gh_pr_*`, `github_search_code`, …). Authenticate with `gh auth login`. |
@@ -289,6 +291,7 @@ booted with — one process serves exactly one workspace.
 | `ContextCompacted` | `strategy`, counts, `summary` | History was trimmed or summarized. |
 | `ErrorOccurred` | `message` | Recoverable error. Never terminates the connection. |
 | `WarningOccurred` | `message` | Advisory, e.g. an unsupported project language. |
+| `JudgementMade` | `tag`, `subject`, `outcome`, `signals`, `enforced`, `latency_ms`, `agent_id?` | A TypeSafe verdict at a choke point (`exec_approval`, `call_verify`, `search_rerank`, `result_screen`). `enforced` is false in advisory mode. |
 | `SessionEnded` | `reason` | Session closed. |
 
 `tool` role messages are previews: the engine truncates tool output to 400
@@ -763,10 +766,16 @@ current disk hash does not match the hash stored with the note.
 | `ENGINE_LLM_IDLE_S` | `90` | Stream idle timeout. |
 | `ENGINE_MAX_TURNS` | `16` | Tool-calling turns per user message. |
 | `ENGINE_MAX_SPAWNS_PER_TURN` | `8` | Live concurrent subagents (not reset each orch reply). |
-| `ENGINE_EXEC_APPROVAL` | `auto` | `auto`, `always`, or `never`. |
+| `ENGINE_EXEC_APPROVAL` | `auto` (`judged` if a TypeSafe key is set) | `auto`, `always`, `never`, or `judged`. |
 | `ENGINE_EXEC_TIMEOUT_S` | `120` | Default `run_command` timeout. |
 | `ENGINE_EXEC_FILE_LIMIT_MB` | `2048` | `ulimit -f` cap (POSIX 512-byte blocks). |
 | `ENGINE_CONTEXT_BUDGET` | `120000` | Compaction trigger budget. |
+| `TYPESAFE_API_KEY` | — | Enables the judge (see below). `TYPESAFE_JEV_API_KEY` is accepted as an alias. Placeholder values (`...`, `your-key`, `changeme`) are treated as unset, same as `OPENROUTER_API_KEY`. |
+| `ENGINE_JUDGE` | `advisory` | `off`, `advisory`, or `enforcing`. `advisory` emits `JudgementMade` and logs but never changes behaviour. |
+| `ENGINE_JUDGE_MODEL` | `jev-latest` | TypeSafe model string. |
+| `ENGINE_JUDGE_TIMEOUT_MS` | `800` | Hard per-call ceiling; a slow judge degrades to no opinion, not a slow turn. |
+| `ENGINE_JUDGE_CACHE_SIZE` | `512` | LRU entries keyed by a hash of state + questions. |
+| `ENGINE_JUDGE_EXEC` / `_TOOLS` / `_SEARCH` / `_SCREEN` | (inherits `ENGINE_JUDGE`) | Per-site override, so e.g. exec approval can enforce while result screening stays advisory. |
 
 Set them in the environment or in `env.sh` at the workspace root. `env.sh`
 parsing is deliberately minimal — it handles `export`, `#` comments, and quoted
@@ -777,7 +786,73 @@ Without a key the engine still starts and serves file, tree, git, snapshot, and
 undo commands. Only `SubmitUserMessage` fails, with a clear error.
 
 Keep `env.sh` out of version control. It is in `.gitignore`, and the write
-guard refuses to let the agent write to it.
+guard refuses to let the agent write to it. The same guard covers
+`TYPESAFE_API_KEY` for free, since it denies writes by filename, not by
+variable.
+
+---
+
+## TypeSafe judge
+
+The engine can optionally consult [TypeSafe](https://typesafe.ai)'s System
+One API (`typesafe-sdk`, model `jev-latest`) at a handful of choke points:
+`run_command` approval, tool-call verification, search re-ranking, and
+tool-result screening for prompt injection. TypeSafe is a fast calibrated
+classifier, not an agent — the engine sends one `state` blob plus typed
+questions (`Noul` for yes/no, `Choice` for picking one of a closed set,
+`Score` for an ordinal rating) and gets back a probability and confidence per
+question. It never generates an edit, a search query, or a file path;
+**the LLM generates, TypeSafe judges, code decides.**
+
+Every judge call degrades to "no opinion" on any failure — a missing key, a
+timeout, a rate limit, a 5xx, or the `typesafe-sdk` package not being
+installed. `runtime/judge.py`'s `JudgeManager` (owned by `EngineSession`,
+built at bind, closed on shutdown — the same lifecycle as `LSPManager`) never
+lets a judge failure reach a tool result, a protocol event, or the agent
+loop; callers that get `None` back fall through to their pre-existing,
+judge-less behaviour. Judgments may only add restriction or information —
+they can escalate `auto` to a prompt or a refusal, but they can never
+override `guard_write_path`, the syntax gate, the staleness check, or the
+write denylist.
+
+Every judged decision emits a `JudgementMade` event (`tag`, `subject`,
+`outcome`, `signals`, `enforced`, `latency_ms`) so a blocked or escalated
+action is never an inexplicable refusal — `dummy_client.py` renders it as
+`judge <tag> -> <outcome> (advisory|enforced, <n>ms): <subject>`, pins a
+coloured card on the tools panel, and puts the last verdict in the status
+line. F7 filters the protocol log to `JudgementMade` only. The engine
+process prints `judge: <mode> model=… exec=…` (or `judge: off`) at
+startup so you can see whether the key loaded before you attach a client.
+
+To exercise the live call sites from `dummy_client.py`:
+
+1. Put a real TypeSafe key in `env.sh` as `TYPESAFE_API_KEY` or
+   `TYPESAFE_JEV_API_KEY`, and set `ENGINE_JUDGE=enforcing` (or leave the
+   default `advisory` if you only want events, not behaviour change).
+2. `python app.py` — confirm the startup line is not `judge: off`.
+3. `python dummy_client.py` and send one of:
+
+| Prompt | Call site | What you should see |
+|---|---|---|
+| `run ls in the workspace` | `exec_approval` | allow card; command runs |
+| `run git push --force origin main` | `exec_approval` | prompt or block card; a prompt or a refused tool result |
+| `where is the retry logic in this codebase?` | `search_rerank` | ranked card once ripgrep returns more than 10 hits |
+| `read docs/impl-plans/jev-exp-1.md` | `result_screen` | flag/redact card only if the file is treated as agent-directed |
+| ask for an edit (`str_replace` / `apply_patch`) | `call_verify` | allow or block card before the write |
+
+A missing key, a timeout, or a 5xx degrades silently to today's path and
+emits one `WarningOccurred` for the first failure of the session.
+
+Ship a call site under `ENGINE_JUDGE=advisory` first to collect signal on
+real traffic, then promote it to `enforcing` with its own
+`ENGINE_JUDGE_<SITE>` override once the false-positive rate is measured.
+
+The offline test suite never calls the real API: `tests/conftest.py` provides
+a `FakeJudge`/`FakeVerdict` pair (mirroring `FakeLsp`) with a scripted
+`responses` table and a `calls` list, and every judge-backed code path has a
+test asserting that a `None` verdict reproduces pre-integration behaviour
+exactly. Tests that do call the real API live under `tests/live/` and carry
+the `judge` marker, skipped automatically when `TYPESAFE_API_KEY` is unset.
 
 ---
 
@@ -814,16 +889,21 @@ before writing your own client.
   `agent_id`). Fed by `AgentsUpdated`, `SnapshotReady`, and those chat events.
 - **Protocol** — every command this client sends, plus inbound events that are
   not chat, tools, the agents panel, or an inspect popup (files, git, stats,
-  errors, `AgentStarted` / `AgentFinished`).
+  errors, `AgentStarted` / `AgentFinished`). `JudgementMade` is logged here
+  too; F7 filters the log to those events.
 - **Tools** — live tool cards with arguments, shell chunks, status, duration,
   and the 400-char result preview. Cards tagged with `agent_id` when a child
-  is calling the tool.
+  is calling the tool. Each `JudgementMade` is pinned here as a coloured
+  judge card (`allow` / `prompt` / `block` / `ranked` / `flag`) so a
+  verdict is visible next to the tool it gated.
 - **Snapshot** — **snapshot** button / F5 / `snapshot` opens a popup of the
   base `SnapshotReady` (session, language, git, stats, agents, message count).
   It does not replay chat history.
 - **Context** — **context** button / F6 / `context` command opens a popup of
   the orch's current model context (`OrchContext`: system prompt, workspace
   notes, history).
+- **Judgements** — F7 filters the protocol log to `JudgementMade`. The same
+  events are always pinned as coloured cards on the tools panel.
 
 ```bash
 python dummy_client.py [workspace]
@@ -869,13 +949,18 @@ Writing your own client is three steps: open a Unix socket connection to
 ## Testing
 
 ```bash
-pytest                      # everything
+pytest                      # everything (judge and lsp live tests skip themselves)
 pytest -m "not lsp"         # skip tests that spawn a real language server
+pytest -m judge tests/live  # calibration fixtures against the real TypeSafe API
 pytest tests/test_apply.py  # one module
 ```
 
 `pytest.ini` sets `pythonpath = .` and `testpaths = tests`, so no install step
-is needed.
+is needed. The default run is capped at 4 pytest-xdist workers (`-n logical
+--maxprocesses=4 --dist loadfile`). Uncapped `-n auto` on a 12-core machine
+used to leave several multi-gigabyte Python processes behind after the suite
+(or after Ctrl-C). Pass `-n0` to disable workers entirely for a single-file
+debug run.
 
 To check coverage locally:
 
@@ -941,7 +1026,7 @@ requirements.txt        runtime and test dependencies
 pytest.ini              pythonpath, testpaths, the lsp marker
 
 protocol/               the wire contract — no engine logic
-  message.py            ProtocolMessage base: to_json/from_json, 3.9-safe hint resolution
+  message.py            ProtocolMessage base: to_json/from_json
   commands.py           11 client→engine dataclasses + COMMANDS registry
   events.py             22 engine→client dataclasses + EVENTS registry
   snapshot.py           EngineSnapshot, ChatMessage, SessionSummary, FileTreeNode, GitState, Stats, PendingPrompt

@@ -24,6 +24,9 @@ class ToolRegistry:
     def names(self) -> set[str]:
         return set(self._tools)
 
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
+
     def subset(self, names: list[str], profile: str = "") -> ToolRegistry:
         out = ToolRegistry()
         seen: set[str] = set()

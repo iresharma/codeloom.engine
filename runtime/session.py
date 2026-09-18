@@ -36,6 +36,7 @@ from protocol.events import (
     FileEdited,
     FileTreeUpdated,
     GitStateUpdated,
+    JudgementMade,
     McpAuthRequired,
     MemoryUpdated,
     McpServersUpdated,
@@ -71,6 +72,7 @@ from runtime.subscriber import EVENT_SOFT_LIMIT, Subscriber, clip_text
 from runtime.tools.fs import WorkspacePathError, list_tree, read_text
 from runtime.tools.git import read_state as read_git
 from runtime.tools.lsp import LSPManager, LSPTimeoutError
+from runtime.judge import JudgeManager
 from runtime.mcp.config import load_mcp_config, load_trust, save_trust
 from runtime.mcp.manager import McpManager
 from runtime.mcp.tokens import apply_tokens, load_tokens, save_token
@@ -115,6 +117,7 @@ class EngineSession:
         self._mcp_cool_s = 30.0
         self._auth_tasks: list[asyncio.Task] = []
         self._registry = None
+        self._judge = JudgeManager(self._config, on_failure=self._on_judge_failure)
         try:
             self._llm = OpenRouterLLM.from_env(self._workspace, config=self._config)
         except RuntimeError:
@@ -187,6 +190,7 @@ class EngineSession:
         if self._mcp is not None:
             await self._mcp.aclose()
             self._mcp = None
+        await self._judge.aclose()
         self.close_session()
 
     def close_session(self) -> bool:
@@ -328,6 +332,12 @@ class EngineSession:
             self._emit(ErrorOccurred(message=message))
         for warning in self._config.warnings:
             self._emit(WarningOccurred(message=warning))
+        if self._config.judge_usable and not self._judge.enabled:
+            self._emit(
+                WarningOccurred(
+                    message="typesafe-sdk is not installed; the judge is off"
+                )
+            )
         self._skills = SkillCatalog(discover_skills(self._workspace))
         self._emit(SkillCatalogUpdated(skills=self._skills.rows()))
         await self._start_mcp(registry)
@@ -374,6 +384,8 @@ class EngineSession:
             skills=self._skills,
             on_skill_activated=self._on_skill_activated,
             on_memory=self._emit_memory,
+            judge=self._judge,
+            on_judgement=self._on_judgement,
         )
         self._loop.hydrate(self._state.messages)
 
@@ -597,6 +609,32 @@ class EngineSession:
                 call_id=call_id or "",
                 stream=stream,
                 text=text,
+                agent_id=agent_id,
+            )
+        )
+
+    def _on_judge_failure(self, message: str) -> None:
+        self._emit(WarningOccurred(message=message))
+
+    def _on_judgement(
+        self,
+        *,
+        tag: str,
+        subject: str,
+        outcome: str,
+        signals: dict,
+        enforced: bool,
+        latency_ms: int,
+        agent_id: str = "",
+    ) -> None:
+        self._emit(
+            JudgementMade(
+                tag=tag,
+                subject=subject,
+                outcome=outcome,
+                signals=signals,
+                enforced=enforced,
+                latency_ms=latency_ms,
                 agent_id=agent_id,
             )
         )
