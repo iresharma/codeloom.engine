@@ -955,6 +955,8 @@ python dummy_client.py [workspace] --message "the task" --auto --timeout 1800
 
 `--message --auto` is the headless driver: it starts a session, submits one user message, auto-answers prompts (exec/confirm `yes`, worktree settle `keep`, MCP auth `no`, turn-cap `continue`), and exits when the orchestrator has been idle for a second with no live children. `--auto` without `--message` is an error.
 
+To A/B `main` against this branch on one target repo, use [`scripts/bench_ab.py`](scripts/bench_ab.py). See [`docs/grafana/benchmark-ab.md`](docs/grafana/benchmark-ab.md).
+
 The input bar uses the same grammar as the old REPL:
 
 | Input | Sends |
@@ -1066,6 +1068,8 @@ is committed.
 ```
 app.py                  entry point: parse args, boot session + server, install signal handlers
 dummy_client.py         reference TUI client (command parser + entry)
+headless_client.py      unattended --message --auto driver
+scripts/bench_ab.py     clone main vs this branch and run the same prompt
 client_tui.py           Textual 3-panel UI: chat, protocol, tools
 env.sh                  API key and model (gitignored)
 requirements.txt        runtime and test dependencies
