@@ -26,6 +26,7 @@ class EngineMetrics:
         job: str = "engine",
         interval_s: float = 2.0,
         session_id: str = "",
+        instance: str = "",
         workspace: Path | str = "",
         on_warning: Callable[[str], None] | None = None,
         registry: CollectorRegistry | None = None,
@@ -34,6 +35,7 @@ class EngineMetrics:
         self._job = (job or "engine").strip() or "engine"
         self._interval_s = max(0.0, float(interval_s))
         self._session_id = session_id or ""
+        self._instance = (instance or "").strip() or self._session_id
         self._on_warning = on_warning
         self.registry = registry or CollectorRegistry()
         self._last_push = 0.0
@@ -234,6 +236,7 @@ class EngineMetrics:
             job=config.metrics_job,
             interval_s=config.metrics_push_interval_s,
             session_id=session_id,
+            instance=getattr(config, "metrics_instance", "") or "",
             workspace=workspace,
             on_warning=on_warning,
         )
@@ -436,7 +439,7 @@ class EngineMetrics:
                 self._url,
                 job=self._job,
                 registry=self.registry,
-                grouping_key={"instance": self._session_id},
+                grouping_key={"instance": self._instance or self._session_id},
             )
             self._last_push = time.monotonic()
         except Exception as exc:  # noqa: BLE001
