@@ -41,6 +41,8 @@ SIDES = ("baseline", "judge")
 # ---------------------------------------------------------------------------
 
 _LIST_LINE = re.compile(r"^\s*(-|\*|\d+\.)\s+")
+_UL_MARKER_RE = re.compile(r"^\s*-\s+")
+_OL_MARKER_RE = re.compile(r"^\s*\d+\.\s+")
 
 
 def dewrap(text: str) -> str:
@@ -98,10 +100,12 @@ def md_lite(text: str) -> str:
         if not lines:
             continue
         if all(re.match(r"^\s*-\s+", ln) for ln in lines):
-            items = "".join(f"<li>{re.sub(r'^\\s*-\\s+', '', ln)}</li>" for ln in lines)
+            stripped = [_UL_MARKER_RE.sub("", ln) for ln in lines]
+            items = "".join(f"<li>{ln}</li>" for ln in stripped)
             parts.append(f"<ul>{items}</ul>")
         elif all(re.match(r"^\s*\d+\.\s+", ln) for ln in lines):
-            items = "".join(f"<li>{re.sub(r'^\\s*\\d+\\.\\s+', '', ln)}</li>" for ln in lines)
+            stripped = [_OL_MARKER_RE.sub("", ln) for ln in lines]
+            items = "".join(f"<li>{ln}</li>" for ln in stripped)
             parts.append(f"<ol>{items}</ol>")
         else:
             parts.append("<p>" + "<br>".join(lines) + "</p>")
