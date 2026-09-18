@@ -29,8 +29,7 @@ class Subagent(AgentLoop):
 
     async def finish(self, status: str) -> AgentResult:
         async def complete(payload):
-            extra = {"model": self._model} if self._model else {}
-            return await self._llm.complete(payload, **extra)
+            return await self._llm_complete(payload)
 
         try:
             return await compress_for_parent(

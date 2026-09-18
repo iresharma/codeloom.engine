@@ -51,11 +51,14 @@ async def start_session(session, command: StartSession) -> None:
                 ErrorOccurred(message=f"unknown session: {command.session_id}")
             )
             return
+        session.detach_metrics()
         session._state = SessionState.from_snapshot(loaded)
     else:
+        session.detach_metrics()
         session._state = SessionState(session_id=uuid4().hex)
         session._persist()
     await session._bind_loop()
+    session.attach_metrics()
     session._emit_snapshot()
     if session.language.warning:
         session._emit(WarningOccurred(message=session.language.warning))

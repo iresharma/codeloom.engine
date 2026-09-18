@@ -545,11 +545,10 @@ class AgentLoop:
                 self._hooks.on_delta(self._message_id, channel, text)
 
         try:
-            result = await self._llm.complete(
+            result = await self._call_llm(
                 messages,
                 tools=schemas or None,
                 on_delta=on_delta,
-                **({"model": self._model} if self._model else {}),
             )
         except Exception as exc:
             if (
@@ -574,14 +573,62 @@ class AgentLoop:
                     )
                 return await self._complete(self._build_messages(), schemas)
             raise
-        if result.usage is not None:
-            if result.usage.prompt_tokens:
-                estimated = max(1, len(str(messages)) // 4)
-                self._estimate_ratio = result.usage.prompt_tokens / estimated
-                self._last_prompt_tokens = result.usage.prompt_tokens
-            self._usage += result.usage
-            if self._hooks.on_usage is not None:
-                self._hooks.on_usage(result.usage)
+        self._note_usage(result, messages)
+        return result
+
+    def _resolved_model(self, result=None) -> str:
+        model = getattr(result, "model", None) if result is not None else None
+        if model:
+            return str(model)
+        if self._model:
+            return str(self._model)
+        return str(getattr(self._llm, "model", "") or "")
+
+    async def _call_llm(self, messages, *, tools=None, on_delta=None):
+        extra = {"model": self._model} if self._model else {}
+        started = time.monotonic()
+        failed = False
+        result = None
+        model = self._resolved_model()
+        try:
+            result = await self._llm.complete(
+                messages,
+                tools=tools,
+                on_delta=on_delta,
+                **extra,
+            )
+            return result
+        except Exception:
+            failed = True
+            raise
+        finally:
+            duration = max(0.0, time.monotonic() - started)
+            if result is not None:
+                model = self._resolved_model(result)
+            if self._hooks.on_llm_request is not None:
+                self._hooks.on_llm_request(model, duration, failed)
+
+    def _note_usage(self, result, messages=None) -> None:
+        usage = getattr(result, "usage", None)
+        if usage is None:
+            return
+        if usage.prompt_tokens:
+            estimated = max(1, len(str(messages if messages is not None else "")) // 4)
+            self._estimate_ratio = usage.prompt_tokens / estimated
+            self._last_prompt_tokens = usage.prompt_tokens
+        self._usage += usage
+        hook = self._hooks.on_usage
+        if hook is None:
+            return
+        model = self._resolved_model(result)
+        try:
+            hook(usage, model)
+        except TypeError:
+            hook(usage)
+
+    async def _llm_complete(self, payload, *, tools=None, on_delta=None):
+        result = await self._call_llm(payload, tools=tools, on_delta=on_delta)
+        self._note_usage(result, payload)
         return result
 
     async def _maybe_compact(self, force: bool = False) -> None:
@@ -598,7 +645,7 @@ class AgentLoop:
         self._state("compacting")
 
         async def complete(payload):
-            return await self._llm.complete(payload)
+            return await self._llm_complete(payload)
 
         compacted, info = await compact(
             messages,
