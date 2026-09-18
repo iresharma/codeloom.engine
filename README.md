@@ -831,10 +831,11 @@ before writing your own client.
 
 ```bash
 python dummy_client.py [workspace]
+python dummy_client.py [workspace] --message "the task" --auto
 python dummy_client.py [workspace] --message "the task" --auto --timeout 1800
 ```
 
-`--message --auto` is the headless driver: it starts a session, submits one user message, auto-answers prompts (exec/confirm `yes`, worktree settle `keep`, MCP auth `no`, turn-cap `continue`), and exits when the orchestrator has been idle for a second with no live children. `--auto` without `--message` is an error.
+`--message --auto` is the headless driver: it starts a session, submits one user message, auto-answers prompts (exec/confirm `yes`, worktree settle `keep` unless `--settle pr|merge|discard`, MCP auth `no`, turn-cap `continue`), prints formatted events to stdout, and exits when the orchestrator has been idle for a second with no live children. `--timeout` is an optional wall-clock fuse (seconds); `0` or omitted waits until idle. `--auto` without `--message` is an error.
 
 The input bar uses the same grammar as the old REPL:
 
