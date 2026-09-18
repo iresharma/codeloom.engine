@@ -16,6 +16,9 @@ def test_defaults(monkeypatch, tmp_path):
     monkeypatch.delenv("ENGINE_JUDGE", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.delenv("TYPESAFE_JEV_API_KEY", raising=False)
+    monkeypatch.delenv("ENGINE_PUSHGATEWAY_URL", raising=False)
+    monkeypatch.delenv("ENGINE_METRICS_JOB", raising=False)
+    monkeypatch.delenv("ENGINE_METRICS_PUSH_INTERVAL_S", raising=False)
     config = EngineConfig.from_env(tmp_path)
     assert config.max_turns == 16
     assert config.turn_slice == 16
@@ -26,6 +29,9 @@ def test_defaults(monkeypatch, tmp_path):
     assert config.compact_trigger == 0.7
     assert config.keep_full_tools == 3
     assert config.subscriber_bytes == 1 << 20
+    assert config.pushgateway_url == ""
+    assert config.metrics_job == "engine"
+    assert config.metrics_push_interval_s == 2.0
     assert config.warnings == []
 
 
@@ -248,3 +254,26 @@ def test_enforcing_without_key_warns(monkeypatch, tmp_path):
     config = EngineConfig.from_env(tmp_path)
     assert config.judge_usable is False
     assert any("ENGINE_JUDGE=enforcing" in item for item in config.warnings)
+
+
+def test_pushgateway_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_PUSHGATEWAY_URL", "http://pushgateway:9091")
+    monkeypatch.setenv("ENGINE_METRICS_JOB", "engine-bench")
+    monkeypatch.setenv("ENGINE_METRICS_PUSH_INTERVAL_S", "0.5")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.pushgateway_url == "http://pushgateway:9091"
+    assert config.metrics_job == "engine-bench"
+    assert config.metrics_push_interval_s == 0.5
+
+
+def test_empty_metrics_job_falls_back(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_METRICS_JOB", "   ")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.metrics_job == "engine"
+
+
+def test_negative_push_interval_warns(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_METRICS_PUSH_INTERVAL_S", "-1")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.metrics_push_interval_s == 2.0
+    assert any("ENGINE_METRICS_PUSH_INTERVAL_S" in item for item in config.warnings)

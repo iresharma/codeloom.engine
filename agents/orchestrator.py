@@ -184,6 +184,7 @@ class Orchestrator(AgentLoop):
         kwargs.setdefault("tools", all_tools.subset(SKILLS + MEMORY))
         kwargs.setdefault("system_prompt", ORCH_SYSTEM)
         kwargs.setdefault("role", "orchestrator")
+        kwargs.setdefault("profile", "orchestrator")
         kwargs.setdefault("concurrent_tools", True)
         kwargs.setdefault("write_globs", [])
         super().__init__(llm, **kwargs)

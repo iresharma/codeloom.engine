@@ -49,6 +49,9 @@ class EngineConfig:
     max_spawns_per_turn: int = 8
     subscriber_capacity: int = 4096
     subscriber_bytes: int = 1 << 20
+    pushgateway_url: str = ""
+    metrics_job: str = "engine"
+    metrics_push_interval_s: float = 2.0
     warnings: list[str] = field(default_factory=list)
     typesafe_api_key: str = ""
     judge_mode: str = "advisory"
@@ -123,6 +126,22 @@ class EngineConfig:
         config.subscriber_bytes = _env_int(
             "ENGINE_SUBSCRIBER_BYTES", config.subscriber_bytes, warnings
         )
+        config.pushgateway_url = (
+            os.environ.get("ENGINE_PUSHGATEWAY_URL") or ""
+        ).strip()
+        job = (os.environ.get("ENGINE_METRICS_JOB") or config.metrics_job).strip()
+        config.metrics_job = job or "engine"
+        config.metrics_push_interval_s = _env_float(
+            "ENGINE_METRICS_PUSH_INTERVAL_S",
+            config.metrics_push_interval_s,
+            warnings,
+        )
+        if config.metrics_push_interval_s < 0:
+            warnings.append(
+                f"ENGINE_METRICS_PUSH_INTERVAL_S={config.metrics_push_interval_s!r} "
+                "is negative; using 2"
+            )
+            config.metrics_push_interval_s = 2.0
         config.typesafe_api_key = typesafe_api_key_from_env()
         raw_judge_mode = os.environ.get("ENGINE_JUDGE", config.judge_mode)
         judge_mode = (raw_judge_mode or "").strip().lower()

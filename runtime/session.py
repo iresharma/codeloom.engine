@@ -62,6 +62,7 @@ from protocol.snapshot import (
 )
 from runtime.commands import HANDLERS
 from runtime.config import EngineConfig
+from runtime.metrics import EngineMetrics
 from runtime.language import LanguageInfo
 from runtime.language import detect as detect_language
 from runtime.prompts import PromptBroker, PromptTimeout
@@ -118,6 +119,7 @@ class EngineSession:
         self._auth_tasks: list[asyncio.Task] = []
         self._registry = None
         self._judge = JudgeManager(self._config, on_failure=self._on_judge_failure)
+        self._metrics: EngineMetrics | None = None
         try:
             self._llm = OpenRouterLLM.from_env(self._workspace, config=self._config)
         except RuntimeError:
@@ -205,6 +207,7 @@ class EngineSession:
         self._state.ended = True
         self._persist()
         self._emit(SessionEnded(reason="shutdown"))
+        self.detach_metrics()
         self._state = SessionState()
         self._loop = None
         self._pending_user = []
@@ -280,6 +283,8 @@ class EngineSession:
             self._turn_task = None
             self._aborting = False
             self._emit_stats()
+            if self._metrics is not None:
+                self._metrics.flush()
             self._on_state("idle", 0)
             self._maybe_pump()
             self._flush_settles_if_idle()
@@ -444,10 +449,10 @@ class EngineSession:
         self._start_lsp()
         self._files = FileTracker()
         self._state.agents = []
-        orch_hooks = self._hooks_for("")
+        orch_hooks = self._hooks_for("", "orchestrator")
 
         def child_hooks(agent_id: str, profile: str) -> AgentHooks:
-            return self._hooks_for(agent_id)
+            return self._hooks_for(agent_id, profile)
 
         self._loop = Orchestrator(
             self._llm,
@@ -651,10 +656,12 @@ class EngineSession:
             return False
         return self._loop.unlock_skill(name)
 
-    def _hooks_for(self, agent_id: str) -> AgentHooks:
+    def _hooks_for(self, agent_id: str, profile: str = "") -> AgentHooks:
+        if not profile:
+            profile = "orchestrator" if not agent_id else "unknown"
         return AgentHooks(
             on_tool=lambda call_id, name, arguments, result: self._on_tool(
-                call_id, name, arguments, result, agent_id=agent_id
+                call_id, name, arguments, result, agent_id=agent_id, profile=profile
             ),
             on_tool_start=lambda call_id, name, arguments: self._on_tool_start(
                 call_id, name, arguments, agent_id=agent_id
@@ -674,11 +681,18 @@ class EngineSession:
                 if agent_id
                 else None
             ),
-            on_usage=self._on_usage,
+            on_usage=lambda usage, model="": self._on_usage(
+                usage, agent_id=agent_id, profile=profile, model=model
+            ),
+            on_llm_request=lambda model, duration_s, failed: self._on_llm_request(
+                model, duration_s, failed, profile=profile
+            ),
             on_state=lambda state, turn, max_turns: self._on_state(
                 state, turn, max_turns, agent_id=agent_id
             ),
-            on_compact=lambda info: self._on_compact(info, agent_id=agent_id),
+            on_compact=lambda info: self._on_compact(
+                info, agent_id=agent_id, profile=profile
+            ),
         )
 
     def _set_pending_prompt(self, prompt) -> None:
@@ -784,6 +798,8 @@ class EngineSession:
         if tool in tree_tools:
             self._emit_tree()
         self._emit_git()
+        if self._metrics is not None:
+            self._metrics.observe_edit(path)
 
     def _on_tool_start(
         self, call_id: str, name: str, arguments: dict, agent_id: str = ""
@@ -809,22 +825,31 @@ class EngineSession:
         arguments: dict,
         result: str,
         agent_id: str = "",
+        profile: str = "",
     ) -> None:
         preview = result if len(result) <= 400 else result[:400] + "…"
         started = self._tool_started.pop(call_id, 0)
         duration = int((time.monotonic() - started) * 1000) if started else 0
+        ok = not str(result).startswith("error:")
         self._emit(
             ToolCallFinished(
                 call_id=call_id,
                 name=name,
                 preview=preview,
-                ok=not str(result).startswith("error:"),
+                ok=ok,
                 duration_ms=duration,
                 agent_id=agent_id,
             )
         )
         self._state.stats.tool_calls += 1
         self._touch_agent(agent_id, current_tool="")
+        if self._metrics is not None:
+            self._metrics.observe_tool(
+                name,
+                profile or ("orchestrator" if not agent_id else "unknown"),
+                ok,
+                duration / 1000.0,
+            )
 
     def _on_message_start(self, message_id: str, agent_id: str = "") -> None:
         if not agent_id:
@@ -867,7 +892,13 @@ class EngineSession:
             )
         )
 
-    def _on_usage(self, usage: Usage) -> None:
+    def _on_usage(
+        self,
+        usage: Usage,
+        agent_id: str = "",
+        profile: str = "",
+        model: str = "",
+    ) -> None:
         stats = self._state.stats
         stats.prompt_tokens += usage.prompt_tokens
         stats.completion_tokens += usage.completion_tokens
@@ -880,7 +911,23 @@ class EngineSession:
         stats.last_turn_tokens += usage.total_tokens
         stats.last_turn_cost += usage.cost
         apply_cost_correction(self._workspace, self._state)
+        if self._metrics is not None:
+            self._metrics.observe_usage(
+                usage,
+                profile=profile or ("orchestrator" if not agent_id else "unknown"),
+                agent_id=agent_id,
+                model=model,
+            )
         self._emit_stats()
+
+    def _on_llm_request(
+        self, model: str, duration_s: float, failed: bool, profile: str = ""
+    ) -> None:
+        if self._metrics is None:
+            return
+        self._metrics.observe_llm_request(
+            model, profile or "orchestrator", duration_s, failed
+        )
 
     def _on_state(
         self,
@@ -899,7 +946,7 @@ class EngineSession:
         )
         self._touch_agent(agent_id, status=state)
 
-    def _on_compact(self, info: dict, agent_id: str = "") -> None:
+    def _on_compact(self, info: dict, agent_id: str = "", profile: str = "") -> None:
         self._emit(
             ContextCompacted(
                 strategy=str(info.get("strategy") or ""),
@@ -915,7 +962,12 @@ class EngineSession:
                 WarningOccurred(
                     message=f"context budget reduced to {self._config.context_budget}"
                 )
-                )
+            )
+        if self._metrics is not None:
+            self._metrics.observe_compact(
+                profile or ("orchestrator" if not agent_id else "unknown"),
+                str(info.get("strategy") or ""),
+            )
 
     def _make_child_lsp(self, workspace: Path):
         if workspace.resolve() == self._workspace:
@@ -972,6 +1024,8 @@ class EngineSession:
             )
         )
         self._emit_agents()
+        if self._metrics is not None:
+            self._metrics.observe_agent_started(profile, agent_id)
 
     def _on_agent_result(self, agent_id: str, profile: str, result_text: str) -> None:
         if self._state.ended or self._state.session_id is None:
@@ -1005,6 +1059,8 @@ class EngineSession:
                 ok=ok,
             )
         )
+        if self._metrics is not None:
+            self._metrics.observe_worktree(profile, action, ok)
         report = f"[worktree {profile} {agent_id[:8]} {action}]\n{detail}"
         self._add_message(role="engine", text=report)
         self._persist()
@@ -1050,6 +1106,9 @@ class EngineSession:
         )
         self._emit_agents()
         self._emit_stats()
+        if self._metrics is not None:
+            self._metrics.observe_agent_finished(profile, agent_id, status, usage)
+            self._metrics.set_live_agents(len(self._state.agents))
 
     def _touch_agent(
         self,
@@ -1075,6 +1134,9 @@ class EngineSession:
 
     def _emit_stats(self) -> None:
         apply_cost_correction(self._workspace, self._state)
+        if self._metrics is not None:
+            self._metrics.sync_run(self._state.stats)
+            self._metrics.request_push()
         self._emit(StatsUpdated(stats=self._state.stats))
 
     def _cancel_history_replay(self) -> None:
@@ -1294,8 +1356,35 @@ class EngineSession:
         )
 
     def _emit(self, event: Event) -> None:
+        if isinstance(event, ErrorOccurred) and self._metrics is not None:
+            message = event.message or ""
+            if not message.startswith("llm error:"):
+                self._metrics.observe_error("session")
         for queue in list(self._subscribers):
             queue.put(event)
+
+    def attach_metrics(self) -> None:
+        self.detach_metrics()
+        session_id = self._state.session_id or ""
+        if not session_id:
+            return
+        self._metrics = EngineMetrics.from_config(
+            self._config,
+            session_id=session_id,
+            workspace=self._workspace,
+            on_warning=lambda message: self._emit(WarningOccurred(message=message)),
+        )
+        self._metrics.hydrate(
+            self._state.stats, live_agents=len(self._state.agents)
+        )
+
+    def detach_metrics(self) -> None:
+        metrics = self._metrics
+        self._metrics = None
+        if metrics is None:
+            return
+        metrics.sync_run(self._state.stats)
+        metrics.close()
 
 
 def apply_cost_correction(workspace: Path, state: SessionState) -> None:
