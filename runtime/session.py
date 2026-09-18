@@ -84,6 +84,13 @@ from runtime.skills.discover import discover_skills
 from runtime.tools.tracker import FileTracker
 from tools.registry import discover_tools
 
+_INBOX_REPORT_PREFIXES = ("[agent ", "[worktree ")
+
+
+def _is_inbox_report(text: str) -> bool:
+    stripped = str(text).lstrip()
+    return stripped.startswith(_INBOX_REPORT_PREFIXES)
+
 
 class EngineSession:
     def __init__(self, workspace: Path, db_path: Path):
@@ -310,6 +317,10 @@ class EngineSession:
         locate query, or a clarified retry); returns None to fall through
         to `self._loop.run(text)` unchanged -- the always-safe default."""
         if self._loop is None:
+            return None
+        if _is_inbox_report(text):
+            # An internal "[agent ...]"/"[worktree ...]" handoff, not
+            # something a user typed -- user-intent routing doesn't apply.
             return None
         site_mode = self._config.judge_mode_for("intent")
         if site_mode == "off":

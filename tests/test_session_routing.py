@@ -132,3 +132,51 @@ def test_locate_resolution_seeds_context_and_skips_exploration(tmp_path):
         assert replies
 
     asyncio.run(run())
+
+
+def test_is_inbox_report_detects_agent_and_worktree_handoffs():
+    from runtime.session import _is_inbox_report
+
+    assert _is_inbox_report("[agent ask ed8e4551 finished]\nsome report text")
+    assert _is_inbox_report("  [worktree coder b03318d3 pr]\nopened pull request")
+    assert not _is_inbox_report("where is the retry logic?")
+    assert not _is_inbox_report("[urgent] please fix this bug")
+
+
+@needs_rg
+def test_inbox_report_never_gets_intent_routed_or_locate_resolved(tmp_path):
+    """Regression: an "[agent ... finished]" handoff that a real TypeSafe
+    call would classify as "locate" must never reach the resolver -- it
+    injects search/read_file tool-call history into the *orchestrator's*
+    own context, whose tool schema never included those tools, which
+    confuses the model into stalling the turn instead of spawning a coder."""
+
+    async def run():
+        (tmp_path / "retry.py").write_text("def retry_logic():\n    return backoff()\n")
+        session = await _bound(tmp_path, judge_mode="enforcing")
+        judge = FakeJudge()
+        judge.responses["intent_route"] = FakeVerdict(
+            choices={"intent": "locate"},
+            confidences={"intent": 0.9},
+            nouls={"answers_message": 0.9},
+        )
+        judge.responses["search_rerank"] = FakeVerdict(
+            probabilities={"best_match": {"1": 0.9}}, confidences={"best_match": 0.9}
+        )
+        session._judge = judge
+        session._config = EngineConfig(judge_mode="enforcing", max_turns=8)
+
+        queue = session.subscribe()
+        session.start_turn(
+            "[agent ask ed8e4551 finished]\nwhere is the retry logic?"
+        )
+        await _wait_idle(session)
+
+        assert judge.calls == []  # intent classification itself never ran
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        tool_starts = [e for e in events if isinstance(e, ToolCallStarted)]
+        assert not any(e.name == "search" for e in tool_starts)
+
+    asyncio.run(run())
