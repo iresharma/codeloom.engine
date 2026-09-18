@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from dataclasses import fields
@@ -161,6 +162,22 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         default=".",
         help="project root (default: current directory)",
+    )
+    parser.add_argument(
+        "--message",
+        default="",
+        help="submit one user message and exit (requires --auto)",
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="auto-answer prompts; required with --message",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=1800.0,
+        help="headless idle timeout in seconds (default 1800)",
     )
     return parser.parse_args()
 
@@ -497,11 +514,29 @@ def _format_file_edited(event: FileEdited) -> str:
 def main() -> None:
     args = parse_args()
     workspace = Path(args.workspace).expanduser().resolve()
+    if args.auto and not args.message:
+        print("--auto requires --message", file=sys.stderr)
+        sys.exit(2)
+    if args.message and not args.auto:
+        print("--message requires --auto", file=sys.stderr)
+        sys.exit(2)
     socket_path = workspace / ".engine" / "engine.sock"
     if not socket_path.exists():
         print(f"no server socket at {socket_path}", file=sys.stderr)
         print("start the engine first: python app.py", file=sys.stderr)
         sys.exit(1)
+
+    if args.message:
+        from headless_client import HeadlessError, run_once
+
+        try:
+            asyncio.run(
+                run_once(workspace, args.message, timeout=args.timeout)
+            )
+        except HeadlessError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        return
 
     from client_tui import DummyClientApp
 

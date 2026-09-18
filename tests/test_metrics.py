@@ -176,6 +176,32 @@ def test_enabled_url_flushes(tmp_path):
         assert kwargs["grouping_key"] == {"instance": "abc123"}
 
 
+def test_metrics_instance_overrides_session_id(tmp_path):
+    with patch("runtime.metrics.push_to_gateway") as push:
+        metrics = EngineMetrics(
+            url="http://pushgateway:9091",
+            job="engine",
+            session_id="abc123",
+            instance="baseline",
+            workspace=tmp_path,
+        )
+        metrics.flush()
+        assert push.call_args.kwargs["grouping_key"] == {"instance": "baseline"}
+
+
+def test_from_config_passes_metrics_instance(tmp_path):
+    config = EngineConfig(
+        pushgateway_url="http://pushgateway:9091",
+        metrics_instance="judge",
+    )
+    metrics = EngineMetrics.from_config(
+        config, session_id="s1", workspace=tmp_path
+    )
+    with patch("runtime.metrics.push_to_gateway") as push:
+        metrics.flush()
+        assert push.call_args.kwargs["grouping_key"] == {"instance": "judge"}
+
+
 def test_push_failure_warns(tmp_path):
     warnings: list[str] = []
     with patch("runtime.metrics.push_to_gateway", side_effect=OSError("down")):

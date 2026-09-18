@@ -51,6 +51,7 @@ class EngineConfig:
     subscriber_bytes: int = 1 << 20
     pushgateway_url: str = ""
     metrics_job: str = "engine"
+    metrics_instance: str = ""
     metrics_push_interval_s: float = 2.0
     warnings: list[str] = field(default_factory=list)
     typesafe_api_key: str = ""
@@ -131,6 +132,9 @@ class EngineConfig:
         ).strip()
         job = (os.environ.get("ENGINE_METRICS_JOB") or config.metrics_job).strip()
         config.metrics_job = job or "engine"
+        config.metrics_instance = (
+            os.environ.get("ENGINE_METRICS_INSTANCE") or ""
+        ).strip()
         config.metrics_push_interval_s = _env_float(
             "ENGINE_METRICS_PUSH_INTERVAL_S",
             config.metrics_push_interval_s,

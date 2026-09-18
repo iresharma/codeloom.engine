@@ -772,7 +772,8 @@ current disk hash does not match the hash stored with the note.
 | `ENGINE_EXEC_FILE_LIMIT_MB` | `2048` | `ulimit -f` cap (POSIX 512-byte blocks). |
 | `ENGINE_CONTEXT_BUDGET` | `120000` | Compaction trigger budget. |
 | `ENGINE_PUSHGATEWAY_URL` | (unset) | Prometheus Pushgateway base URL. Unset disables pushes; metrics still accumulate in-process. |
-| `ENGINE_METRICS_JOB` | `engine` | Pushgateway job name. Grouping key `instance` is the session id. |
+| `ENGINE_METRICS_JOB` | `engine` | Pushgateway job name. Grouping key `instance` is the session id unless overridden. |
+| `ENGINE_METRICS_INSTANCE` | (session id) | Pushgateway grouping key `instance`. Set to a stable name (e.g. `baseline`) when comparing runs. |
 | `ENGINE_METRICS_PUSH_INTERVAL_S` | `2` | Debounce between pushes; turn end, agent finish, and session close always flush. |
 | `TYPESAFE_API_KEY` | — | Enables the judge (see below). `TYPESAFE_JEV_API_KEY` is accepted as an alias. Placeholder values (`...`, `your-key`, `changeme`) are treated as unset, same as `OPENROUTER_API_KEY`. |
 | `ENGINE_JUDGE` | `advisory` | `off`, `advisory`, or `enforcing`. `advisory` emits `JudgementMade` and logs but never changes behaviour. |
@@ -949,7 +950,10 @@ before writing your own client.
 
 ```bash
 python dummy_client.py [workspace]
+python dummy_client.py [workspace] --message "the task" --auto --timeout 1800
 ```
+
+`--message --auto` is the headless driver: it starts a session, submits one user message, auto-answers prompts (exec/confirm `yes`, worktree settle `keep`, MCP auth `no`, turn-cap `continue`), and exits when the orchestrator has been idle for a second with no live children. `--auto` without `--message` is an error.
 
 The input bar uses the same grammar as the old REPL:
 

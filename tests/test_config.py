@@ -18,6 +18,7 @@ def test_defaults(monkeypatch, tmp_path):
     monkeypatch.delenv("TYPESAFE_JEV_API_KEY", raising=False)
     monkeypatch.delenv("ENGINE_PUSHGATEWAY_URL", raising=False)
     monkeypatch.delenv("ENGINE_METRICS_JOB", raising=False)
+    monkeypatch.delenv("ENGINE_METRICS_INSTANCE", raising=False)
     monkeypatch.delenv("ENGINE_METRICS_PUSH_INTERVAL_S", raising=False)
     config = EngineConfig.from_env(tmp_path)
     assert config.max_turns == 16
@@ -31,6 +32,7 @@ def test_defaults(monkeypatch, tmp_path):
     assert config.subscriber_bytes == 1 << 20
     assert config.pushgateway_url == ""
     assert config.metrics_job == "engine"
+    assert config.metrics_instance == ""
     assert config.metrics_push_interval_s == 2.0
     assert config.warnings == []
 
@@ -259,10 +261,12 @@ def test_enforcing_without_key_warns(monkeypatch, tmp_path):
 def test_pushgateway_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGINE_PUSHGATEWAY_URL", "http://pushgateway:9091")
     monkeypatch.setenv("ENGINE_METRICS_JOB", "engine-bench")
+    monkeypatch.setenv("ENGINE_METRICS_INSTANCE", "baseline")
     monkeypatch.setenv("ENGINE_METRICS_PUSH_INTERVAL_S", "0.5")
     config = EngineConfig.from_env(tmp_path)
     assert config.pushgateway_url == "http://pushgateway:9091"
     assert config.metrics_job == "engine-bench"
+    assert config.metrics_instance == "baseline"
     assert config.metrics_push_interval_s == 0.5
 
 
