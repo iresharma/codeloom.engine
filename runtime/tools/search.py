@@ -59,6 +59,7 @@ def search_candidates(
     command = [
         rg,
         "--line-number",
+        "--with-filename",
         "--no-heading",
         "--color=never",
         "--no-messages",

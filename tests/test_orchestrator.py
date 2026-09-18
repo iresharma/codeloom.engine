@@ -522,6 +522,64 @@ def test_coder_gets_worktree(tmp_path):
     asyncio.run(run())
 
 
+def test_coder_continue_from_reuses_worktree(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        hang = asyncio.Event()
+        session = await _bind(tmp_path, _HangChild(hang))()
+        orch: Orchestrator = session._loop
+        first = await orch.spawn("coder", "add a flag")
+        first_id = first.split("agent_id=")[1].split()[0]
+        first_worktree = orch._worktrees[first_id]
+        first_branch = orch._worktree_branches[first_id]
+
+        second = await orch.spawn(
+            "coder", "fix the review feedback", continue_from=first_id
+        )
+        assert second.startswith("started")
+        assert f"worktree={first_worktree}" in second
+        assert f"branch={first_branch}" in second
+        assert f"continuing {first_id[:8]}" in second
+
+        second_id = second.split("agent_id=")[1].split()[0]
+        assert orch._worktrees[second_id] == first_worktree
+        assert orch._worktree_branches[second_id] == first_branch
+        # ownership transferred, not duplicated -- only one agent_id should
+        # be responsible for settling this worktree
+        assert first_id not in orch._worktrees
+
+        hang.set()
+        await orch.wait_children()
+        await _wait_idle(session)
+        await orch.wait_settle()
+
+    asyncio.run(run())
+
+
+def test_coder_continue_from_unknown_agent_errors(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        session = await _bind(tmp_path, FakeProvider())()
+        orch: Orchestrator = session._loop
+        text = await orch.spawn("coder", "fix it", continue_from="doesnotexist")
+        assert text.startswith("error:")
+        assert "no open worktree" in text
+
+    asyncio.run(run())
+
+
+def test_continue_from_rejects_profile_without_own_worktree(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        session = await _bind(tmp_path, FakeProvider())()
+        orch: Orchestrator = session._loop
+        text = await orch.spawn("ask", "where?", continue_from="whatever")
+        assert text.startswith("error:")
+        assert "does not use its own worktree" in text
+
+    asyncio.run(run())
+
+
 def test_ask_skips_worktree(tmp_path):
     async def run():
         _init_git(tmp_path)

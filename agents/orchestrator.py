@@ -46,6 +46,8 @@ Dependent work is sequenced across turns, not inside one turn:
 
 Writers (coder, tester) run in a git worktree on a new branch under .engine/worktrees/. They will not collide with each other or with the user's checkout. Reviewer joins that worktree so it sees the writer's diff. The user is asked to merge, open a PR, keep, or discard after the writer and any reviewer on that tree have finished. A follow-up engine report says what they chose. Ask, researcher, and debugger use the main workspace.
 
+When a reviewer requests changes (or a writer's own report leaves something unfinished), the fix belongs in that SAME worktree, not a new one: a fresh coder spawn always branches off the original base commit and is sandboxed to its own new worktree, so it cannot see or reach the prior writer's diff no matter what the task text says. Pass `continue_from=<agent_id>` (the writer's agent_id, e.g. from describe_worktrees or its "started agent_id=..." reply) when spawning coder to have it continue in that exact worktree instead of starting fresh. Only ever have one live coder per worktree at a time.
+
 Never spawn coder or tester to merge, push, check out the user's branch, or open a pull request. Writers cannot leave their worktree and cannot check out a branch already in use. When the user wants those changes applied — including after a keep — call settle_worktree with merge, pr, or discard. Use action=status if you need the agent_id or branch.
 
 Check workspace memory before spawning ask:
@@ -452,7 +454,7 @@ class Orchestrator(AgentLoop):
             self._batch_name = ""
             self._inbox_turn = False
 
-    async def spawn(self, profile_name: str, task: str) -> str:
+    async def spawn(self, profile_name: str, task: str, continue_from: str = "") -> str:
         try:
             profile = self._profiles.get(profile_name)
         except KeyError:
@@ -488,7 +490,34 @@ class Orchestrator(AgentLoop):
         warning = ""
         child_workspace = self._ctx.workspace
         try:
-            if profile.needs_worktree:
+            if continue_from:
+                if not profile.needs_worktree:
+                    raise RuntimeError(
+                        f"continue_from is only for writers (coder, tester); "
+                        f"{profile.name} does not use its own worktree"
+                    )
+                dest = self._worktrees.get(continue_from)
+                if dest is None or not dest.is_dir():
+                    raise RuntimeError(
+                        f"no open worktree for agent_id={continue_from!r} "
+                        "(already settled, discarded, or never spawned) -- "
+                        "call describe_worktrees to see what's still open"
+                    )
+                worktree = str(dest)
+                branch = self._worktree_branches.get(continue_from, "")
+                child_workspace = dest
+                owner_batch = self._worktree_batches.get(continue_from, batch_id)
+                # Transfer ownership to the new agent_id rather than also
+                # remembering it under continue_from -- the agent being
+                # continued from is already finished, and leaving both
+                # agent_ids pointing at the same directory would settle
+                # (push/PR/merge) it twice.
+                self._forget_worktree(continue_from)
+                self._remember_worktree(
+                    agent_id, dest, branch, profile.name, owner_batch
+                )
+                warning = f" (continuing {continue_from[:8]}'s worktree)"
+            elif profile.needs_worktree:
                 path, branch, err = await asyncio.to_thread(
                     add_agent_worktree,
                     self._ctx.workspace,

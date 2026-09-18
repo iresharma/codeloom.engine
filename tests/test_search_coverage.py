@@ -266,6 +266,25 @@ class TestSearchIntegration:
         assert "a.py" in result or result == "(no matches)"
 
     @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+    def test_search_with_single_file_path_still_finds_match(self, tmp_path):
+        """A `path` that resolves to exactly one file must not drop matches.
+
+        ripgrep only prints a `path:` prefix on each match line when it
+        believes it might be searching multiple files -- with a single
+        explicit file target it silently omits the prefix unless
+        --with-filename is passed. _rewrite_path then misreads the line
+        number as the path, fails to resolve it under the workspace, and
+        drops the match -- turning a real hit into "(no matches)".
+        """
+        nested = tmp_path / "internal" / "tui"
+        nested.mkdir(parents=True)
+        (nested / "app.go").write_text('package tui\n\nconst modalDelete = "delete"\n')
+
+        result = search(tmp_path, "modalDelete", path="internal/tui/app.go", max_matches=50)
+        assert result != "(no matches)"
+        assert "internal/tui/app.go:3" in result
+
+    @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
     def test_search_skip_patterns_applied(self, tmp_path):
         """Cache and vendor directories are skipped."""
         cache = tmp_path / ".ruff_cache"
