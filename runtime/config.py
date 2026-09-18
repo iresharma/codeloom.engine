@@ -8,6 +8,7 @@ from llm.openrouter import load_env_sh
 
 EXEC_APPROVALS = ("auto", "always", "never")
 TURN_CONTINUES = ("prompt", "never")
+TYPESAFE_PLACEHOLDERS = {"", "...", "your-key", "changeme"}
 # 2.0 never fires in-loop; overflow still force-compacts. Must ship with
 # github_file windows or surveys hit the 120k fuse.
 CHILD_COMPACT_TRIGGER = 2.0
@@ -118,6 +119,20 @@ class EngineConfig:
         config.trace_calls = _env_bool("ENGINE_TRACE_CALLS", config.trace_calls, warnings)
         config.warnings = warnings
         return config
+
+
+def typesafe_api_key_from_env() -> str:
+    """TYPESAFE_API_KEY wins; TYPESAFE_JEV_API_KEY is the dashboard alias.
+
+    No judge system lives on this branch, but scripts/bench_ab.py (which
+    does) still needs to validate the treatment side's key before it clones
+    and runs a branch that does have one.
+    """
+    for name in ("TYPESAFE_API_KEY", "TYPESAFE_JEV_API_KEY"):
+        raw = os.environ.get(name, "").strip()
+        if raw and raw not in TYPESAFE_PLACEHOLDERS:
+            return raw
+    return ""
 
 
 def _env_int(name: str, default: int, warnings: list[str]) -> int:
