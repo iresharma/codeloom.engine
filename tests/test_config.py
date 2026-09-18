@@ -71,6 +71,18 @@ def test_invalid_approval_warns(monkeypatch, tmp_path):
     assert any("ENGINE_EXEC_APPROVAL" in item for item in config.warnings)
 
 
+def test_invalid_approval_still_gets_judged_default_when_usable(monkeypatch, tmp_path):
+    # A typo'd ENGINE_EXEC_APPROVAL is not a deliberate opt-out of the smart
+    # default -- it should behave like unset (still warn about the typo),
+    # not silently downgrade to legacy "auto" just because *something* was
+    # present in the environment.
+    monkeypatch.setenv("ENGINE_EXEC_APPROVAL", "nver")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.exec_approval == "judged"
+    assert any("ENGINE_EXEC_APPROVAL" in item for item in config.warnings)
+
+
 def test_from_env_twice_idempotent(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "real-key")
     (tmp_path / "env.sh").write_text("export OPENROUTER_API_KEY=from-file\n")

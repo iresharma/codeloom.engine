@@ -1,8 +1,26 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from protocol.codec import decode_command, decode_event, encode
 from protocol.commands import RequestSnapshot, StartSession, UndoLastEdit
 from protocol.events import FileEdited, SnapshotReady
+from protocol.message import ProtocolMessage
+
+
+@dataclass
+class _UnresolvableForwardRef(ProtocolMessage):
+    value: str
+    broken: ThisTypeDoesNotExistAnywhere  # noqa: F821
+
+
+def test_from_json_degrades_on_unresolvable_forward_reference():
+    # get_type_hints() raises NameError for "broken"'s annotation; from_json
+    # must not let that take down the whole decode (runtime/server.py's
+    # except clause around decode_command doesn't catch NameError).
+    result = _UnresolvableForwardRef.from_json({"value": "hello", "broken": "raw"})
+    assert result.value == "hello"
+    assert result.broken == "raw"
 
 
 def test_start_session_round_trip():

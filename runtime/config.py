@@ -154,6 +154,11 @@ class EngineConfig:
                 _env_judge_site(f"ENGINE_JUDGE_{site.upper()}", warnings),
             )
 
+        # An explicit-but-invalid value (a typo, a stale config) is not a
+        # deliberate opt-out of the judged default -- it's treated the same
+        # as unset, so it still gets the smart default when the judge is
+        # usable, after a warning about the typo. Only a *valid* explicit
+        # choice (auto/always/never/judged) counts as opting out.
         approval_set = "ENGINE_EXEC_APPROVAL" in os.environ
         raw_approval = os.environ.get("ENGINE_EXEC_APPROVAL", config.exec_approval)
         approval = (raw_approval or "").strip().lower()
@@ -163,7 +168,7 @@ class EngineConfig:
                 "auto|always|never|judged; using auto"
             )
             approval = "auto"
-            approval_set = True
+            approval_set = False
         if not approval_set and config.judge_usable and config.judge_mode_for("exec") != "off":
             approval = "judged"
         config.exec_approval = approval

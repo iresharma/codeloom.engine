@@ -17,7 +17,17 @@ class ProtocolMessage:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]):
-        hints = get_type_hints(cls)
+        try:
+            hints = get_type_hints(cls)
+        except (NameError, TypeError):
+            # An unresolvable forward reference must not take down the
+            # whole read loop for every message of this type -- runtime/
+            # server.py's except clause around decode_command doesn't catch
+            # NameError. Falling back to an empty dict just means every
+            # field decodes via its raw JSON value (see _decode's `Any`
+            # default), same as today's behaviour for any field missing
+            # from hints.
+            hints = {}
         kwargs: dict[str, Any] = {}
         for item in fields(cls):
             if item.name not in data:
