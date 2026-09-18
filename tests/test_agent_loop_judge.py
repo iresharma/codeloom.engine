@@ -64,6 +64,7 @@ def _loop(
     judge_mode_screen="",
     judge_mode_loop="",
     max_turns=16,
+    loop_control_interval=1,
 ):
     config = EngineConfig(
         judge_mode=judge_mode,
@@ -71,6 +72,11 @@ def _loop(
         judge_mode_screen=judge_mode_screen,
         judge_mode_loop=judge_mode_loop,
         max_turns=max_turns,
+        # These tests exercise _maybe_judge_loop_progress's decision logic
+        # in isolation at an arbitrary turn number; default to checking
+        # every turn so the throttle (tested separately) doesn't also gate
+        # them.
+        loop_control_interval=loop_control_interval,
     )
     judgements: list[dict] = []
     loop = AgentLoop(
@@ -340,6 +346,36 @@ def test_loop_progress_extends_turns_near_ceiling_and_caps_total(tmp_path):
     assert loop._loop_extended_by == 8  # unchanged: already at the cap
 
 
+def test_loop_progress_throttled_between_intervals(tmp_path):
+    judge = FakeJudge()
+    judge.responses["loop_control"] = FakeVerdict(
+        nouls={"repeating_itself": 0.9, "making_progress": 0.05}
+    )
+    # max_turns=16 -> near_ceiling only at turn >= 14, so the interval is
+    # what's under test at every other turn.
+    loop = _loop(tmp_path, judge=judge, max_turns=16, loop_control_interval=3)
+
+    stop = asyncio.run(loop._maybe_judge_loop_progress(1, "fix the bug"))
+    assert stop is False
+    assert judge.calls == []  # 1 % 3 != 0, not near ceiling -> skipped
+
+    stop = asyncio.run(loop._maybe_judge_loop_progress(3, "fix the bug"))
+    assert stop is True  # 3 % 3 == 0 -> checked, and the fake verdict says stop
+    assert len(judge.calls) == 1
+
+
+def test_loop_progress_always_checked_near_ceiling_regardless_of_interval(tmp_path):
+    judge = FakeJudge()
+    judge.responses["loop_control"] = FakeVerdict(
+        nouls={"making_progress": 0.9, "appears_complete": 0.1}
+    )
+    loop = _loop(tmp_path, judge=judge, max_turns=16, loop_control_interval=5)
+
+    # turn=15 is not a multiple of 5, but it is within 2 of max_turns (16).
+    asyncio.run(loop._maybe_judge_loop_progress(15, "long task"))
+    assert len(judge.calls) == 1
+
+
 def test_run_stops_early_via_loop_control_end_to_end(tmp_path):
     """Drives the real run() loop (not just the isolated method) to prove
     the wiring: an infinite ping-tool loop that would otherwise burn to
@@ -349,7 +385,7 @@ def test_run_stops_early_via_loop_control_end_to_end(tmp_path):
         nouls={"repeating_itself": 0.9, "making_progress": 0.05}
     )
     judgements: list[dict] = []
-    config = EngineConfig(judge_mode="enforcing", max_turns=16)
+    config = EngineConfig(judge_mode="enforcing", max_turns=16, loop_control_interval=1)
     loop = AgentLoop(
         llm=_AlwaysPing(),
         tools=_ping_registry(),

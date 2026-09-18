@@ -60,6 +60,7 @@ class EngineConfig:
     judge_model: str = "jev-latest"
     judge_timeout_ms: int = 800
     judge_cache_size: int = 512
+    loop_control_interval: int = 3
     judge_mode_exec: str = ""
     judge_mode_tools: str = ""
     judge_mode_search: str = ""
@@ -170,6 +171,9 @@ class EngineConfig:
         )
         config.judge_cache_size = _env_int(
             "ENGINE_JUDGE_CACHE_SIZE", config.judge_cache_size, warnings
+        )
+        config.loop_control_interval = _env_int(
+            "ENGINE_JUDGE_LOOP_INTERVAL", config.loop_control_interval, warnings
         )
         for site in JUDGE_SITES:
             setattr(

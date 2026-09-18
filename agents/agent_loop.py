@@ -659,12 +659,23 @@ class AgentLoop:
         loop should stop early. A repeats_prior_call signal from Phase 2's
         tool-call verification would feed in here rather than triggering
         its own action -- not yet wired since nothing currently aggregates
-        that per-turn."""
+        that per-turn.
+
+        Only actually asks the judge every LOOP_CONTROL_INTERVAL turns (plus
+        always on the turns near the budget ceiling, where the extend
+        decision lives) -- calling it every single turn cost a real TypeSafe
+        round-trip per turn for a >95% "keep going, nothing to report" rate
+        in practice. A stuck loop rarely resolves in the turn or two of
+        extra latency this trades away."""
         judge = self._ctx.judge
         if judge is None or not getattr(judge, "enabled", False):
             return False
         site_mode = self._config.judge_mode_for("loop")
         if site_mode == "off":
+            return False
+        near_ceiling = turn >= self._config.max_turns - 2
+        interval = max(1, self._config.loop_control_interval)
+        if not near_ceiling and turn % interval != 0:
             return False
         recent = self._recent_turns_summary()
         state = {"goal": goal, "recent_turns": recent}
@@ -673,7 +684,6 @@ class AgentLoop:
             return False
         enforced = site_mode == "enforcing"
         action = classify_loop(verdict)
-        near_ceiling = turn >= self._config.max_turns - 2
         extend = near_ceiling and should_extend_turns(verdict)
         if action != "continue" or extend:
             outcome = action if action != "continue" else "extend"
