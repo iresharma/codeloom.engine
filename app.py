@@ -7,6 +7,7 @@ import signal
 import sys
 from pathlib import Path
 
+from runtime.http_server import HttpServer
 from runtime.server import EngineServer
 from runtime.session import EngineSession
 
@@ -19,7 +20,20 @@ def parse_args() -> argparse.Namespace:
         default=".",
         help="project root (default: current directory)",
     )
+    parser.add_argument(
+        "--http",
+        metavar="[HOST:]PORT",
+        default=None,
+        help="also serve HTTP on HOST:PORT, host defaults to 127.0.0.1 (default: disabled)",
+    )
     return parser.parse_args()
+
+
+def _parse_http_addr(value: str) -> tuple[str, int]:
+    if ":" in value:
+        host, _, port = value.rpartition(":")
+        return host, int(port)
+    return "127.0.0.1", int(value)
 
 
 async def main() -> None:
@@ -40,18 +54,30 @@ async def main() -> None:
     session = EngineSession(workspace, db_path=engine_dir / "session.db")
     await session.start()
     server = EngineServer(session, socket_path=engine_dir / "engine.sock")
+
+    http_server: HttpServer | None = None
+    http_host: str | None = None
+    http_port: int | None = None
+    if args.http is not None:
+        http_host, http_port = _parse_http_addr(args.http)
+        http_server = HttpServer(session, host=http_host, port=http_port)
+
     loop = asyncio.get_running_loop()
     force = False
 
     async def _graceful() -> None:
         await session.aclose()
         server.stop()
+        if http_server is not None:
+            http_server.stop()
 
     def _stop() -> None:
         nonlocal force
         if force:
             session.close_session()
             server.stop()
+            if http_server is not None:
+                http_server.stop()
             return
         force = True
         loop.create_task(_graceful())
@@ -60,7 +86,11 @@ async def main() -> None:
         loop.add_signal_handler(sig, _stop)
 
     print(f"listening on {engine_dir / 'engine.sock'}", flush=True)
-    await server.serve()
+    if http_server is not None:
+        print(f"http listening on {http_host}:{http_port}", flush=True)
+        await asyncio.gather(server.serve(), http_server.serve())
+    else:
+        await server.serve()
 
 
 if __name__ == "__main__":
