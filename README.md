@@ -872,6 +872,27 @@ Writing your own client is three steps: open a Unix socket connection to
 `json.dumps(command) + "\n"`, and read newline-delimited events in a loop. The
 `protocol/` package is importable standalone if your client is also Python.
 
+### Optional HTTP transport
+
+Pass `--http` to `app.py` to also start a stdlib-only HTTP transport
+(`runtime/http_server.py`, `asyncio.start_server`, no new dependency)
+alongside the Unix socket. `--http-host` (default `127.0.0.1`) and
+`--http-port` (default `8765`) control where it binds. It reuses the same
+`EngineSession` and `protocol/codec.py` (de)serialization as the socket
+transport, so it is not a separate protocol:
+
+- `POST /command` — body is one JSON command object, identical in shape to
+  the Unix-socket protocol (e.g. `{"type": "SubmitUserMessage", "text": "hi"}`).
+  Malformed/unknown commands get `400` with a JSON error body. Otherwise the
+  command is handled and any events emitted synchronously during that handling
+  are returned as `200 OK` with `{"events": [...]}`.
+- `GET /events` — Server-Sent Events stream (`Content-Type: text/event-stream`)
+  of every event emitted afterward, one `data: <json>\n\n` per event, until the
+  client disconnects.
+
+Any other method/path returns `404`. `--http` is off by default, so existing
+Unix-socket-only invocations are unaffected.
+
 ---
 
 ## Testing
