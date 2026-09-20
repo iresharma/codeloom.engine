@@ -7,6 +7,7 @@ import signal
 import sys
 from pathlib import Path
 
+from runtime.http_server import HttpServer
 from runtime.server import EngineServer
 from runtime.session import EngineSession
 
@@ -19,7 +20,26 @@ def parse_args() -> argparse.Namespace:
         default=".",
         help="project root (default: current directory)",
     )
+    parser.add_argument(
+        "--http",
+        metavar="[HOST:]PORT",
+        default=None,
+        help=(
+            "also serve an HTTP interface at HOST:PORT (default host 127.0.0.1) "
+            "with POST /command and GET /events (SSE)"
+        ),
+    )
     return parser.parse_args()
+
+
+def _parse_http_addr(value: str) -> tuple[str, int]:
+    host, _, port = value.rpartition(":")
+    if not host:
+        host = "127.0.0.1"
+    try:
+        return host, int(port)
+    except ValueError as exc:
+        raise ValueError(f"invalid --http address: {value!r}") from exc
 
 
 async def main() -> None:
@@ -40,18 +60,29 @@ async def main() -> None:
     session = EngineSession(workspace, db_path=engine_dir / "session.db")
     await session.start()
     server = EngineServer(session, socket_path=engine_dir / "engine.sock")
+
+    http_server: HttpServer | None = None
+    if args.http:
+        http_host, http_port = _parse_http_addr(args.http)
+        http_server = HttpServer(session, http_host, http_port)
+        print(f"http interface: http://{http_host}:{http_port}", flush=True)
+
     loop = asyncio.get_running_loop()
     force = False
 
     async def _graceful() -> None:
         await session.aclose()
         server.stop()
+        if http_server is not None:
+            http_server.stop()
 
     def _stop() -> None:
         nonlocal force
         if force:
             session.close_session()
             server.stop()
+            if http_server is not None:
+                http_server.stop()
             return
         force = True
         loop.create_task(_graceful())
@@ -60,7 +91,10 @@ async def main() -> None:
         loop.add_signal_handler(sig, _stop)
 
     print(f"listening on {engine_dir / 'engine.sock'}", flush=True)
-    await server.serve()
+    if http_server is not None:
+        await asyncio.gather(server.serve(), http_server.serve())
+    else:
+        await server.serve()
 
 
 if __name__ == "__main__":
