@@ -13,6 +13,7 @@ from protocol.commands import (
     COMMANDS,
     RequestOrchContext,
     RequestSnapshot,
+    SetPlanMode,
     StartSession,
     SubmitUserMessage,
     UndoLastEdit,
@@ -210,6 +211,12 @@ def command_from_line(line: str, workspace: Path):
         return RequestOrchContext()
     if name in ("abort", "abortagent"):
         return AbortAgent(agent_id=rest or None)
+    if name == "plan":
+        arg = rest.strip().lower()
+        if arg not in ("on", "off"):
+            _note("usage: /plan on|off")
+            return None
+        return SetPlanMode(enabled=arg == "on")
     if name in ("answer", "answerprompt"):
         if not _LAST_PROMPT_ID:
             _note("no prompt is outstanding")

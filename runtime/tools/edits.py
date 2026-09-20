@@ -32,7 +32,7 @@ from runtime.tools.fileid import (
 from runtime.tools.fs import WorkspacePathError, relative_posix, resolve_in_workspace
 from runtime.tools.sitter import syntax_gate
 from runtime.tools.writeglob import write_allowed
-from tools.base import ToolContext
+from tools.base import PLAN_MODE_ERROR, ToolContext, plan_mode_active
 
 DIFF_RESULT_MAX = 4000
 HUNK_FUZZ = 5
@@ -652,6 +652,8 @@ def _lsp_after(ctx: ToolContext, result: ApplyResult, before: list) -> str:
 
 
 def _profile_write_error(ctx: ToolContext, path: str) -> str | None:
+    if plan_mode_active(ctx):
+        return PLAN_MODE_ERROR
     globs = getattr(ctx, "write_globs", None)
     if globs is None:
         return None
@@ -864,6 +866,8 @@ def _rmdir_if_empty(path: Path) -> None:
 
 def undo_last_sync(ctx: ToolContext) -> ApplyResult:
     """Await-free undo of the most recent journal batch."""
+    if plan_mode_active(ctx):
+        return ApplyResult(ok=False, message=PLAN_MODE_ERROR)
     if ctx.journal is None:
         return ApplyResult(ok=False, message="error: edit journal is not available")
     db = Path(ctx.journal)

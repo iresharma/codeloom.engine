@@ -28,10 +28,27 @@ class ToolContext:
     profile: str = ""
     write_globs: list[str] | None = None
     write_lock: Any = None
+    plan_mode: Any = False
     skills: Any = None
     activate_skill: Any = None
     unlocked_skills: Any = None
     on_memory: Any = None
+
+
+def plan_mode_active(ctx: "ToolContext") -> bool:
+    """True if ctx.plan_mode says plan mode is on. plan_mode may be a bool
+    or a zero-arg callable (EngineSession threads a live `lambda: self.plan_mode`
+    through so a mid-session SetPlanMode toggle is seen without rebuilding ctx).
+    """
+    value = getattr(ctx, "plan_mode", False)
+    return bool(value()) if callable(value) else bool(value)
+
+
+PLAN_MODE_ERROR = (
+    "error: plan mode is active: edits and command execution are disabled. "
+    "Present your findings as a plan and ask the user to approve exiting "
+    "plan mode before making changes."
+)
 
 
 @dataclass

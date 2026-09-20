@@ -119,6 +119,7 @@ class AgentLoop:
         model: str | None = None,
         freeze_system: bool = False,
         on_memory=None,
+        plan_mode: Callable[[], bool] | bool | None = None,
     ):
         self._llm = llm
         self._tools = tools or ToolRegistry()
@@ -158,6 +159,7 @@ class AgentLoop:
             write_globs=write_globs,
             write_lock=write_lock,
             on_memory=on_memory,
+            plan_mode=plan_mode,
         )
         self._system_prompt = system_prompt
         self._on_tool = self._hooks.on_tool

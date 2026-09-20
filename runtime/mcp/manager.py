@@ -13,7 +13,7 @@ from runtime.mcp.bridge import (
     scheme_allowed,
 )
 from runtime.mcp.config import DEFAULT_MCP_PROFILES, McpServerConfig
-from tools.base import Tool, ToolContext
+from tools.base import PLAN_MODE_ERROR, Tool, ToolContext, plan_mode_active
 
 AUTH_MARKERS = (
     "unauthorized",
@@ -431,6 +431,8 @@ class McpManager:
         return flatten_mcp_result(result)
 
     async def _approve(self, ctx: ToolContext | None, server: str, remote_name: str) -> str:
+        if ctx is not None and plan_mode_active(ctx):
+            return PLAN_MODE_ERROR
         approval = self.approval
         if ctx is not None and ctx.config is not None:
             approval = getattr(ctx.config, "exec_approval", approval) or approval

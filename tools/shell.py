@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from tools.base import ToolContext, tool
+from tools.base import PLAN_MODE_ERROR, ToolContext, plan_mode_active, tool
 from runtime.tools.shell import (
     DEFAULT_TIMEOUT,
+    READ_ONLY_PREFIXES,
     format_command_result,
     run_command as run_command_impl,
 )
@@ -39,6 +40,14 @@ async def run_command(
     cwd: str = "",
     timeout: int = DEFAULT_TIMEOUT,
 ) -> str:
+    if plan_mode_active(ctx):
+        stripped = (command or "").strip()
+        is_read_only = any(
+            stripped == prefix or stripped.startswith(prefix + " ")
+            for prefix in READ_ONLY_PREFIXES
+        )
+        if not is_read_only:
+            return PLAN_MODE_ERROR
     config = ctx.config
     approval = getattr(config, "exec_approval", "auto") if config else "auto"
     file_limit = getattr(config, "exec_file_limit_mb", 2048) if config else 2048

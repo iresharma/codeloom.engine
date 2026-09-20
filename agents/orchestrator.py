@@ -50,6 +50,8 @@ When a reviewer requests changes (or a writer's own report leaves something unfi
 
 Never spawn coder or tester to merge, push, check out the user's branch, or open a pull request. Writers cannot leave their worktree and cannot check out a branch already in use. When the user wants those changes applied — including after a keep — call settle_worktree with merge, pr, or discard. Use action=status if you need the agent_id or branch.
 
+Plan mode: when plan mode is active, spawning coder or tester is refused, and settle_worktree is refused (except action=status/list). Investigate using only the read-only personalities — ask, researcher, debugger, reviewer — never coder or tester. Once you understand the work, present the user a written plan (files, changes, risks) instead of spawning a writer. Do not spawn coder or tester, and do not call settle_worktree to merge/pr/discard, while plan mode is on — those calls will just error. To proceed, ask the user to approve exiting plan mode using PromptBroker.ask(..., kind="confirm"); only after the user approves, dispatch SetPlanMode(enabled=False) to turn plan mode off, then spawn coder/tester or call settle_worktree normally. If the user does not approve, keep investigating read-only and do not spawn a writer.
+
 Check workspace memory before spawning ask:
 - Fresh file notes or decision bullets that answer the question: reply from them. Quote the note. Do not spawn.
 - STALE file notes, a missing path, or a question the notes do not cover: spawn ask. Put the stale or missing paths in the task. Do not quote a STALE note as fact.
@@ -143,11 +145,13 @@ class Orchestrator(AgentLoop):
         child_on_edit: Callable | None = None,
         child_on_proc: Callable | None = None,
         write_lock=None,
+        plan_mode: Callable[[], bool] | None = None,
         **kwargs,
     ):
         self._all_tools = all_tools
         self._profiles = profiles
         self._spawn_budget = spawn_budget
+        self._plan_mode = plan_mode
         self._child_tasks: dict[str, asyncio.Task] = {}
         self._settle_tasks: dict[str, asyncio.Task] = {}
         self._children: dict[str, Subagent] = {}
@@ -337,6 +341,12 @@ class Orchestrator(AgentLoop):
     ) -> str:
         if action.strip().lower() in {"status", "list", ""}:
             return self.describe_worktrees()
+        if self._in_plan_mode():
+            return (
+                "error: plan mode is active: edits and command execution are "
+                "disabled. Present your findings as a plan and ask the user to "
+                "approve exiting plan mode before making changes."
+            )
         chosen = self._pick_worktree(agent_id=agent_id, branch=branch)
         if chosen is None:
             extra = self.describe_worktrees()
@@ -452,11 +462,21 @@ class Orchestrator(AgentLoop):
             self._batch_name = ""
             self._inbox_turn = False
 
+    def _in_plan_mode(self) -> bool:
+        return bool(self._plan_mode()) if self._plan_mode is not None else False
+
     async def spawn(self, profile_name: str, task: str, continue_from: str = "") -> str:
         try:
             profile = self._profiles.get(profile_name)
         except KeyError:
             return f"error: unknown profile {profile_name}"
+        if self._in_plan_mode() and profile_name not in _PLAN_MODE_ALLOWED:
+            return (
+                "error: plan mode is active: coder and tester cannot be spawned. "
+                "Finish investigating with ask/researcher/debugger, present a "
+                "plan, and ask the user to approve exiting plan mode "
+                "(SetPlanMode) before spawning a writer."
+            )
         if self._spawn_lock is None:
             self._spawn_lock = asyncio.Lock()
         async with self._spawn_lock:
@@ -800,10 +820,14 @@ class Orchestrator(AgentLoop):
             on_skill_activated=self._on_skill_activated,
             model=child_model,
             on_memory=self._ctx.on_memory,
+            plan_mode=self._plan_mode,
         )
 
 
 _SURVEY_ONCE = frozenset({"ask", "researcher"})
+
+# Only read-only personalities may be spawned while plan mode is active.
+_PLAN_MODE_ALLOWED = frozenset({"ask", "researcher", "debugger", "reviewer"})
 
 
 def batch_nickname(task: str, *, limit: int = 48) -> str:

@@ -28,6 +28,7 @@ from protocol.events import (
     ChatMessageDelta,
     ChatMessageStarted,
     CommandOutputChunk,
+    PlanModeChanged,
     SnapshotReady,
     StatsUpdated,
     ToolCallFinished,

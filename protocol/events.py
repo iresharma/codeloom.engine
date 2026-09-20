@@ -286,6 +286,12 @@ class McpAuthRequired(ProtocolMessage):
 
 @event
 @dataclass
+class PlanModeChanged(ProtocolMessage):
+    enabled: bool
+
+
+@event
+@dataclass
 class PathChanged(ProtocolMessage):
     path: str
     action: str

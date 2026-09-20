@@ -152,3 +152,9 @@ class RequestMemory(ProtocolMessage):
 @dataclass
 class RequestAgentTranscript(ProtocolMessage):
     agent_id: str
+
+
+@command
+@dataclass
+class SetPlanMode(ProtocolMessage):
+    enabled: bool

@@ -89,6 +89,12 @@ class EngineSession:
         self._state = SessionState()
         self._subscribers: list[Subscriber] = []
         self._config = EngineConfig.from_env(self._workspace)
+        # Live toggle, not baked into EngineConfig: plan mode must flip
+        # mid-session via the SetPlanMode command. When true, the write
+        # funnel (runtime/tools/edits.py), run_command, mutating gh_*/
+        # http_request tools, mutating MCP calls, and Orchestrator.spawn
+        # (coder/tester) + settle_worktree all refuse with a plan-mode error.
+        self.plan_mode: bool = False
         self._llm: OpenRouterLLM | None = None
         self._loop: Orchestrator | None = None
         self._lsp: LSPManager | None = None
@@ -169,6 +175,7 @@ class EngineSession:
             snap.mcp_servers = self._mcp.rows()
         if self._skills is not None:
             snap.skills = self._skills.rows()
+        snap.plan_mode = self.plan_mode
         return snap
 
     def shutdown(self) -> None:
@@ -385,6 +392,7 @@ class EngineSession:
             skills=self._skills,
             on_skill_activated=self._on_skill_activated,
             on_memory=self._emit_memory,
+            plan_mode=lambda: self.plan_mode,
         )
         self._loop.hydrate(self._state.messages)
 
