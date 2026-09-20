@@ -72,6 +72,8 @@ At most one ask and one researcher per user message. leftover_questions: put the
 
 If a child returns status=incomplete, respawn once with a tighter task or tell the user. If a child returns status=max_turns, spawn one writer (coder or tester) with the leftover / paths / files_touched from the report — do not rediscover the repo. Do not respawn ask or researcher on max_turns; tell the user the leftover. If a child returns status=stopped, tell the user; do not respawn. If spawn returns "spawn budget exhausted", too many children are already live — stop spawning and report what is running.
 
+Plan mode: when the user asks for a careful/planned approach, or you judge a change risky or large, call enter_plan_mode first. While in plan mode you may only spawn read-only agents (ask, researcher, debugger, reviewer) — spawning coder or tester is refused until the plan is approved. Explore with those read-only agents, then call present_plan(plan) with a concrete plan (files, changes, order of operations) so the user can approve or reject it. If approved, plan mode turns off and you may spawn coder/tester. If rejected, the user's feedback comes back as the tool result — revise the plan and call present_plan again.
+
 Do not call write tools or run_command. You do not have them.
 """
 
@@ -181,6 +183,7 @@ class Orchestrator(AgentLoop):
         self._skills = kwargs.get("skills")
         self._on_skill_activated = kwargs.get("on_skill_activated")
         self._finished_transcripts: dict[str, dict] = {}
+        self.plan_mode: bool = False
 
         kwargs.setdefault("tools", all_tools.subset(SKILLS + MEMORY))
         kwargs.setdefault("system_prompt", ORCH_SYSTEM)
@@ -192,6 +195,8 @@ class Orchestrator(AgentLoop):
         for spec in profiles.as_tools(self.spawn):
             self._tools.register(spec)
         self._tools.register(_settle_worktree_tool(self))
+        self._tools.register(_enter_plan_mode_tool(self))
+        self._tools.register(_present_plan_tool(self))
         self._recover_worktrees()
 
     def _store_transcript(self, agent_id: str, child) -> None:
@@ -457,6 +462,11 @@ class Orchestrator(AgentLoop):
             profile = self._profiles.get(profile_name)
         except KeyError:
             return f"error: unknown profile {profile_name}"
+        if self.plan_mode and profile.needs_worktree:
+            return (
+                f"error: plan mode is active; call present_plan and get user "
+                f"approval before spawning {profile_name}"
+            )
         if self._spawn_lock is None:
             self._spawn_lock = asyncio.Lock()
         async with self._spawn_lock:
@@ -861,6 +871,69 @@ def _settle_worktree_tool(orch: Orchestrator) -> Tool:
                 },
             },
             "required": ["action"],
+        },
+        fn=execute,
+    )
+
+
+def _enter_plan_mode_tool(orch: Orchestrator) -> Tool:
+    async def execute(ctx: ToolContext) -> str:  # noqa: ARG001
+        orch.plan_mode = True
+        return (
+            "plan mode is now on. Explore with read-only agents only "
+            "(ask, researcher, debugger, reviewer) -- do not spawn coder or "
+            "tester while in this mode. When you have a concrete plan, call "
+            "present_plan with it so the user can approve or reject it."
+        )
+
+    return Tool(
+        name="enter_plan_mode",
+        description=(
+            "Switch into read-only plan mode: explore with ask/researcher/"
+            "debugger/reviewer, then call present_plan for user approval "
+            "before any coder/tester spawn is allowed."
+        ),
+        parameters={"type": "object", "properties": {}},
+        fn=execute,
+    )
+
+
+def _present_plan_tool(orch: Orchestrator) -> Tool:
+    async def execute(ctx: ToolContext, plan: str) -> str:  # noqa: ARG001
+        if not orch.plan_mode:
+            return "error: not in plan mode; call enter_plan_mode first"
+        question = (
+            "Proposed plan:\n\n"
+            f"{plan}\n\n"
+            "Approve this plan? Approving allows coder/tester spawns."
+        )
+        answer = "no"
+        if orch._child_ask_user is not None:
+            answer = await orch._child_ask_user(question, kind="confirm")
+        if str(answer).strip().lower() in {"yes", "y"}:
+            orch.plan_mode = False
+            return "plan approved; plan mode is now off. coder/tester spawns are allowed."
+        return (
+            "plan rejected; still in plan mode. User feedback: "
+            f"{answer}. Revise the plan and call present_plan again."
+        )
+
+    return Tool(
+        name="present_plan",
+        description=(
+            "Present a proposed plan to the user for approval while in plan "
+            "mode. Must be called before spawning coder/tester. If rejected, "
+            "revise and call again."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "string",
+                    "description": "The proposed plan text, shown to the user verbatim.",
+                },
+            },
+            "required": ["plan"],
         },
         fn=execute,
     )
