@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from agents.hooks import AgentHooks
@@ -36,6 +37,7 @@ from protocol.events import (
     FileEdited,
     FileTreeUpdated,
     GitStateUpdated,
+    JudgementMade,
     McpAuthRequired,
     MemoryUpdated,
     McpServersUpdated,
@@ -64,7 +66,7 @@ from runtime.config import EngineConfig
 from runtime.metrics import EngineMetrics
 from runtime.language import LanguageInfo
 from runtime.language import detect as detect_language
-from runtime.prompts import PromptBroker
+from runtime.prompts import PromptBroker, PromptTimeout
 from runtime.store import SessionState
 from runtime.store.sqlite import init as init_store
 from runtime.store.sqlite import save as save_snapshot
@@ -72,14 +74,22 @@ from runtime.subscriber import EVENT_SOFT_LIMIT, Subscriber, clip_text
 from runtime.tools.fs import WorkspacePathError, list_tree, read_text
 from runtime.tools.git import read_state as read_git
 from runtime.tools.lsp import LSPManager, LSPTimeoutError
+from runtime.judge import JudgeManager
+from runtime.trace import TraceWriter
 from runtime.mcp.config import load_mcp_config, load_trust, save_trust
 from runtime.mcp.manager import McpManager
 from runtime.mcp.tokens import apply_tokens, load_tokens, save_token
 from runtime.skills.catalog import SkillCatalog
 from runtime.skills.discover import discover_skills
 from runtime.tools.tracker import FileTracker
-from runtime.trace import TraceWriter
 from tools.registry import discover_tools
+
+_INBOX_REPORT_PREFIXES = ("[agent ", "[worktree ")
+
+
+def _is_inbox_report(text: str) -> bool:
+    stripped = str(text).lstrip()
+    return stripped.startswith(_INBOX_REPORT_PREFIXES)
 
 
 class EngineSession:
@@ -117,6 +127,11 @@ class EngineSession:
         self._mcp_cool_s = 30.0
         self._auth_tasks: list[asyncio.Task] = []
         self._registry = None
+        self._judge = JudgeManager(
+            self._config,
+            on_failure=self._on_judge_failure,
+            on_request=self._on_judge_request,
+        )
         self._trace = (
             TraceWriter(self._workspace / ".engine" / "trace.jsonl")
             if self._config.trace_calls
@@ -195,6 +210,7 @@ class EngineSession:
         if self._mcp is not None:
             await self._mcp.aclose()
             self._mcp = None
+        await self._judge.aclose()
         self.close_session()
 
     def close_session(self) -> bool:
@@ -243,6 +259,9 @@ class EngineSession:
         self._state.stats.last_turn_cost = 0.0
         self._aborting = False
         self._turn_started = time.monotonic()
+        # Emit thinking before the task runs so headless clients do not
+        # treat classify_turn / compact as "orch idle, no children".
+        self._on_state("thinking", 0)
         self._turn_task = asyncio.get_running_loop().create_task(self._run_turn(text))
 
     def _maybe_pump(self) -> None:
@@ -263,7 +282,8 @@ class EngineSession:
         # boundary. After an abort, task.cancelled() is False and
         # exception() is None. Use self._aborting, not the task flags.
         try:
-            reply = await self._loop.run(text)
+            handled = await self._maybe_route_turn(text)
+            reply = handled if handled is not None else await self._loop.run(text)
             if not self._aborting:
                 # Same id as ChatMessageStarted/Delta so clients that
                 # already rendered the stream do not reprint the text.
@@ -277,6 +297,8 @@ class EngineSession:
         except Exception as exc:  # noqa: BLE001
             self._emit(ErrorOccurred(message=f"llm error: {exc}"))
         finally:
+            if self._loop is not None:
+                self._loop.use_model(None)
             self._state.stats.elapsed_s += max(0.0, time.monotonic() - self._turn_started)
             self._persist()
             self._turn_task = None
@@ -287,6 +309,117 @@ class EngineSession:
             self._on_state("idle", 0)
             self._maybe_pump()
             self._flush_settles_if_idle()
+
+    async def _maybe_route_turn(self, text: str) -> str | None:
+        """Phase 5 (docs/impl-plans/jev-exp-1.md): classify the turn before
+        handing it to the full agent loop. Returns the final reply text
+        when this method fully handled the turn (meta action, resolved
+        locate query, or a clarified retry); returns None to fall through
+        to `self._loop.run(text)` unchanged -- the always-safe default."""
+        if self._loop is None:
+            return None
+        if _is_inbox_report(text):
+            # An internal "[agent ...]"/"[worktree ...]" handoff, not
+            # something a user typed -- user-intent routing doesn't apply.
+            return None
+        site_mode = self._config.judge_mode_for("intent")
+        if site_mode == "off":
+            return None
+        from agents.resolver import classify_turn
+
+        classified = await classify_turn(self._judge, text)
+        if classified is None:
+            return None
+        enforced = site_mode == "enforcing"
+        if classified.route != "default":
+            self._on_judgement(
+                tag="intent_route",
+                subject=text[:200],
+                outcome=classified.route,
+                signals=classified.signals,
+                enforced=enforced,
+                latency_ms=classified.latency_ms,
+            )
+        if not enforced:
+            # Advisory: classify and emit, but do not run the locate
+            # resolver (rg + rank + two reads) just to change nothing.
+            return None
+        if classified.route == "ambiguous":
+            return await self._route_ambiguous(text)
+        if classified.route == "meta":
+            reply = await self._handle_meta_action(classified.meta_action)
+            if reply is not None:
+                return reply
+            return None
+        if classified.route == "locate":
+            return await self._route_locate(text)
+        if classified.route == "edit_multi_file":
+            from runtime.judge_decisions import EDIT_MULTI_FILE_MAX_TURNS_BONUS
+
+            self._config.max_turns += EDIT_MULTI_FILE_MAX_TURNS_BONUS
+            if self._config.model_strong:
+                self._loop.use_model(self._config.model_strong)
+            return None
+        return None
+
+    async def _route_ambiguous(self, text: str) -> str:
+        try:
+            answer = await self._prompts.ask(
+                "Your last message looks underspecified -- could you "
+                "clarify what you'd like me to do?",
+                kind="text",
+            )
+        except PromptTimeout:
+            answer = ""
+        combined = f"{text}\n\n(clarification: {answer})" if answer else text
+        return await self._loop.run(combined)
+
+    async def _route_locate(self, text: str) -> str | None:
+        from agents.orchestrator import Orchestrator
+        from agents.resolver import resolve_locate
+
+        resolution = await resolve_locate(self._workspace, self._judge, text)
+        if resolution is None:
+            return None
+        orch = self._loop
+        if not isinstance(orch, Orchestrator):
+            if resolution.complete:
+                return await orch.run_with_context(text, resolution)
+            return None
+        if resolution.complete:
+            return await orch.spawn("ask", text, resolution=resolution)
+        task = (
+            f"{text}\n\nGathered context (continue investigating; "
+            f"do not rediscover from zero):\n{resolution.context}"
+        )
+        return await orch.spawn("ask", task)
+
+    async def _handle_meta_action(self, meta_action: str) -> str | None:
+        ctx = getattr(self._loop, "_ctx", None)
+        if ctx is None:
+            return None
+        if meta_action == "undo":
+            from runtime.tools.edits import undo_last
+
+            return await undo_last(ctx)
+        if meta_action == "what_changed":
+            state = read_git(self._workspace, diffs=False)
+            if state.branch is None and not state.dirty:
+                return "not a git repository"
+            return "\n".join(
+                [
+                    f"branch: {state.branch or '(unknown)'}",
+                    f"dirty: {state.dirty}",
+                    "staged: " + (", ".join(state.staged) or "(none)"),
+                    "unstaged: " + (", ".join(state.unstaged) or "(none)"),
+                    "untracked: " + (", ".join(state.untracked) or "(none)"),
+                ]
+            )
+        if meta_action == "list_edits":
+            from runtime.tools.edits import list_edits_text
+
+            return list_edits_text(ctx, limit=20)
+        return None
 
     def _flush_settles_if_idle(self) -> None:
         if self._turn_task is not None and not self._turn_task.done():
@@ -339,6 +472,12 @@ class EngineSession:
             self._emit(ErrorOccurred(message=message))
         for warning in self._config.warnings:
             self._emit(WarningOccurred(message=warning))
+        if self._config.judge_usable and not self._judge.enabled:
+            self._emit(
+                WarningOccurred(
+                    message="typesafe-sdk is not installed; the judge is off"
+                )
+            )
         self._skills = SkillCatalog(discover_skills(self._workspace))
         self._emit(SkillCatalogUpdated(skills=self._skills.rows()))
         await self._start_mcp(registry)
@@ -385,6 +524,8 @@ class EngineSession:
             skills=self._skills,
             on_skill_activated=self._on_skill_activated,
             on_memory=self._emit_memory,
+            judge=self._judge,
+            on_judgement=self._on_judgement,
         )
         self._loop.hydrate(self._state.messages)
 
@@ -623,6 +764,74 @@ class EngineSession:
                 call_id=call_id or "",
                 stream=stream,
                 text=text,
+                agent_id=agent_id,
+            )
+        )
+
+    def _on_judge_failure(self, message: str) -> None:
+        self._emit(WarningOccurred(message=message))
+
+    def _on_judge_request(
+        self,
+        tag: str,
+        verdict,
+        failed: bool,
+        *,
+        state: Any = None,
+        questions: dict | None = None,
+    ) -> None:
+        if self._trace is not None:
+            self._trace.write(
+                "judge",
+                tag=tag,
+                failed=failed,
+                cache_hit=verdict.cache_hit if verdict is not None else None,
+                latency_ms=verdict.latency_ms if verdict is not None else None,
+                request=state,
+                questions=sorted((questions or {}).keys()),
+                response=verdict.all_answers() if verdict is not None else {},
+            )
+        if self._metrics is None:
+            return
+        self._metrics.observe_judge_request(tag, verdict, failed)
+
+    def _on_judgement(
+        self,
+        *,
+        tag: str,
+        subject: str,
+        outcome: str,
+        signals: dict,
+        enforced: bool,
+        latency_ms: int,
+        agent_id: str = "",
+    ) -> None:
+        if self._metrics is not None:
+            self._metrics.observe_judge_decision(tag, outcome, enforced)
+        try:
+            from runtime.store.judgements import record as record_judgement
+
+            record_judgement(
+                self._db_path,
+                session_id=self._state.session_id or "",
+                tag=tag,
+                subject=subject,
+                outcome=outcome,
+                signals=signals,
+                enforced=enforced,
+                latency_ms=latency_ms,
+                agent_id=agent_id,
+            )
+        except Exception:  # noqa: BLE001 — journal must never break a turn
+            pass
+        self._emit(
+            JudgementMade(
+                tag=tag,
+                subject=subject,
+                outcome=outcome,
+                signals=signals,
+                enforced=enforced,
+                latency_ms=latency_ms,
                 agent_id=agent_id,
             )
         )

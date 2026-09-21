@@ -271,6 +271,131 @@ def _drop_oldest(
     return best, saved
 
 
+def _atomic_groups(messages: list[dict], start: int, end: int) -> list[tuple[int, int]]:
+    """[start, end) split into (a, b) ranges, each a structurally atomic
+    unit (an assistant tool_calls message stays glued to its tool results).
+    Mirrors the incremental group_boundary walk _drop_oldest already does."""
+    groups: list[tuple[int, int]] = []
+    cut = start
+    while cut < end:
+        nxt = min(group_boundary(messages, cut + 1), end)
+        if nxt <= cut:
+            nxt = cut + 1
+        groups.append((cut, nxt))
+        cut = nxt
+    return groups
+
+
+def _summarize_group(messages: list[dict], a: int, b: int) -> str:
+    parts = []
+    for message in messages[a:b]:
+        role = message.get("role", "")
+        calls = message.get("tool_calls") or []
+        if calls:
+            names = ", ".join(
+                (call.get("function") or {}).get("name", "") for call in calls
+            )
+            parts.append(f"{role} tool_calls: {names}")
+        else:
+            text = _content_as_text(message.get("content"))
+            parts.append(f"{role}: {_clip_labeled(text, 200)}")
+    return " | ".join(parts) if parts else "(empty)"
+
+
+def _apply_eviction_order(
+    messages: list[dict],
+    groups: list[tuple[int, int]],
+    order: list[int],
+    prefix: int,
+    last: int,
+    budget: int,
+    ratio: float,
+    trigger: float,
+) -> tuple[list[dict], int, int]:
+    """Drop groups in `order` (a permutation of range(len(groups))) until
+    under budget, skipping any drop that would break history structure.
+    Returns (candidate, chars_saved, groups_dropped)."""
+    dropped: set[int] = set()
+    candidate = messages
+    saved = 0
+    for index in order:
+        dropped.add(index)
+        kept = messages[:prefix]
+        for i, (a, b) in enumerate(groups):
+            if i not in dropped:
+                kept.extend(messages[a:b])
+        kept.extend(messages[last:])
+        if validate_history(kept):
+            dropped.discard(index)
+            continue
+        a, b = groups[index]
+        saved += sum(len(json.dumps(item)) for item in messages[a:b])
+        candidate = kept
+        if not _over_budget(candidate, budget, ratio, trigger=trigger):
+            break
+    return candidate, saved, len(dropped)
+
+
+async def _drop_by_relevance(
+    messages: list[dict],
+    budget: int,
+    ratio: float,
+    *,
+    judge,
+    goal: str,
+    enforced: bool,
+    on_judgement=None,
+    agent_id: str = "",
+    trigger: float = TRIGGER_RATIO,
+) -> tuple[list[dict], int]:
+    """Phase 6a (docs/impl-plans/jev-exp-1.md): evict lowest-relevance
+    groups first instead of strictly oldest-first. Falls back to
+    `_drop_oldest` whenever there is nothing useful to score with -- judge
+    disabled, no verdict, or fewer than two droppable groups -- so a `None`
+    verdict reproduces today's positional behaviour exactly. Under
+    advisory mode (enforced=False), the verdict is still requested and
+    logged, but the positional result is what actually ships.
+    """
+    fallback = _drop_oldest(messages, budget, ratio, trigger=trigger)
+    if judge is None or not getattr(judge, "enabled", False):
+        return fallback
+    if len(messages) < 2:
+        return messages, 0
+    prefix = 1 if messages[0].get("role") == "system" else 0
+    last = _last_exchange_start(messages)
+    if last <= prefix:
+        return messages, 0
+    groups = _atomic_groups(messages, prefix, last)
+    if len(groups) < 2:
+        return fallback
+    items = {
+        str(index + 1): _summarize_group(messages, a, b)
+        for index, (a, b) in enumerate(groups)
+    }
+    from runtime.judge_decisions import compaction_order, compaction_questions
+
+    verdict = await judge.ask({"goal": goal, "items": items}, compaction_questions(items), tag="compaction")
+    if verdict is None:
+        return fallback
+    order = [int(key) - 1 for key in compaction_order(verdict, items)]
+    candidate, saved, dropped_count = _apply_eviction_order(
+        messages, groups, order, prefix, last, budget, ratio, trigger
+    )
+    if on_judgement is not None and dropped_count:
+        on_judgement(
+            tag="compaction",
+            subject=(goal or "")[:200],
+            outcome=f"evicted {dropped_count}/{len(groups)} by relevance",
+            signals={},
+            enforced=enforced,
+            latency_ms=verdict.latency_ms,
+            agent_id=agent_id,
+        )
+    if not enforced:
+        return fallback
+    return candidate, saved
+
+
 def _info(
     strategy: str,
     *,
@@ -299,6 +424,11 @@ async def compact(
     ratio: float = 1.0,
     trigger_ratio: float = TRIGGER_RATIO,
     keep_full: int = KEEP_FULL_TOOL_RESULTS,
+    judge=None,
+    goal: str = "",
+    judge_mode: str = "off",
+    on_judgement=None,
+    agent_id: str = "",
 ) -> tuple[list[dict], dict]:
     estimated = _scaled_tokens(messages, ratio, last_prompt_tokens)
     if estimated < int(budget * trigger_ratio):
@@ -331,7 +461,20 @@ async def compact(
             strategy = "truncate"
             estimated = _scaled_tokens(trimmed, ratio)
     if _over_budget(trimmed, budget, ratio, trigger=trigger_ratio):
-        dropped, extra = _drop_oldest(trimmed, budget, ratio, trigger=trigger_ratio)
+        if judge_mode != "off" and judge is not None:
+            dropped, extra = await _drop_by_relevance(
+                trimmed,
+                budget,
+                ratio,
+                judge=judge,
+                goal=goal,
+                enforced=judge_mode == "enforcing",
+                on_judgement=on_judgement,
+                agent_id=agent_id,
+                trigger=trigger_ratio,
+            )
+        else:
+            dropped, extra = _drop_oldest(trimmed, budget, ratio, trigger=trigger_ratio)
         if dropped is not trimmed:
             trimmed = dropped
             saved += extra

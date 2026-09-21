@@ -35,6 +35,7 @@ from protocol.events import (
     FileEdited,
     FileTreeUpdated,
     GitStateUpdated,
+    JudgementMade,
     OrchContext,
     SessionEnded,
     SessionList,
@@ -65,6 +66,7 @@ _CHAT_EVENTS = (
 )
 _TOOL_EVENTS = (ToolCallStarted, ToolCallFinished, CommandOutputChunk)
 _AGENT_EVENTS = (AgentsUpdated,)
+_JUDGE_EVENTS = (JudgementMade,)
 
 
 def _note(text: str) -> None:
@@ -86,6 +88,8 @@ def route_event(event) -> str:
         return "agents"
     if isinstance(event, _AGENT_EVENTS):
         return "agents"
+    if isinstance(event, _JUDGE_EVENTS):
+        return "judge"
     if isinstance(event, OrchContext):
         return "context"
     if isinstance(event, _CHAT_EVENTS):
@@ -146,6 +150,8 @@ def _help_text() -> str:
     lines.append("When a writer finishes, answer merge / pr / keep / discard")
     lines.append("(or 'please merge it' / 'open a PR'). After keep, tell the orch")
     lines.append("to merge or open a PR — do not spawn another coder.")
+    lines.append("Judge: JudgementMade is pinned on the tools panel and logged")
+    lines.append("in protocol. F7 filters protocol to judgements only.")
     return "\n".join(lines) + "\n"
 
 
@@ -315,6 +321,19 @@ def _format_agents(rows) -> str:
     return "\n".join(lines)
 
 
+def format_judgement(event: JudgementMade) -> str:
+    flag = "enforced" if event.enforced else "advisory"
+    who = f" [{event.agent_id}]" if event.agent_id else ""
+    lines = [
+        f"judge {event.tag} -> {event.outcome} ({flag}, {event.latency_ms}ms)"
+        f"{who}: {event.subject}"
+    ]
+    if event.signals:
+        signals = "  ".join(f"{k}={v:.2f}" for k, v in event.signals.items())
+        lines.append(f"  {signals}")
+    return "\n".join(lines)
+
+
 def format_event(event) -> str:
     if isinstance(event, SnapshotReady):
         snap = event.snapshot
@@ -456,6 +475,8 @@ def format_event(event) -> str:
         return f"warning: {event.message}"
     if isinstance(event, SessionEnded):
         return f"session ended ({event.reason})"
+    if isinstance(event, JudgementMade):
+        return format_judgement(event)
     return json.dumps(event.to_json(), indent=2)
 
 

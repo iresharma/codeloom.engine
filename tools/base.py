@@ -32,6 +32,9 @@ class ToolContext:
     activate_skill: Any = None
     unlocked_skills: Any = None
     on_memory: Any = None
+    judge: Any = None
+    on_judgement: Any = None
+    user_request: str = ""
 
 
 @dataclass

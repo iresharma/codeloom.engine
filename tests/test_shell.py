@@ -62,6 +62,16 @@ def test_key_scrubbed(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_typesafe_key_scrubbed(tmp_path, monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "typesafe-secret")
+
+    async def run():
+        result = await run_command(tmp_path, "sh -c 'echo $TYPESAFE_API_KEY'", approval="never")
+        assert "typesafe-secret" not in result.stdout
+
+    asyncio.run(run())
+
+
 def test_cwd_outside_refused(tmp_path):
     async def run():
         with pytest.raises(Exception):

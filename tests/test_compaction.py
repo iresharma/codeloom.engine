@@ -16,6 +16,7 @@ from llm.provider import LLMResult
 from protocol.codec import encode
 from protocol.events import ContextCompacted
 from runtime.subscriber import EVENT_SOFT_LIMIT, approx_size
+from tests.conftest import FakeJudge, FakeVerdict
 
 
 def _tool_group(call_id="1", name="search", result="lots of " * 200):
@@ -358,3 +359,111 @@ def test_freeze_system_ignores_later_memory(tmp_path):
     assert "frozen-child-must-not-see-this" not in second
     orch = AgentLoop(FakeProvider(), workspace=tmp_path, freeze_system=False)
     assert "frozen-child-must-not-see-this" in orch._build_messages()[0]["content"]
+
+
+# ---------------------------------------------------------------------
+# Phase 6a (docs/impl-plans/jev-exp-1.md): compaction by relevance
+# ---------------------------------------------------------------------
+
+
+def _history_with_three_groups():
+    return [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "first task"},
+        *_tool_group("1", result="AAAA " * 200),
+        {"role": "user", "content": "second task"},
+        *_tool_group("2", result="BBBB " * 200),
+        {"role": "user", "content": "third task"},
+        *_tool_group("3", result="CCCC " * 200),
+        {"role": "user", "content": "latest"},
+    ]
+
+
+def test_relevance_eviction_drops_scored_group_not_just_oldest():
+    from agents.compactor import _atomic_groups, _last_exchange_start, _summarize_group
+
+    async def run():
+        messages = _history_with_three_groups()
+        prefix = 1
+        last = _last_exchange_start(messages)
+        groups = _atomic_groups(messages, prefix, last)
+        summaries = {
+            str(i + 1): _summarize_group(messages, a, b) for i, (a, b) in enumerate(groups)
+        }
+        # Score every candidate group high (safe) except the one holding the
+        # BBBB tool result, which scores lowest -- it must be evicted first
+        # even though an older group (AAAA's) exists.
+        scores = {
+            key: (0.0 if "BBBB" in text else 2.0) for key, text in summaries.items()
+        }
+        judge = FakeJudge()
+        judge.responses["compaction"] = FakeVerdict(scores=scores)
+        out, _info = await compact(
+            messages, 750, judge=judge, judge_mode="enforcing", goal="do the task"
+        )
+        assert validate_history(out) == []
+        texts = [_as_text(m["content"]) for m in out if m["role"] == "tool"]
+        assert not any("BBBB" in t for t in texts)
+        assert any("AAAA" in t for t in texts)
+        assert any("CCCC" in t for t in texts)
+
+    asyncio.run(run())
+
+
+def test_none_verdict_matches_positional_drop_oldest():
+    async def run():
+        messages = _history_with_three_groups()
+        baseline, baseline_info = await compact(messages, 60)
+        judge = FakeJudge()  # no scripted response -> ask() returns None
+        with_judge, with_info = await compact(
+            messages, 60, judge=judge, judge_mode="enforcing", goal="do the task"
+        )
+        assert with_judge == baseline
+        assert with_info["chars_saved"] == baseline_info["chars_saved"]
+
+    asyncio.run(run())
+
+
+def test_disabled_judge_matches_positional_drop_oldest():
+    async def run():
+        messages = _history_with_three_groups()
+        baseline, _ = await compact(messages, 60)
+        out, _ = await compact(messages, 60, judge=None, judge_mode="enforcing")
+        assert out == baseline
+
+    asyncio.run(run())
+
+
+def test_compaction_advisory_mode_logs_but_keeps_positional_order():
+    async def run():
+        messages = _history_with_three_groups()
+        judge = FakeJudge()
+        judge.responses["compaction"] = FakeVerdict(scores={"1": 2.0, "2": 0.0, "3": 2.0})
+        judgements = []
+        baseline, _ = await compact(messages, 60)
+        out, _ = await compact(
+            messages,
+            60,
+            judge=judge,
+            judge_mode="advisory",
+            goal="do the task",
+            on_judgement=lambda **kw: judgements.append(kw),
+        )
+        assert out == baseline  # advisory never changes the actual result
+        assert judgements
+        assert judgements[0]["enforced"] is False
+
+    asyncio.run(run())
+
+
+def test_relevance_eviction_preserves_history_invariant():
+    async def run():
+        messages = _history_with_three_groups()
+        judge = FakeJudge()
+        judge.responses["compaction"] = FakeVerdict(scores={"1": 0.0, "2": 1.0, "3": 2.0})
+        out, _ = await compact(
+            messages, 30, judge=judge, judge_mode="enforcing", goal="do the task"
+        )
+        assert validate_history(out) == []
+
+    asyncio.run(run())

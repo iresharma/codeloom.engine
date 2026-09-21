@@ -13,6 +13,7 @@ from protocol.events import (
     AgentStateChanged,
     AgentsUpdated,
     ErrorOccurred,
+    JudgementMade,
     SessionEnded,
     SnapshotReady,
     UserPromptRequested,
@@ -169,7 +170,7 @@ async def wait_until_idle(
             expect_pump = True
             mark(True)
             refresh()
-        elif isinstance(event, AgentStarted):
+        elif isinstance(event, (JudgementMade, AgentStarted)):
             mark(True)
             refresh()
         elif isinstance(event, WorktreeSettled):

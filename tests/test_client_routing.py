@@ -7,6 +7,7 @@ from dummy_client import (
     drain_notes,
     format_command,
     format_event,
+    format_judgement,
     route_event,
 )
 from protocol.commands import (
@@ -35,6 +36,7 @@ from protocol.events import (
     UserPromptRequested,
     WarningOccurred,
     WorktreeSettled,
+    JudgementMade,
 )
 from protocol.snapshot import AgentRow, EngineSnapshot, GitState, Stats
 
@@ -206,6 +208,8 @@ def test_help_and_usage_go_to_notes():
     assert "Live agents:" in notes[0]
     assert "snapshot" in notes[0].lower()
     assert "context" in notes[0].lower()
+    assert "JudgementMade" in notes[0]
+    assert "F7" in notes[0]
     assert command_from_line("/nope", Path(".")) is None
     notes = drain_notes()
     assert notes and "unknown command" in notes[0]
@@ -322,3 +326,30 @@ def test_format_worktree_settled():
     assert "worktree pr ok" in text
     assert "https://example.com/pr/1" in text
     assert "opened pull request" in text
+
+
+def test_route_and_format_judgement_made():
+    event = JudgementMade(
+        tag="exec_approval",
+        subject="git push --force",
+        outcome="prompt",
+        signals={"rewrites_vcs_history": 0.91, "is_destructive": 0.4},
+        enforced=True,
+        latency_ms=88,
+    )
+    assert route_event(event) == "judge"
+    text = format_judgement(event)
+    assert text.startswith("judge exec_approval -> prompt (enforced, 88ms): git push --force")
+    assert "rewrites_vcs_history=0.91" in text
+    assert format_event(event) == text
+    quiet = JudgementMade(
+        tag="search_rerank",
+        subject="where is retry?",
+        outcome="ranked",
+        signals={},
+        enforced=False,
+        latency_ms=12,
+    )
+    assert format_event(quiet) == (
+        "judge search_rerank -> ranked (advisory, 12ms): where is retry?"
+    )

@@ -1,6 +1,9 @@
 """Comprehensive tests for tools/sitter.py to raise coverage from 64% to 90%+"""
 from __future__ import annotations
 
+import asyncio
+import inspect
+
 import pytest
 
 from tools.sitter import (
@@ -15,6 +18,13 @@ from tools.base import ToolContext
 from runtime.config import EngineConfig
 from runtime.store.edits import ensure_schema
 from runtime.tools.tracker import FileTracker
+
+
+def _list_symbols(ctx, *args, **kwargs):
+    result = list_symbols(ctx, *args, **kwargs)
+    if inspect.iscoroutine(result):
+        return asyncio.run(result)
+    return result
 
 
 @pytest.fixture
@@ -79,7 +89,7 @@ class TestListSymbolsTool:
         (tool_ctx.workspace / "test.py").write_text(
             "def foo():\n    pass\n\ndef bar():\n    pass\n"
         )
-        result = list_symbols(tool_ctx, "test.py")
+        result = _list_symbols(tool_ctx, "test.py")
         assert "function" in result or "foo" in result
         assert "bar" in result
 
@@ -88,19 +98,53 @@ class TestListSymbolsTool:
         (tool_ctx.workspace / "code.js").write_text(
             "function foo() { return 1; }\nfunction bar() { return 2; }\n"
         )
-        result = list_symbols(tool_ctx, "code.js", language="javascript")
+        result = _list_symbols(tool_ctx, "code.js", language="javascript")
         assert "foo" in result or "function" in result
 
     def test_list_symbols_empty_language_string(self, tool_ctx):
         """Empty language string is treated as no override."""
         (tool_ctx.workspace / "test.py").write_text("def foo():\n    pass\n")
-        result = list_symbols(tool_ctx, "test.py", language="")
+        result = _list_symbols(tool_ctx, "test.py", language="")
         assert "foo" in result or "function" in result
 
     def test_list_symbols_file_not_found(self, tool_ctx):
         """Non-existent file returns error."""
-        result = list_symbols(tool_ctx, "nonexistent.py")
+        result = _list_symbols(tool_ctx, "nonexistent.py")
         assert "error:" in result.lower() or "not a file" in result.lower()
+
+    def test_list_symbols_reranks_large_outline(self, tool_ctx):
+        from tests.conftest import FakeJudge, FakeVerdict
+
+        body = "\n\n".join(f"def fn_{i}():\n    pass" for i in range(45))
+        (tool_ctx.workspace / "big.py").write_text(body + "\n")
+        judge = FakeJudge()
+        judge.responses["search_rerank"] = FakeVerdict(
+            probabilities={"best_match": {"45": 0.99, "1": 0.1}},
+            confidences={"best_match": 0.9},
+        )
+        tool_ctx.judge = judge
+        tool_ctx.user_request = "where is fn_44"
+        tool_ctx.config = EngineConfig(judge_mode="enforcing")
+        result = _list_symbols(tool_ctx, "big.py")
+        assert "Likely relevant:" in result
+        assert judge.calls
+
+    def test_list_symbols_advisory_keeps_document_order(self, tool_ctx):
+        from tests.conftest import FakeJudge, FakeVerdict
+
+        body = "\n\n".join(f"def fn_{i}():\n    pass" for i in range(45))
+        (tool_ctx.workspace / "big.py").write_text(body + "\n")
+        judge = FakeJudge()
+        judge.responses["search_rerank"] = FakeVerdict(
+            probabilities={"best_match": {"45": 0.99}},
+            confidences={"best_match": 0.9},
+        )
+        tool_ctx.judge = judge
+        tool_ctx.user_request = "where is fn_44"
+        tool_ctx.config = EngineConfig(judge_mode="advisory")
+        result = _list_symbols(tool_ctx, "big.py")
+        assert "Likely relevant:" not in result
+        assert "fn_0" in result
 
 
 class TestFindSymbolTool:
@@ -334,7 +378,7 @@ class TestToolsContextIntegration:
         (tool_ctx.workspace / "test.py").write_text(
             "def foo():\n    pass\n\ndef bar():\n    pass\n"
         )
-        symbols = list_symbols(tool_ctx, "test.py")
+        symbols = _list_symbols(tool_ctx, "test.py")
         assert "foo" in symbols
         
         found = find_symbol(tool_ctx, "test.py", "foo")
@@ -357,7 +401,7 @@ class TestToolsContextIntegration:
         (tool_ctx.workspace / "test.py").write_text(
             "import os\n\ndef foo():\n    pass\n\nclass Bar:\n    pass\n"
         )
-        symbols = list_symbols(tool_ctx, "test.py")
+        symbols = _list_symbols(tool_ctx, "test.py")
         assert "foo" in symbols or "Bar" in symbols
         
         functions = query_tree(tool_ctx, "test.py", preset="functions")
@@ -368,10 +412,10 @@ class TestToolsContextIntegration:
         (tool_ctx.workspace / "a.py").write_text("def alpha():\n    pass\n")
         (tool_ctx.workspace / "b.py").write_text("def beta():\n    pass\n")
         
-        result_a = list_symbols(tool_ctx, "a.py")
+        result_a = _list_symbols(tool_ctx, "a.py")
         assert "alpha" in result_a
         
-        result_b = list_symbols(tool_ctx, "b.py")
+        result_b = _list_symbols(tool_ctx, "b.py")
         assert "beta" in result_b
 
 

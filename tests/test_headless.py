@@ -11,6 +11,7 @@ from protocol.commands import AnswerPrompt
 from protocol.events import (
     AgentFinished,
     AgentStateChanged,
+    JudgementMade,
     UserPromptRequested,
 )
 from tests.fakes import FakeProvider
@@ -118,6 +119,40 @@ def test_wait_until_idle_positive_timeout_still_fires():
             await wait_until_idle(get_event, send, timeout=0.05, quiet_s=0.01)
 
     asyncio.run(run())
+
+
+def test_wait_until_idle_judgement_resets_quiet():
+    events = [
+        AgentStateChanged(state="thinking", turn=1, max_turns=16),
+        AgentStateChanged(state="idle", turn=1, max_turns=16),
+        JudgementMade(
+            tag="merge_gate",
+            subject="ask: survey",
+            outcome="full",
+            signals={},
+            enforced=True,
+            latency_ms=40,
+        ),
+    ]
+
+    async def get_event():
+        await asyncio.sleep(0.12)
+        if not events:
+            await asyncio.sleep(30)
+            raise AssertionError("get_event called after events exhausted")
+        return events.pop(0)
+
+    async def send(command):
+        raise AssertionError(f"unexpected send {command}")
+
+    started = time.monotonic()
+
+    async def run():
+        await wait_until_idle(get_event, send, timeout=0, quiet_s=0.2)
+
+    asyncio.run(run())
+    # thinking @0.12, idle @0.24, judgement @0.36 then 0.2s quiet → >= 0.5s
+    assert time.monotonic() - started >= 0.5
 
 
 def test_wait_until_idle_waits_for_orch_after_child_finishes():

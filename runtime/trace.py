@@ -1,5 +1,4 @@
-"""Optional full-fidelity JSONL trace of tool calls (and, on branches that
-carry a judge, judge calls too -- see runtime/judge.py there).
+"""Optional full-fidelity JSONL trace of judge and tool calls.
 
 Off by default (`ENGINE_TRACE_CALLS=1` to enable, wired up by
 `scripts/bench_ab.py` for both sides of an A/B run). Written for offline

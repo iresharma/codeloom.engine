@@ -7,6 +7,7 @@ from pathlib import Path
 
 from protocol.snapshot import EngineSnapshot, SessionSummary
 from runtime.store.edits import ensure_schema as ensure_edits_schema
+from runtime.store.judgements import ensure_schema as ensure_judgements_schema
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -29,6 +30,7 @@ def init(path: Path) -> None:
     conn = _connect(path)
     conn.close()
     ensure_edits_schema(path)
+    ensure_judgements_schema(path)
 
 
 def load(path: Path, session_id: str) -> EngineSnapshot | None:

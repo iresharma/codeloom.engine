@@ -13,6 +13,9 @@ def test_defaults(monkeypatch, tmp_path):
     monkeypatch.delenv("ENGINE_TURN_CONTINUE", raising=False)
     monkeypatch.delenv("ENGINE_MAX_SPAWNS_PER_TURN", raising=False)
     monkeypatch.delenv("ENGINE_EXEC_APPROVAL", raising=False)
+    monkeypatch.delenv("ENGINE_JUDGE", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_JEV_API_KEY", raising=False)
     monkeypatch.delenv("ENGINE_PUSHGATEWAY_URL", raising=False)
     monkeypatch.delenv("ENGINE_METRICS_JOB", raising=False)
     monkeypatch.delenv("ENGINE_METRICS_INSTANCE", raising=False)
@@ -76,6 +79,42 @@ def test_invalid_approval_warns(monkeypatch, tmp_path):
     assert any("ENGINE_EXEC_APPROVAL" in item for item in config.warnings)
 
 
+def test_invalid_approval_still_gets_judged_default_when_usable(monkeypatch, tmp_path):
+    # A typo'd ENGINE_EXEC_APPROVAL is not a deliberate opt-out of the smart
+    # default -- it should behave like unset (still warn about the typo),
+    # not silently downgrade to legacy "auto" just because *something* was
+    # present in the environment.
+    monkeypatch.setenv("ENGINE_EXEC_APPROVAL", "nver")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.exec_approval == "judged"
+    assert any("ENGINE_EXEC_APPROVAL" in item for item in config.warnings)
+
+
+def test_explicit_exec_approval_with_judge_enabled_warns(monkeypatch, tmp_path):
+    # ENGINE_JUDGE=calibrated enables the exec judge, but run_command only
+    # consults it when exec_approval is literally "judged" -- an explicit
+    # ENGINE_EXEC_APPROVAL=always silently means no exec judge ever runs.
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    monkeypatch.setenv("ENGINE_JUDGE", "calibrated")
+    monkeypatch.setenv("ENGINE_EXEC_APPROVAL", "always")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.exec_approval == "always"
+    assert any(
+        "ENGINE_EXEC_APPROVAL" in item and "exec judge" in item
+        for item in config.warnings
+    )
+
+
+def test_explicit_judged_approval_does_not_warn(monkeypatch, tmp_path):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    monkeypatch.setenv("ENGINE_JUDGE", "calibrated")
+    monkeypatch.setenv("ENGINE_EXEC_APPROVAL", "judged")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.exec_approval == "judged"
+    assert not any("exec judge" in item for item in config.warnings)
+
+
 def test_from_env_twice_idempotent(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "real-key")
     (tmp_path / "env.sh").write_text("export OPENROUTER_API_KEY=from-file\n")
@@ -86,6 +125,189 @@ def test_from_env_twice_idempotent(monkeypatch, tmp_path):
 
     assert os.environ["OPENROUTER_API_KEY"] == "real-key"
     assert "real-key" not in PLACEHOLDERS
+
+
+def test_typesafe_key_placeholders_treated_as_unset(monkeypatch, tmp_path):
+    monkeypatch.delenv("TYPESAFE_JEV_API_KEY", raising=False)
+    for placeholder in ("", "...", "your-key", "changeme"):
+        monkeypatch.setenv("TYPESAFE_API_KEY", placeholder)
+        config = EngineConfig.from_env(tmp_path)
+        assert config.typesafe_api_key == ""
+        assert config.judge_usable is False
+
+
+def test_typesafe_real_key_is_usable(monkeypatch, tmp_path):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.typesafe_api_key == "sk-real-typesafe-key"
+    assert config.judge_usable is True
+
+
+def test_exec_approval_defaults_to_judged_when_judge_usable(monkeypatch, tmp_path):
+    monkeypatch.delenv("ENGINE_EXEC_APPROVAL", raising=False)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.exec_approval == "judged"
+
+
+def test_explicit_exec_approval_overrides_judged_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    monkeypatch.setenv("ENGINE_EXEC_APPROVAL", "always")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.exec_approval == "always"
+
+
+def test_engine_judge_off_disables_judged_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("ENGINE_EXEC_APPROVAL", raising=False)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    monkeypatch.setenv("ENGINE_JUDGE", "off")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.exec_approval == "auto"
+    assert config.judge_usable is False
+
+
+def test_invalid_judge_mode_warns(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "sometimes")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode == "advisory"
+    assert any("ENGINE_JUDGE" in item for item in config.warnings)
+
+
+def test_judge_mode_for_site_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "advisory")
+    monkeypatch.setenv("ENGINE_JUDGE_EXEC", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("exec") == "enforcing"
+    assert config.judge_mode_for("tools") == "advisory"
+
+
+def test_invalid_judge_site_override_is_ignored_with_warning(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE_SCREEN", "sometimes")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("screen") == config.judge_mode
+    assert any("ENGINE_JUDGE_SCREEN" in item for item in config.warnings)
+
+
+def test_phase6_judge_site_overrides(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "advisory")
+    monkeypatch.setenv("ENGINE_JUDGE_COMPACTION", "enforcing")
+    monkeypatch.setenv("ENGINE_JUDGE_DIAGNOSTICS", "off")
+    monkeypatch.setenv("ENGINE_JUDGE_LOOP", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("compaction") == "enforcing"
+    assert config.judge_mode_for("diagnostics") == "off"
+    assert config.judge_mode_for("loop") == "enforcing"
+
+
+def test_phase5_intent_judge_site_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "advisory")
+    monkeypatch.setenv("ENGINE_JUDGE_INTENT", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("intent") == "enforcing"
+
+
+def test_model_cheap_and_strong_default_empty(monkeypatch, tmp_path):
+    monkeypatch.delenv("ENGINE_MODEL_CHEAP", raising=False)
+    monkeypatch.delenv("ENGINE_MODEL_STRONG", raising=False)
+    config = EngineConfig.from_env(tmp_path)
+    assert config.model_cheap == ""
+    assert config.model_strong == ""
+
+
+def test_model_cheap_and_strong_read_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_MODEL_CHEAP", "openai/gpt-4o-mini")
+    monkeypatch.setenv("ENGINE_MODEL_STRONG", "anthropic/claude-opus")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.model_cheap == "openai/gpt-4o-mini"
+    assert config.model_strong == "anthropic/claude-opus"
+
+
+def test_calibrated_profile_enforces_read_sites_and_write_secrets(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    monkeypatch.setenv("ENGINE_JUDGE", "calibrated")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode == "calibrated"
+    assert config.judge_mode_for("exec") == "enforcing"
+    assert config.judge_mode_for("search") == "enforcing"
+    assert config.judge_mode_for("screen") == "enforcing"
+    assert config.judge_mode_for("intent") == "enforcing"
+    # The write gate can only ever block on introduces_hardcoded_secret, so
+    # the recommended calibrated profile enforces it too -- unlike a blanket
+    # ENGINE_JUDGE=enforcing, which still requires an explicit opt-in (see
+    # test_write_gate_never_silently_inherits_global_enforcing below).
+    assert config.judge_mode_for("write") == "enforcing"
+    assert config.judge_mode_for("merge") == "advisory"
+    assert config.judge_usable is True
+
+
+def test_calibrated_site_override_still_wins(monkeypatch, tmp_path):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    monkeypatch.setenv("ENGINE_JUDGE", "calibrated")
+    monkeypatch.setenv("ENGINE_JUDGE_WRITE", "advisory")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("write") == "advisory"
+
+
+def test_write_gate_never_silently_inherits_global_enforcing(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode == "enforcing"
+    assert config.judge_mode_for("write") == "advisory"
+    assert config.judge_mode_for("exec") == "enforcing"  # other sites unaffected
+
+
+def test_write_gate_respects_off_and_explicit_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "off")
+    off_config = EngineConfig.from_env(tmp_path)
+    assert off_config.judge_mode_for("write") == "off"
+
+    monkeypatch.setenv("ENGINE_JUDGE", "enforcing")
+    monkeypatch.setenv("ENGINE_JUDGE_WRITE", "enforcing")
+    explicit_config = EngineConfig.from_env(tmp_path)
+    assert explicit_config.judge_mode_for("write") == "enforcing"
+
+
+def test_merge_gate_judge_site_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "advisory")
+    monkeypatch.setenv("ENGINE_JUDGE_MERGE", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("merge") == "enforcing"
+
+
+def test_no_typesafe_key_is_byte_identical_to_baseline(monkeypatch, tmp_path):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_JEV_API_KEY", raising=False)
+    monkeypatch.delenv("ENGINE_EXEC_APPROVAL", raising=False)
+    monkeypatch.delenv("ENGINE_JUDGE", raising=False)
+    config = EngineConfig.from_env(tmp_path)
+    assert config.exec_approval == "auto"
+    assert config.warnings == []
+
+
+def test_typesafe_jev_alias_is_accepted(monkeypatch, tmp_path):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setenv("TYPESAFE_JEV_API_KEY", "apikey_jev_alias")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.typesafe_api_key == "apikey_jev_alias"
+    assert config.judge_usable is True
+
+
+def test_typesafe_api_key_wins_over_jev_alias(monkeypatch, tmp_path):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-canonical")
+    monkeypatch.setenv("TYPESAFE_JEV_API_KEY", "apikey_jev_alias")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.typesafe_api_key == "sk-canonical"
+
+
+def test_enforcing_without_key_warns(monkeypatch, tmp_path):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_JEV_API_KEY", raising=False)
+    monkeypatch.setenv("ENGINE_JUDGE", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_usable is False
+    assert any("ENGINE_JUDGE=enforcing" in item for item in config.warnings)
 
 
 def test_pushgateway_env(monkeypatch, tmp_path):

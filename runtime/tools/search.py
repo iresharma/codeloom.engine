@@ -23,6 +23,28 @@ def search(
     glob: str = "",
     max_matches: int = DEFAULT_MAX_MATCHES,
 ) -> str:
+    rewritten = search_candidates(workspace, pattern, path=path, glob=glob)
+    if not rewritten:
+        return "(no matches)"
+    take = min(max(1, max_matches), MAX_MATCHES)
+    extra = max(0, len(rewritten) - take)
+    body = "\n".join(rewritten[:take])
+    if extra:
+        return f"{body}\n... ({extra} more matches; raise max_matches)"
+    return body
+
+
+def search_candidates(
+    workspace: Path,
+    pattern: str,
+    path: str = "",
+    glob: str = "",
+) -> list[str]:
+    """The full, uncapped list of rewritten `path:line:text` matches.
+
+    Split out from `search()` so a caller (the search tool's judge re-rank
+    stage) can see every candidate ripgrep found before any truncation.
+    """
     if not pattern:
         raise ValueError("pattern is required")
     rg = shutil.which("rg")
@@ -34,7 +56,6 @@ def search(
     if path:
         target = resolve_in_workspace(workspace, path)
 
-    take = min(max(1, max_matches), MAX_MATCHES)
     command = [
         rg,
         "--line-number",
@@ -83,14 +104,7 @@ def search(
 
     lines = [line for line in result.stdout.splitlines() if line]
     rewritten = [_rewrite_path(workspace, line) for line in lines]
-    rewritten = [line for line in rewritten if line is not None]
-    if not rewritten:
-        return "(no matches)"
-    extra = max(0, len(rewritten) - take)
-    body = "\n".join(rewritten[:take])
-    if extra:
-        return f"{body}\n... ({extra} more matches; raise max_matches)"
-    return body
+    return [line for line in rewritten if line is not None]
 
 
 def _rewrite_path(workspace: Path, line: str) -> str | None:

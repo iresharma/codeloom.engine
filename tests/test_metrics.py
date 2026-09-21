@@ -403,3 +403,71 @@ def test_llm_error_records_histogram(tmp_path):
     assert seen
     assert seen[0][0] == "anthropic/claude-sonnet-5"
     assert seen[0][2] is True
+
+
+def test_observe_judge_request_and_decision(tmp_path):
+    metrics = EngineMetrics(session_id="s1", workspace=tmp_path)
+    metrics.set_judge_model("jev-latest")
+
+    class Usage:
+        input_tokens = 10
+        output_tokens = 5
+        cost = 0.002
+
+    class Verdict:
+        cache_hit = False
+        latency_ms = 120
+        usage = Usage()
+
+    metrics.observe_judge_request("exec_approval", Verdict(), failed=False)
+    metrics.observe_judge_decision("exec_approval", "allow", False)
+    cached = Verdict()
+    cached.cache_hit = True
+    metrics.observe_judge_request("exec_approval", cached, failed=False)
+    metrics.observe_judge_request("call_verify", None, failed=True)
+
+    assert metrics.sample("engine_judge_info", {"model": "jev-latest"}) == 1
+    assert (
+        metrics.sample(
+            "engine_judge_requests", {"tag": "exec_approval", "result": "ok"}
+        )
+        == 1
+    )
+    assert (
+        metrics.sample(
+            "engine_judge_requests", {"tag": "exec_approval", "result": "cache"}
+        )
+        == 1
+    )
+    assert (
+        metrics.sample(
+            "engine_judge_requests", {"tag": "call_verify", "result": "error"}
+        )
+        == 1
+    )
+    assert metrics.sample("engine_judge_tokens", {"kind": "input"}) == 10
+    assert metrics.sample("engine_judge_tokens", {"kind": "output"}) == 5
+    assert metrics.sample("engine_judge_tokens", {"kind": "total"}) == 15
+    assert abs(metrics.sample("engine_judge_cost_usd") - 0.002) < 1e-9
+    assert (
+        metrics.sample(
+            "engine_judge_decisions",
+            {"tag": "exec_approval", "outcome": "allow", "enforced": "false"},
+        )
+        == 1
+    )
+    assert (
+        metrics.sample(
+            "engine_judge_request_duration_seconds_count",
+            {"tag": "exec_approval"},
+        )
+        == 1
+    )
+
+
+def test_from_config_sets_judge_model(tmp_path):
+    config = EngineConfig(judge_model="jev-1.13")
+    metrics = EngineMetrics.from_config(
+        config, session_id="s1", workspace=tmp_path
+    )
+    assert metrics.sample("engine_judge_info", {"model": "jev-1.13"}) == 1
