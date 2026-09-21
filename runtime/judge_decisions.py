@@ -273,12 +273,23 @@ def screen_questions() -> dict:
 def classify_screen(verdict) -> tuple[bool, bool]:
     """Returns (flagged, redact). `is_ordinary_source_code` is the
     false-positive brake: a hazard signal alone is not enough, since this
-    engine's own repo legitimately contains prompt strings and agent docs."""
+    engine's own repo legitimately contains prompt strings and agent docs.
+
+    `contains_instruction_to_agent` is deliberately excluded from the hazard
+    signal on its own: it fires just as readily on this engine's own
+    legitimate prompt text (directive by construction) as on an injected
+    one, and `is_ordinary_source_code` cannot rescue it -- a prompt is
+    definitionally not "ordinary source code with no embedded directive"
+    either way. Calibrated against the real API (tests/live/test_screen_live.py):
+    a classic injection scores ~0.99 on `attempts_override` /
+    `requests_secret_disclosure`, while this engine's own prompt-shaped text
+    scores only ~0.38 on `attempts_override` -- that gap, not
+    `contains_instruction_to_agent`, is what actually separates "hostile"
+    from "instructional but benign"."""
     if verdict is None:
         return False, False
     ordinary = verdict.noul("is_ordinary_source_code")
     hazard = max(
-        verdict.noul("contains_instruction_to_agent"),
         verdict.noul("attempts_override"),
         verdict.noul("requests_secret_disclosure"),
     )

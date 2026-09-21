@@ -241,7 +241,7 @@ def test_screen_content_windows_three_slices_when_huge():
 def test_classify_screen_multi_ors_hazard():
     verdict = FakeVerdict(
         nouls={
-            "mid_contains_instruction_to_agent": 0.9,
+            "mid_attempts_override": 0.9,
             "mid_is_ordinary_source_code": 0.0,
             "head_is_ordinary_source_code": 0.95,
             "tail_is_ordinary_source_code": 0.95,
@@ -250,6 +250,22 @@ def test_classify_screen_multi_ors_hazard():
     flagged, redact = classify_screen_multi(verdict)
     assert flagged is True
     assert redact is False
+
+
+def test_classify_screen_instruction_alone_is_not_enough():
+    """contains_instruction_to_agent fires on this engine's own prompt text
+    just as readily as on a real injection (calibrated against the live
+    API); only attempts_override / requests_secret_disclosure may drive a
+    flag on their own."""
+    verdict = FakeVerdict(
+        nouls={
+            "contains_instruction_to_agent": 0.91,
+            "attempts_override": 0.38,
+            "requests_secret_disclosure": 0.01,
+            "is_ordinary_source_code": 0.02,
+        }
+    )
+    assert classify_screen(verdict) == (False, False)
 
 
 def test_classify_screen_none_is_noop():
