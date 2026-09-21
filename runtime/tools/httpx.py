@@ -3,6 +3,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
+import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +13,9 @@ from runtime.tools.web import MAX_FETCH, USER_AGENT
 
 METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
 SAFE_METHODS = {"GET", "HEAD"}
+# Methods considered idempotent per HTTP semantics (safe to retry). OPTIONS is
+# idempotent but not among the methods this tool exposes; kept for clarity.
+IDEMPOTENT_METHODS = {"GET", "HEAD", "PUT", "DELETE", "OPTIONS"}
 OPENAPI_CAP = 80
 BODY_CAP = 50_000
 BLOCKED_HOSTS = {
@@ -18,21 +23,42 @@ BLOCKED_HOSTS = {
     "metadata.gce.internal",
     "169.254.169.254",
 }
+# Explicit redirect-hop cap. urllib's own default (max_redirections=10, plus a
+# max_repeats=4 same-url check) only raises an obscure HTTPError that our old
+# code mistook for a real response. We enforce our own, lower cap and raise a
+# plain URLError so raw_request() can turn it into "error: too many redirects".
+MAX_REDIRECTS = 5
+DEFAULT_MAX_RETRIES = 2
+RETRY_BACKOFF_BASE = 0.5
 
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirects = MAX_REDIRECTS
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        depth = getattr(req, "_safe_redirect_depth", 0) + 1
+        if depth > self.max_redirects:
+            raise urllib.error.URLError("too many redirects")
         parsed = urllib.parse.urlparse(newurl)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise urllib.error.URLError("redirect must be http or https")
         if blocked_host(parsed.netloc):
             raise urllib.error.URLError("blocked host")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            new_req._safe_redirect_depth = depth
+        return new_req
 
 
-def urlopen(request, timeout=20.0):
-    opener = urllib.request.build_opener(_SafeRedirect)
+def urlopen(request, timeout=20.0, max_redirects: int = MAX_REDIRECTS):
+    handler = _SafeRedirect()
+    handler.max_redirects = max_redirects
+    opener = urllib.request.build_opener(handler)
     return opener.open(request, timeout=timeout)
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
 
 
 def blocked_host(netloc: str) -> bool:
@@ -69,27 +95,35 @@ def _ip_blocked(ip: ipaddress._BaseAddress) -> bool:
     return bool(ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved)
 
 
-def raw_request(
+def _classify_url_error(exc: urllib.error.URLError) -> str:
+    """Turn a urllib URLError (which wraps the real cause in .reason) into a
+    specific "error: ..." message. Falls back to a generic connection error.
+    """
+    reason = exc.reason
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return f"error: TLS certificate verification failed: {reason}"
+    if isinstance(reason, ssl.SSLError):
+        return f"error: TLS error: {reason}"
+    if isinstance(reason, socket.gaierror):
+        return f"error: DNS resolution failed: {reason}"
+    if isinstance(reason, TimeoutError):
+        return "error: request timed out"
+    if isinstance(reason, ConnectionResetError):
+        return "error: connection reset"
+    if str(reason) == "too many redirects":
+        return "error: too many redirects"
+    return f"error: {reason}"
+
+
+def _do_request(
     method: str,
     url: str,
-    *,
-    headers: dict[str, str] | None = None,
-    body: bytes | None = None,
-    timeout: float = 20.0,
-    cap: int = MAX_FETCH,
+    hdrs: dict[str, str],
+    body: bytes | None,
+    timeout: float,
+    cap: int,
 ) -> tuple[int, dict[str, str], str, str]:
-    """Return (status, headers, text, error). error is set on failure."""
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        return 0, {}, "", "error: url must be http or https"
-    if blocked_host(parsed.netloc):
-        return 0, {}, "", "error: blocked host"
-    method = (method or "GET").upper()
-    if method not in METHODS:
-        return 0, {}, "", f"error: method must be one of {', '.join(METHODS)}"
-    hdrs = {"User-Agent": USER_AGENT}
-    if headers:
-        hdrs.update(headers)
+    """One attempt at the request. Returns (status, headers, text, error)."""
     request = urllib.request.Request(url, data=body, headers=hdrs, method=method)
     try:
         with urlopen(request, timeout=timeout) as response:
@@ -107,10 +141,18 @@ def raw_request(
         if len(raw) > cap:
             text += "\n...[truncated]"
         return status, resp_headers, text, ""
+    except ssl.SSLCertVerificationError as exc:
+        return 0, {}, "", f"error: TLS certificate verification failed: {exc}"
+    except ssl.SSLError as exc:
+        return 0, {}, "", f"error: TLS error: {exc}"
+    except socket.gaierror as exc:
+        return 0, {}, "", f"error: DNS resolution failed: {exc}"
+    except ConnectionResetError:
+        return 0, {}, "", "error: connection reset"
     except urllib.error.URLError as exc:
-        return 0, {}, "", f"error: {exc.reason}"
+        return 0, {}, "", _classify_url_error(exc)
     except TimeoutError:
-        return 0, {}, "", "error: fetch timed out"
+        return 0, {}, "", f"error: request timed out after {timeout:g}s"
     except OSError as exc:
         return 0, {}, "", f"error: {exc}"
     truncated = len(raw) > cap
@@ -118,6 +160,59 @@ def raw_request(
     if truncated:
         text += "\n...[truncated]"
     return status, resp_headers, text, ""
+
+
+def raw_request(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+    timeout: float = 20.0,
+    cap: int = MAX_FETCH,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    sleep_fn=None,
+) -> tuple[int, dict[str, str], str, str]:
+    """Return (status, headers, text, error). error is set on failure.
+
+    Transient failures (timeouts and 5xx responses) are retried with
+    exponential backoff, but only for idempotent methods (see
+    IDEMPOTENT_METHODS). 4xx responses and non-idempotent methods (e.g. POST,
+    PATCH) are never retried.
+
+    Note: timeout is a single value applied by urllib to the whole request
+    (connect + read combined); stdlib urllib does not support splitting
+    connect-timeout from read-timeout, so both are governed by this one
+    knob.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return 0, {}, "", "error: url must be http or https"
+    if blocked_host(parsed.netloc):
+        return 0, {}, "", "error: blocked host"
+    method = (method or "GET").upper()
+    if method not in METHODS:
+        return 0, {}, "", f"error: method must be one of {', '.join(METHODS)}"
+    hdrs = {"User-Agent": USER_AGENT}
+    if headers:
+        hdrs.update(headers)
+    sleep = sleep_fn or _sleep
+    retryable = method in IDEMPOTENT_METHODS
+    attempts = max(1, max_retries + 1) if retryable else 1
+
+    status = 0
+    resp_headers: dict[str, str] = {}
+    text = ""
+    err = ""
+    for attempt in range(attempts):
+        status, resp_headers, text, err = _do_request(method, url, hdrs, body, timeout, cap)
+        is_timeout = err.startswith("error: request timed out") or err == "error: fetch timed out"
+        is_server_error = not err and status >= 500
+        transient = retryable and (is_timeout or is_server_error)
+        if not transient or attempt == attempts - 1:
+            break
+        sleep(RETRY_BACKOFF_BASE * (2**attempt))
+    return status, resp_headers, text, err
 
 
 def get_json(url: str, *, timeout: float = 20.0, headers: dict[str, str] | None = None):
@@ -170,6 +265,7 @@ def http_request(
     headers: str = "",
     body: str = "",
     timeout: float = 20.0,
+    max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> str:
     parsed_headers, herr = _parse_headers(headers)
     if herr:
@@ -182,6 +278,7 @@ def http_request(
         body=data,
         timeout=float(timeout or 20.0),
         cap=BODY_CAP,
+        max_retries=max_retries,
     )
     if err:
         return err

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import socket
+import urllib.error
 from types import SimpleNamespace
 from unittest import mock
 
@@ -190,9 +191,10 @@ class TestRawRequest:
             raise TimeoutError("timed out")
         
         monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: None)
         status, hdrs, text, err = raw_request("GET", "https://example.com")
         assert status == 0
-        assert err == "error: fetch timed out"
+        assert err.startswith("error: request timed out after")
 
     def test_raw_request_urlerror(self, monkeypatch):
         """Test URLError handling."""
@@ -246,6 +248,7 @@ class TestRawRequest:
             "https://example.com", 500, "Server Error", {}, BytesIO(b"error body")
         )
         monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: None)
         status, hdrs, text, err = raw_request("GET", "https://example.com")
         assert status == 500
 
@@ -767,3 +770,204 @@ paths:
             assert "/users" in paths
         else:
             assert isinstance(result, str)
+
+
+class TestHardening:
+    """Tests for timeout/TLS/redirect/retry hardening in raw_request."""
+
+    def test_connect_timeout_clear_message(self, monkeypatch):
+        """A TimeoutError from urlopen becomes a clear, non-retried-forever message."""
+
+        def fake_urlopen(*args, **kwargs):
+            raise TimeoutError("timed out")
+
+        sleeps = []
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda s: sleeps.append(s))
+        status, hdrs, text, err = raw_request("GET", "https://example.com", timeout=5.0)
+        assert status == 0
+        assert err == "error: request timed out after 5s"
+        # GET is idempotent, so it should have retried (DEFAULT_MAX_RETRIES) times.
+        assert len(sleeps) == http_impl.DEFAULT_MAX_RETRIES
+
+    def test_tls_cert_error_message(self, monkeypatch):
+        """ssl.SSLCertVerificationError raised directly by urlopen is distinguishable."""
+        import ssl
+
+        def fake_urlopen(*args, **kwargs):
+            raise ssl.SSLCertVerificationError(
+                1, "certificate verify failed: self signed certificate"
+            )
+
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: None)
+        status, hdrs, text, err = raw_request("GET", "https://example.com")
+        assert status == 0
+        assert err.startswith("error: TLS certificate verification failed:")
+
+    def test_tls_cert_error_wrapped_in_urlerror(self, monkeypatch):
+        """urllib often wraps the SSL error inside URLError.reason."""
+        import ssl
+
+        def fake_urlopen(*args, **kwargs):
+            raise urllib.error.URLError(
+                ssl.SSLCertVerificationError(1, "certificate verify failed")
+            )
+
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: None)
+        status, hdrs, text, err = raw_request("GET", "https://example.com")
+        assert status == 0
+        assert err.startswith("error: TLS certificate verification failed:")
+
+    def test_redirect_loop_detected(self, monkeypatch):
+        """Too many redirects surfaces a clear message, not a raw urllib exception."""
+
+        def fake_urlopen(*args, **kwargs):
+            raise urllib.error.URLError("too many redirects")
+
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: None)
+        status, hdrs, text, err = raw_request("GET", "https://example.com")
+        assert status == 0
+        assert err == "error: too many redirects"
+
+    def test_dns_failure_message(self, monkeypatch):
+        """socket.gaierror wrapped by URLError becomes a DNS-specific message."""
+
+        def fake_urlopen(*args, **kwargs):
+            raise urllib.error.URLError(socket.gaierror("nodename nor servname provided"))
+
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: None)
+        status, hdrs, text, err = raw_request("GET", "https://example.com")
+        assert status == 0
+        assert err.startswith("error: DNS resolution failed:")
+
+    def test_dns_failure_direct_gaierror(self, monkeypatch):
+        """socket.gaierror raised directly (not wrapped) is also handled."""
+
+        def fake_urlopen(*args, **kwargs):
+            raise socket.gaierror("nodename nor servname provided")
+
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: None)
+        status, hdrs, text, err = raw_request("GET", "https://example.com")
+        assert status == 0
+        assert err.startswith("error: DNS resolution failed:")
+
+    def test_connection_reset_message(self, monkeypatch):
+        """ConnectionResetError gets a distinguishable message."""
+
+        def fake_urlopen(*args, **kwargs):
+            raise ConnectionResetError("connection reset by peer")
+
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: None)
+        status, hdrs, text, err = raw_request("GET", "https://example.com")
+        assert status == 0
+        assert err == "error: connection reset"
+
+    def test_retry_then_succeed_on_5xx(self, monkeypatch):
+        """A transient 5xx on a GET is retried and can succeed on a later attempt."""
+        from contextlib import contextmanager
+
+        calls = {"n": 0}
+
+        def fake_urlopen(request, timeout=20.0, **kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise urllib.error.HTTPError(
+                    "https://example.com", 503, "Service Unavailable", {}, mock.MagicMock(read=lambda *a: b"")
+                )
+
+            @contextmanager
+            def ok():
+                resp = SimpleNamespace(status=200, headers={}, read=lambda cap: b"ok")
+                yield resp
+
+            return ok()
+
+        sleeps = []
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda s: sleeps.append(s))
+        status, hdrs, text, err = raw_request("GET", "https://example.com", max_retries=3)
+        assert status == 200
+        assert text == "ok"
+        assert err == ""
+        assert calls["n"] == 3
+        assert len(sleeps) == 2
+        # exponential backoff: base * 2**0, base * 2**1
+        assert sleeps == [
+            http_impl.RETRY_BACKOFF_BASE * 1,
+            http_impl.RETRY_BACKOFF_BASE * 2,
+        ]
+
+    def test_no_retry_on_4xx(self, monkeypatch):
+        """4xx client errors are not retried, even for idempotent methods."""
+        from io import BytesIO
+
+        calls = {"n": 0}
+
+        def fake_urlopen(*args, **kwargs):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(
+                "https://example.com", 404, "Not Found", {}, BytesIO(b"missing")
+            )
+
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("should not sleep/retry on 4xx")
+        ))
+        status, hdrs, text, err = raw_request("GET", "https://example.com")
+        assert status == 404
+        assert calls["n"] == 1
+
+    def test_no_retry_on_non_idempotent_post(self, monkeypatch):
+        """POST (non-idempotent) is never retried, even on a transient 503."""
+        calls = {"n": 0}
+
+        def fake_urlopen(*args, **kwargs):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(
+                "https://example.com", 503, "Service Unavailable", {}, mock.MagicMock(read=lambda *a: b"")
+            )
+
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("should not sleep/retry on POST")
+        ))
+        status, hdrs, text, err = raw_request("POST", "https://example.com", body=b"{}")
+        assert status == 503
+        assert calls["n"] == 1
+
+    def test_no_retry_on_timeout_for_post(self, monkeypatch):
+        """POST is not retried on timeouts either."""
+        calls = {"n": 0}
+
+        def fake_urlopen(*args, **kwargs):
+            calls["n"] += 1
+            raise TimeoutError("timed out")
+
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("should not sleep/retry on POST timeout")
+        ))
+        status, hdrs, text, err = raw_request("POST", "https://example.com", body=b"{}")
+        assert status == 0
+        assert err.startswith("error: request timed out after")
+        assert calls["n"] == 1
+
+    def test_exhausts_retries_and_returns_last_error(self, monkeypatch):
+        """If every attempt fails transiently, the final error is returned."""
+
+        def fake_urlopen(*args, **kwargs):
+            raise TimeoutError("timed out")
+
+        sleeps = []
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda s: sleeps.append(s))
+        status, hdrs, text, err = raw_request("GET", "https://example.com", max_retries=1)
+        assert status == 0
+        assert err.startswith("error: request timed out after")
+        assert len(sleeps) == 1
