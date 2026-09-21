@@ -13,6 +13,7 @@ from agents.resolver import (
     Resolution,
     classify_turn,
     extract_keywords,
+    memory_keywords,
     resolve_locate,
 )
 from tests.conftest import FakeJudge, FakeVerdict
@@ -47,6 +48,27 @@ def test_extract_keywords_deduplicates_and_caps_length():
 def test_extract_keywords_empty_message():
     assert extract_keywords("") == []
     assert extract_keywords("the is a") == []
+
+
+def test_extract_keywords_unions_extra_aliases():
+    keywords = extract_keywords("how does auth work?", extra=["authenticate", "login"])
+    assert "auth" in keywords
+    assert "authenticate" in keywords
+
+
+def test_memory_keywords_unions_overlapping_file_notes(tmp_path):
+    from runtime.store.memory import remember
+
+    (tmp_path / "auth.py").write_text("def authenticate():\n    pass\n")
+    remember(
+        tmp_path,
+        "files",
+        path="auth.py",
+        purpose="login authenticate helper",
+        entry_points="authenticate",
+    )
+    extras = memory_keywords(tmp_path, "how does auth work?")
+    assert "authenticate" in extras
 
 
 # ---------------------------------------------------------------------
@@ -193,7 +215,7 @@ def test_resolve_locate_low_rank_confidence_returns_none(tmp_path):
 
 
 @needs_rg
-def test_resolve_locate_answers_gate_rejects_insufficient_context(tmp_path):
+def test_resolve_locate_answers_gate_soft_seeds_insufficient_context(tmp_path):
     _seed_workspace(tmp_path)
     judge = FakeJudge()
     judge.responses["search_rerank"] = FakeVerdict(
@@ -201,7 +223,10 @@ def test_resolve_locate_answers_gate_rejects_insufficient_context(tmp_path):
     )
     judge.responses["intent_route"] = FakeVerdict(nouls={"answers_message": 0.1})
     result = asyncio.run(resolve_locate(tmp_path, judge, "retry backoff logic"))
-    assert result is None
+    assert isinstance(result, Resolution)
+    assert result.complete is False
+    assert result.context
+    assert result.trace
 
 
 @needs_rg
@@ -216,6 +241,7 @@ def test_resolve_locate_success_returns_resolution_with_trace(tmp_path):
     result = asyncio.run(resolve_locate(tmp_path, judge, "retry backoff logic"))
 
     assert isinstance(result, Resolution)
+    assert result.complete is True
     assert result.context
     assert result.trace
     assert result.trace[0].name == "search"

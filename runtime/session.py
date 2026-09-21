@@ -341,6 +341,8 @@ class EngineSession:
                 latency_ms=classified.latency_ms,
             )
         if not enforced:
+            # Advisory: classify and emit, but do not run the locate
+            # resolver (rg + rank + two reads) just to change nothing.
             return None
         if classified.route == "ambiguous":
             return await self._route_ambiguous(text)
@@ -373,12 +375,24 @@ class EngineSession:
         return await self._loop.run(combined)
 
     async def _route_locate(self, text: str) -> str | None:
+        from agents.orchestrator import Orchestrator
         from agents.resolver import resolve_locate
 
         resolution = await resolve_locate(self._workspace, self._judge, text)
         if resolution is None:
             return None
-        return await self._loop.run_with_context(text, resolution)
+        orch = self._loop
+        if not isinstance(orch, Orchestrator):
+            if resolution.complete:
+                return await orch.run_with_context(text, resolution)
+            return None
+        if resolution.complete:
+            return await orch.spawn("ask", text, resolution=resolution)
+        task = (
+            f"{text}\n\nGathered context (continue investigating; "
+            f"do not rediscover from zero):\n{resolution.context}"
+        )
+        return await orch.spawn("ask", task)
 
     async def _handle_meta_action(self, meta_action: str) -> str | None:
         ctx = getattr(self._loop, "_ctx", None)
@@ -794,6 +808,22 @@ class EngineSession:
     ) -> None:
         if self._metrics is not None:
             self._metrics.observe_judge_decision(tag, outcome, enforced)
+        try:
+            from runtime.store.judgements import record as record_judgement
+
+            record_judgement(
+                self._db_path,
+                session_id=self._state.session_id or "",
+                tag=tag,
+                subject=subject,
+                outcome=outcome,
+                signals=signals,
+                enforced=enforced,
+                latency_ms=latency_ms,
+                agent_id=agent_id,
+            )
+        except Exception:  # noqa: BLE001 — journal must never break a turn
+            pass
         self._emit(
             JudgementMade(
                 tag=tag,

@@ -776,7 +776,7 @@ current disk hash does not match the hash stored with the note.
 | `ENGINE_METRICS_INSTANCE` | (session id) | Pushgateway grouping key `instance`. Set to a stable name (e.g. `baseline`) when comparing runs. |
 | `ENGINE_METRICS_PUSH_INTERVAL_S` | `2` | Debounce between pushes; turn end, agent finish, and session close always flush. |
 | `TYPESAFE_API_KEY` | — | Enables the judge (see below). `TYPESAFE_JEV_API_KEY` is accepted as an alias. Placeholder values (`...`, `your-key`, `changeme`) are treated as unset, same as `OPENROUTER_API_KEY`. |
-| `ENGINE_JUDGE` | `advisory` | `off`, `advisory`, or `enforcing`. `advisory` emits `JudgementMade` and logs but never changes behaviour. |
+| `ENGINE_JUDGE` | `advisory` | `off`, `advisory`, `calibrated`, or `enforcing`. `advisory` emits events only. `calibrated` is the recommended one-line profile: enforce exec / search / screen / intent, plus write (secret-block only — see below); merge stays advisory. |
 | `ENGINE_JUDGE_MODEL` | `jev-latest` | TypeSafe model string. |
 | `ENGINE_JUDGE_TIMEOUT_MS` | `800` | Hard per-call ceiling; a slow judge degrades to no opinion, not a slow turn. |
 | `ENGINE_JUDGE_CACHE_SIZE` | `512` | LRU entries keyed by a hash of state + questions. |
@@ -804,8 +804,9 @@ One API (`typesafe-sdk`, model `jev-latest`) at a handful of choke points:
 `run_command` approval, tool-call verification, search re-ranking,
 tool-result screening for prompt injection, compaction-by-relevance,
 post-write diagnostics triage, loop progress control, intent routing
-(a "locate" turn can resolve via search + rerank alone, skipping the full
-agent loop; see `agents/resolver.py`), a semantic write gate, and a
+(a "locate" turn can resolve via search + rerank and seed `ask` with
+`run_with_context`, never the orchestrator's own history; see
+`agents/resolver.py`), a semantic write gate, and a
 subagent merge gate (scores a subagent's result — drop / summarize / admit
 in full — before it re-enters the orchestrator's context; see
 `Orchestrator._apply_merge_gate`). TypeSafe is a fast
@@ -831,13 +832,16 @@ caution: it always runs its judge call *before* `_apply_sync`'s synchronous
 prepare-then-commit, never between the staleness check and the atomic
 replace, so a slow or concurrent judge call can never reopen the
 write-modify-write race (`tests/test_concurrency.py` exercises this with a
-judge that actively yields mid-call). It also never inherits a blanket
+judge that actively yields mid-call). It also never inherits a *blanket*
 `ENGINE_JUDGE=enforcing` set for other sites — only an explicit
-`ENGINE_JUDGE_WRITE=enforcing` lets it block, and even then only on a
-detected hardcoded secret; every other signal (scope creep, deletes
-unrelated code, a disabled test, a weak intent match) only ever adds a
+`ENGINE_JUDGE_WRITE=enforcing` lets it block there. The curated
+`ENGINE_JUDGE=calibrated` profile is the one exception: it sets write to
+enforcing itself, since the write gate can only ever block on a detected
+hardcoded secret — every other signal (scope creep, deletes unrelated
+code, a disabled test, a weak intent match) only ever adds a
 `[engine: judge flagged this diff -- ...]` note to the result, never a
-refusal.
+refusal. Set `ENGINE_JUDGE_WRITE=advisory` to opt back out under
+`calibrated`.
 
 Every judged decision emits a `JudgementMade` event (`tag`, `subject`,
 `outcome`, `signals`, `enforced`, `latency_ms`) so a blocked or escalated
@@ -870,8 +874,8 @@ instead of its full transcript.
 To exercise the live call sites from `dummy_client.py`:
 
 1. Put a real TypeSafe key in `env.sh` as `TYPESAFE_API_KEY` or
-   `TYPESAFE_JEV_API_KEY`, and set `ENGINE_JUDGE=enforcing` (or leave the
-   default `advisory` if you only want events, not behaviour change).
+   `TYPESAFE_JEV_API_KEY`, and set `ENGINE_JUDGE=calibrated` (or
+   `enforcing`; leave the default `advisory` if you only want events).
 2. `python app.py` — confirm the startup line is not `judge: off`.
 3. `python dummy_client.py` and send one of:
 

@@ -91,6 +91,30 @@ def test_invalid_approval_still_gets_judged_default_when_usable(monkeypatch, tmp
     assert any("ENGINE_EXEC_APPROVAL" in item for item in config.warnings)
 
 
+def test_explicit_exec_approval_with_judge_enabled_warns(monkeypatch, tmp_path):
+    # ENGINE_JUDGE=calibrated enables the exec judge, but run_command only
+    # consults it when exec_approval is literally "judged" -- an explicit
+    # ENGINE_EXEC_APPROVAL=always silently means no exec judge ever runs.
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    monkeypatch.setenv("ENGINE_JUDGE", "calibrated")
+    monkeypatch.setenv("ENGINE_EXEC_APPROVAL", "always")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.exec_approval == "always"
+    assert any(
+        "ENGINE_EXEC_APPROVAL" in item and "exec judge" in item
+        for item in config.warnings
+    )
+
+
+def test_explicit_judged_approval_does_not_warn(monkeypatch, tmp_path):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    monkeypatch.setenv("ENGINE_JUDGE", "calibrated")
+    monkeypatch.setenv("ENGINE_EXEC_APPROVAL", "judged")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.exec_approval == "judged"
+    assert not any("exec judge" in item for item in config.warnings)
+
+
 def test_from_env_twice_idempotent(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "real-key")
     (tmp_path / "env.sh").write_text("export OPENROUTER_API_KEY=from-file\n")
@@ -196,6 +220,34 @@ def test_model_cheap_and_strong_read_from_env(monkeypatch, tmp_path):
     config = EngineConfig.from_env(tmp_path)
     assert config.model_cheap == "openai/gpt-4o-mini"
     assert config.model_strong == "anthropic/claude-opus"
+
+
+def test_calibrated_profile_enforces_read_sites_and_write_secrets(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    monkeypatch.setenv("ENGINE_JUDGE", "calibrated")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode == "calibrated"
+    assert config.judge_mode_for("exec") == "enforcing"
+    assert config.judge_mode_for("search") == "enforcing"
+    assert config.judge_mode_for("screen") == "enforcing"
+    assert config.judge_mode_for("intent") == "enforcing"
+    # The write gate can only ever block on introduces_hardcoded_secret, so
+    # the recommended calibrated profile enforces it too -- unlike a blanket
+    # ENGINE_JUDGE=enforcing, which still requires an explicit opt-in (see
+    # test_write_gate_never_silently_inherits_global_enforcing below).
+    assert config.judge_mode_for("write") == "enforcing"
+    assert config.judge_mode_for("merge") == "advisory"
+    assert config.judge_usable is True
+
+
+def test_calibrated_site_override_still_wins(monkeypatch, tmp_path):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
+    monkeypatch.setenv("ENGINE_JUDGE", "calibrated")
+    monkeypatch.setenv("ENGINE_JUDGE_WRITE", "advisory")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("write") == "advisory"
 
 
 def test_write_gate_never_silently_inherits_global_enforcing(monkeypatch, tmp_path):

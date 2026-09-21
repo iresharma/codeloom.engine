@@ -454,7 +454,13 @@ class Orchestrator(AgentLoop):
             self._batch_name = ""
             self._inbox_turn = False
 
-    async def spawn(self, profile_name: str, task: str, continue_from: str = "") -> str:
+    async def spawn(
+        self,
+        profile_name: str,
+        task: str,
+        continue_from: str = "",
+        resolution=None,
+    ) -> str:
         try:
             profile = self._profiles.get(profile_name)
         except KeyError:
@@ -544,7 +550,15 @@ class Orchestrator(AgentLoop):
             child = self._make_subagent(profile, agent_id, child_workspace, bool(worktree))
             self._children[agent_id] = child
             run_task = asyncio.get_running_loop().create_task(
-                self._run_child(agent_id, profile, child, task, worktree, branch)
+                self._run_child(
+                    agent_id,
+                    profile,
+                    child,
+                    task,
+                    worktree,
+                    branch,
+                    resolution=resolution,
+                )
             )
             self._child_tasks[agent_id] = run_task
         except Exception as exc:  # noqa: BLE001
@@ -583,12 +597,16 @@ class Orchestrator(AgentLoop):
         task: str,
         worktree: str,
         branch: str,
+        resolution=None,
     ) -> None:
         status = "ok"
         outcome = ""
         try:
             child.set_catalog_query(task)
-            text = await child.run(task)
+            if resolution is not None and getattr(resolution, "complete", True):
+                text = await child.run_with_context(task, resolution)
+            else:
+                text = await child.run(task)
             status = _child_run_status(child)
             outcome = text
         except asyncio.CancelledError:

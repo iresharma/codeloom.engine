@@ -10,12 +10,17 @@ from __future__ import annotations
 import pytest
 
 from runtime.judge_decisions import (
+    SCREEN_MULTI_SLICE_FLOOR,
+    SCREEN_WINDOW,
     classify_exec,
     classify_intent,
     classify_merge,
     classify_meta_action,
+    classify_screen,
+    classify_screen_multi,
     classify_write,
     legacy_exec_policy,
+    screen_content_windows,
 )
 from tests.conftest import FakeVerdict
 
@@ -98,6 +103,14 @@ CASES = [
         FakeVerdict(nouls={"matches_user_request": 0.9}),
         "prompt",
         id="unremarkable-command-still-prompts-by-default",
+    ),
+    pytest.param(
+        FakeVerdict(
+            nouls={"is_read_only": 0.9, "touches_network": 0.9},
+            scores={"blast_radius": 0.1},
+        ),
+        "prompt",
+        id="read-only-but-touches-network-does-not-allow",
     ),
 ]
 
@@ -204,6 +217,44 @@ def test_classify_meta_action_confident_action():
 # ---------------------------------------------------------------------
 # Phase 7: classify_write -- only introduces_hardcoded_secret ever blocks
 # ---------------------------------------------------------------------
+
+
+def test_screen_content_windows_small_is_whole():
+    text = "abc"
+    assert screen_content_windows(text) == [text]
+
+
+def test_screen_content_windows_head_and_tail():
+    text = "H" * (SCREEN_WINDOW + 100) + "TAILMARK"
+    windows = screen_content_windows(text)
+    assert len(windows) == 1
+    assert "TAILMARK" in windows[0]
+    assert windows[0].startswith("H")
+
+
+def test_screen_content_windows_three_slices_when_huge():
+    text = "A" * (SCREEN_MULTI_SLICE_FLOOR + 100) + "MID" + "Z" * 100
+    windows = screen_content_windows(text)
+    assert len(windows) == 3
+
+
+def test_classify_screen_multi_ors_hazard():
+    verdict = FakeVerdict(
+        nouls={
+            "mid_contains_instruction_to_agent": 0.9,
+            "mid_is_ordinary_source_code": 0.0,
+            "head_is_ordinary_source_code": 0.95,
+            "tail_is_ordinary_source_code": 0.95,
+        }
+    )
+    flagged, redact = classify_screen_multi(verdict)
+    assert flagged is True
+    assert redact is False
+
+
+def test_classify_screen_none_is_noop():
+    assert classify_screen(None) == (False, False)
+    assert classify_screen_multi(None) == (False, False)
 
 
 def test_classify_write_none_verdict_allows():

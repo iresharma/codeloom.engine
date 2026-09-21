@@ -60,8 +60,10 @@ STOPWORDS = frozenset(
 )
 
 MAX_KEYWORDS = 8
+MIN_KEYWORDS = 2
 CONTEXT_WINDOW_LINES = 40
 MAX_FILES_READ = 2
+_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 
 
 @dataclass
@@ -75,6 +77,10 @@ class ToolCallRecord:
 class Resolution:
     context: str
     trace: list[ToolCallRecord] = field(default_factory=list)
+    # True: answers-check passed -- seed ask via run_with_context.
+    # False: rerank gathered context but the check failed -- spawn ask
+    # with the windows in the task string (soft-seed), not fake history.
+    complete: bool = True
 
 
 @dataclass
@@ -111,14 +117,69 @@ async def classify_turn(judge, message: str) -> ClassifiedTurn | None:
     )
 
 
-def extract_keywords(message: str) -> list[str]:
-    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", message or "")
+def extract_keywords(message: str, extra: list[str] | None = None) -> list[str]:
+    tokens = _TOKEN.findall(message or "")
     seen: list[str] = []
-    for token in tokens:
+    for token in list(tokens) + list(extra or []):
         if token.lower() in STOPWORDS or token in seen:
             continue
         seen.append(token)
     return seen[:MAX_KEYWORDS]
+
+
+def _tokens_overlap(left: str, right: str) -> bool:
+    a, b = left.lower(), right.lower()
+    if a == b:
+        return True
+    if len(a) < 3 or len(b) < 3:
+        return False
+    return a in b or b in a
+
+
+def memory_keywords(workspace: Path, message: str) -> list[str]:
+    """Deterministic aliases from workspace memory -- not a JEV query.
+
+    If a file-note path/purpose/entry_points token overlaps a message
+    token (substring, min 3 chars), union that note's identifier tokens.
+    """
+    try:
+        from runtime.store.memory import load
+        data = load(workspace)
+    except OSError:
+        return []
+    files = data.get("files") or {}
+    message_tokens = [
+        token
+        for token in _TOKEN.findall(message or "")
+        if token.lower() not in STOPWORDS
+    ]
+    if not message_tokens:
+        return []
+    extras: list[str] = []
+    for rel, entry in files.items():
+        if not isinstance(entry, dict):
+            continue
+        hay = " ".join(
+            [
+                Path(rel).stem,
+                str(entry.get("purpose") or ""),
+                str(entry.get("entry_points") or ""),
+                str(entry.get("note") or ""),
+            ]
+        )
+        hay_tokens = [
+            token
+            for token in _TOKEN.findall(hay)
+            if token.lower() not in STOPWORDS
+        ]
+        if not any(
+            _tokens_overlap(msg, note) for msg in message_tokens for note in hay_tokens
+        ):
+            continue
+        for token in hay_tokens:
+            if token not in extras:
+                extras.append(token)
+    return extras
 
 
 def _parse_candidate(line: str) -> tuple[str, int] | None:
@@ -140,8 +201,9 @@ async def resolve_locate(workspace: Path, judge, message: str) -> Resolution | N
     this makes the resolver purely additive."""
     if judge is None or not getattr(judge, "enabled", False):
         return None
-    keywords = extract_keywords(message)
-    if not keywords:
+    extras = memory_keywords(workspace, message)
+    keywords = extract_keywords(message, extra=extras)
+    if len(keywords) < MIN_KEYWORDS:
         return None
     pattern = "|".join(re.escape(word) for word in keywords)
     try:
@@ -187,6 +249,5 @@ async def resolve_locate(workspace: Path, judge, message: str) -> Resolution | N
     )
     if answers_verdict is None:
         return None
-    if answers_verdict.noul("answers_message") < RESOLVER_ANSWERS_MESSAGE_FLOOR:
-        return None
-    return Resolution(context=context, trace=trace)
+    complete = answers_verdict.noul("answers_message") >= RESOLVER_ANSWERS_MESSAGE_FLOOR
+    return Resolution(context=context, trace=trace, complete=complete)

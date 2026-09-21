@@ -434,6 +434,7 @@ class McpManager:
         approval = self.approval
         if ctx is not None and ctx.config is not None:
             approval = getattr(ctx.config, "exec_approval", approval) or approval
+        approval = str(approval).strip().lower()
         if approval == "never":
             return ""
         ask = self.ask_user
@@ -443,8 +444,9 @@ class McpManager:
             if approval == "always":
                 return "error: user denied"
             return ""
-        if approval not in {"always", "auto"}:
-            return ""
+        # Unknown values (e.g. "judged", which the shell/GH/HTTP call sites
+        # resolve before reaching here) prompt, same as auto/always -- do
+        # not fail open just because the value isn't one we recognize.
         answer = await ask(
             f"Allow MCP tool {server}.{remote_name}?",
             kind="confirm",

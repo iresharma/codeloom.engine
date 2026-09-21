@@ -8,7 +8,26 @@ from llm.openrouter import load_env_sh
 
 EXEC_APPROVALS = ("auto", "always", "never", "judged")
 TURN_CONTINUES = ("prompt", "never")
-JUDGE_MODES = ("off", "advisory", "enforcing")
+JUDGE_MODES = ("off", "advisory", "calibrated", "enforcing")
+# Recommended production profile: enforce the calibrated read/exec sites,
+# keep write + merge advisory. Per-site ENGINE_JUDGE_* still wins.
+CALIBRATED_SITE_MODES = {
+    "exec": "enforcing",
+    "tools": "advisory",
+    "search": "enforcing",
+    "screen": "enforcing",
+    "compaction": "advisory",
+    "diagnostics": "advisory",
+    "loop": "advisory",
+    "intent": "enforcing",
+    # classify_write can only ever block on introduces_hardcoded_secret
+    # (Stage 2 of docs/impl-plans/jev-exp-1.md's rollout discipline) --
+    # nothing else in the write gate can escalate past "flag". Enforcing it
+    # here means the recommended one-line profile actually blocks a
+    # hardcoded secret instead of silently writing it to disk with a note.
+    "write": "enforcing",
+    "merge": "advisory",
+}
 TYPESAFE_PLACEHOLDERS = {"", "...", "your-key", "changeme"}
 JUDGE_SITES = (
     "exec",
@@ -74,15 +93,21 @@ class EngineConfig:
 
     def judge_mode_for(self, site: str) -> str:
         """Effective judge mode for a call site: its own override, or the
-        global default -- except "write" (Phase 7's semantic write gate),
-        which the plan says to "ship last, ship advisory": it never
-        silently inherits a blanket ENGINE_JUDGE=enforcing set for other
-        sites, only an explicit ENGINE_JUDGE_WRITE=enforcing opts it in."""
+        global default -- except "write" (Phase 7's semantic write gate)
+        under a *blanket* ENGINE_JUDGE=enforcing, which never silently
+        inherits that: only an explicit ENGINE_JUDGE_WRITE=enforcing opts
+        it in there. The curated `calibrated` profile is deliberately
+        exempt from that carve-out -- CALIBRATED_SITE_MODES sets write to
+        "enforcing" itself, since the write gate can only ever block on a
+        hardcoded secret (nothing else escalates past "flag"), so the
+        recommended one-line profile should not silently skip it."""
         override = getattr(self, f"judge_mode_{site}", "")
         if override:
             return override
         if site == "write" and self.judge_mode == "enforcing":
             return "advisory"
+        if self.judge_mode == "calibrated":
+            return CALIBRATED_SITE_MODES.get(site, "advisory")
         return self.judge_mode
 
     @property
@@ -153,14 +178,14 @@ class EngineConfig:
         judge_mode = (raw_judge_mode or "").strip().lower()
         if judge_mode not in JUDGE_MODES:
             warnings.append(
-                f"ENGINE_JUDGE={raw_judge_mode!r} is not off|advisory|enforcing; "
-                "using advisory"
+                f"ENGINE_JUDGE={raw_judge_mode!r} is not "
+                "off|advisory|calibrated|enforcing; using advisory"
             )
             judge_mode = "advisory"
         config.judge_mode = judge_mode
-        if judge_mode == "enforcing" and not config.typesafe_api_key:
+        if judge_mode in {"enforcing", "calibrated"} and not config.typesafe_api_key:
             warnings.append(
-                "ENGINE_JUDGE=enforcing but no TypeSafe API key is set "
+                f"ENGINE_JUDGE={judge_mode} but no TypeSafe API key is set "
                 "(TYPESAFE_API_KEY or TYPESAFE_JEV_API_KEY); the judge is off"
             )
         config.judge_model = (
@@ -200,6 +225,22 @@ class EngineConfig:
             approval_set = False
         if not approval_set and config.judge_usable and config.judge_mode_for("exec") != "off":
             approval = "judged"
+        elif (
+            approval_set
+            and approval != "judged"
+            and config.judge_usable
+            and config.judge_mode_for("exec") != "off"
+        ):
+            # A dual-knob footgun: ENGINE_JUDGE(_EXEC) turns the exec judge
+            # on, but run_command only ever consults it when exec_approval
+            # is literally "judged" (tools/shell.py). An explicit
+            # auto/always/never here silently means no exec judge at all,
+            # despite the judge config suggesting otherwise.
+            warnings.append(
+                f"exec judge is enabled (mode={config.judge_mode_for('exec')!r}) but "
+                f"ENGINE_EXEC_APPROVAL={approval!r} is explicit, so run_command never "
+                "consults it; unset ENGINE_EXEC_APPROVAL or set it to 'judged' to use it"
+            )
         config.exec_approval = approval
         raw_continue = os.environ.get("ENGINE_TURN_CONTINUE", config.turn_continue)
         continue_mode = (raw_continue or "").strip().lower()
@@ -251,7 +292,7 @@ def _env_judge_site(name: str, warnings: list[str]) -> str:
     value = (raw or "").strip().lower()
     if value == "":
         return ""
-    if value not in JUDGE_MODES:
+    if value not in ("off", "advisory", "enforcing"):
         warnings.append(
             f"{name}={raw!r} is not off|advisory|enforcing; ignoring override"
         )

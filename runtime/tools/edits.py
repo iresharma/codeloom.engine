@@ -785,11 +785,20 @@ def _preview_diff(ctx: ToolContext, path: str, mutate: Callable[[FileSource], st
     into the actual commit -- `_apply_sync` below redoes `_prepare` fresh,
     staleness check included, in one uninterrupted synchronous call. This
     is what keeps invariant 5 intact: the only `await` (the judge call) sits
-    entirely before any real staleness check or write, never between one."""
+    entirely before any real staleness check or write, never between one.
+
+    `_prepare(creating=True)` mkdirs missing parent directories for real
+    (`_ensure_parents`) so it can synthesize a source to diff against. Since
+    this call is thrown away regardless of outcome, prune anything it
+    created immediately -- otherwise a preview whose real commit never
+    happens (blocked by the gate, or fails) leaves empty directories behind
+    as a side effect of a call that was never supposed to touch disk."""
     try:
         prepared = _prepare(ctx, path, mutate, creating=creating)
     except (EditError, WorkspacePathError, FileNotFoundError, OSError, ValueError):
         return None
+    for directory in reversed(prepared.created_dirs):
+        _rmdir_if_empty(ctx.workspace / directory)
     if prepared.noop:
         return ""
     return prepared.diff
@@ -820,6 +829,7 @@ async def _judge_write_gate(
         return None, ""
     from runtime.judge_decisions import (
         classify_write,
+        write_diff_window,
         write_gate_questions,
         write_signals,
     )
@@ -828,7 +838,7 @@ async def _judge_write_gate(
         {
             "user_request": getattr(ctx, "user_request", ""),
             "path": path,
-            "diff": diff[:8000],
+            "diff": write_diff_window(diff),
             "tool": tool_name,
         },
         write_gate_questions(),
@@ -992,6 +1002,7 @@ async def _judge_workspace_write_gate(
         return None, ""
     from runtime.judge_decisions import (
         classify_write,
+        write_diff_window,
         write_gate_questions,
         write_signals,
     )
@@ -1001,7 +1012,7 @@ async def _judge_workspace_write_gate(
         {
             "user_request": getattr(ctx, "user_request", ""),
             "path": paths,
-            "diff": diff[:8000],
+            "diff": write_diff_window(diff),
             "tool": tool_name,
         },
         write_gate_questions(),

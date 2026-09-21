@@ -9,7 +9,7 @@ import shutil
 
 import pytest
 
-from protocol.events import ToolCallFinished, ToolCallStarted
+from protocol.events import AgentStarted, ToolCallFinished, ToolCallStarted
 from runtime.config import EngineConfig
 from tests.conftest import FakeJudge, FakeVerdict
 from tests.fakes import FakeProvider
@@ -58,6 +58,10 @@ def test_meta_undo_dispatches_without_spawning_the_loop(tmp_path):
         replies = [m for m in session._state.messages if m.role == "assistant"]
         assert replies
         assert "no edits" in replies[-1].text.lower() or "error" in replies[-1].text.lower() or "undone" in replies[-1].text.lower()
+        from runtime.store.judgements import recent
+
+        rows = recent(tmp_path / "session.db")
+        assert any(row.tag == "intent_route" for row in rows)
 
     asyncio.run(run())
 
@@ -126,10 +130,52 @@ def test_locate_resolution_seeds_context_and_skips_exploration(tmp_path):
             events.append(queue.get_nowait())
         tool_starts = [e for e in events if isinstance(e, ToolCallStarted)]
         tool_finishes = [e for e in events if isinstance(e, ToolCallFinished)]
-        assert any(e.name == "search" for e in tool_starts)
-        assert any(e.name == "search" for e in tool_finishes)
+        started = [e for e in events if isinstance(e, AgentStarted)]
+        assert any(e.profile == "ask" for e in started)
+        assert any(e.name == "search" and e.agent_id for e in tool_starts)
+        assert any(e.name == "search" and e.agent_id for e in tool_finishes)
+        # Orch must not own those synthetic search/read_file calls.
+        assert not any(e.name == "search" and not e.agent_id for e in tool_starts)
         replies = [m for m in session._state.messages if m.role == "assistant"]
         assert replies
+        assert any("started" in (m.text or "") and "ask" in (m.text or "") for m in replies)
+
+    asyncio.run(run())
+
+
+@needs_rg
+def test_locate_soft_seed_spawns_ask_without_fake_history(tmp_path):
+    async def run():
+        (tmp_path / "retry.py").write_text(
+            "\n".join(f"# line {i}" for i in range(30))
+            + "\ndef retry_logic():\n    return backoff()\n"
+        )
+        (tmp_path / "notes.md").write_text("retry backoff\n" * 8)
+        session = await _bound(tmp_path, judge_mode="enforcing")
+        judge = FakeJudge()
+        judge.responses["search_rerank"] = FakeVerdict(
+            probabilities={"best_match": {"1": 0.9}}, confidences={"best_match": 0.9}
+        )
+        judge.responses["intent_route"] = FakeVerdict(
+            choices={"intent": "locate"},
+            confidences={"intent": 0.9},
+            nouls={"answers_message": 0.1},
+        )
+        session._judge = judge
+        session._config = EngineConfig(judge_mode="enforcing", max_turns=8)
+
+        queue = session.subscribe()
+        session.start_turn("where is the retry logic?")
+        await _wait_idle(session)
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        started = [e for e in events if isinstance(e, AgentStarted)]
+        tool_starts = [e for e in events if isinstance(e, ToolCallStarted)]
+        assert any(e.profile == "ask" for e in started)
+        assert not any(e.name == "search" for e in tool_starts)
+        replies = [m for m in session._state.messages if m.role == "assistant"]
+        assert any("started" in (m.text or "") and "ask" in (m.text or "") for m in replies)
 
     asyncio.run(run())
 

@@ -4,6 +4,7 @@ from runtime.judge import Noul, Score
 from runtime.judge_decisions import classify_exec, exec_reason, exec_signals
 from runtime.tools.shell import (
     DEFAULT_TIMEOUT,
+    _hard_deny,
     format_command_result,
 )
 from runtime.tools.shell import (
@@ -89,9 +90,14 @@ async def run_command(
     if config is not None:
         timeout = min(timeout, getattr(config, "exec_timeout_s", timeout) or timeout)
 
+    stripped = command.strip()
+    # Hard denylist wins unconditionally -- check it before paying for a
+    # judge round trip that classify_exec can never override anyway.
+    _hard_deny(stripped)
+
     reason_suffix = ""
     if approval == "judged":
-        approval, reason_suffix = await _judged_decision(ctx, config, command.strip())
+        approval, reason_suffix = await _judged_decision(ctx, config, stripped, cwd)
 
     async def approve(question: str, kind: str) -> str:
         if ctx.ask_user is None:
@@ -121,7 +127,7 @@ async def run_command(
     return format_command_result(result)
 
 
-async def _judged_decision(ctx: ToolContext, config, command: str) -> tuple[str, str]:
+async def _judged_decision(ctx: ToolContext, config, command: str, cwd: str = "") -> tuple[str, str]:
     """Resolve ENGINE_EXEC_APPROVAL=judged into a concrete auto|always|never
     (or "blocked") decision, emitting JudgementMade when a verdict was used.
 
@@ -137,7 +143,7 @@ async def _judged_decision(ctx: ToolContext, config, command: str) -> tuple[str,
         state = {
             "command": command,
             "workspace": str(ctx.workspace),
-            "cwd": "",
+            "cwd": cwd,
             "user_request": ctx.user_request,
         }
         verdict = await judge.ask(state, _exec_questions(), tag="exec_approval")

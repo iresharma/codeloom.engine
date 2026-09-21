@@ -22,19 +22,24 @@ from llm.openrouter import OpenRouterLLM
 from llm.provider import Usage
 from runtime.config import EngineConfig
 from runtime.judge_decisions import (
+    LIST_FILES_REDIRECT,
+    LIST_FILES_REDIRECT_PROFILES,
     LOOP_EXTEND_INCREMENT,
     LOOP_EXTEND_MAX_TOTAL,
     SCREEN_SIZE_FLOOR,
     SCREEN_SKIP_TOOLS,
-    SCREEN_WINDOW,
     VERIFY_TOOLS,
     classify_loop,
     classify_screen,
+    classify_screen_multi,
     classify_tool_call,
     loop_questions,
     loop_signals,
+    screen_content_windows,
     screen_questions,
+    screen_questions_multi,
     screen_signals,
+    screen_signals_multi,
     should_extend_turns,
     tool_call_signals,
     tool_verify_questions,
@@ -941,6 +946,12 @@ class AgentLoop:
         against the model's own schema and recent history before it runs.
         Returns a corrective string to send back to the model instead of
         executing, or None to proceed unchanged."""
+        if (
+            name == "list_files"
+            and self.profile in LIST_FILES_REDIRECT_PROFILES
+            and "search" not in self._tools_called
+        ):
+            return LIST_FILES_REDIRECT
         judge = self._ctx.judge
         if name not in VERIFY_TOOLS or judge is None or not getattr(judge, "enabled", False):
             return None
@@ -1004,13 +1015,28 @@ class AgentLoop:
         path = arguments.get("path") if isinstance(arguments, dict) else None
         if path:
             source = f"{name}:{path}"
-        window = output[:SCREEN_WINDOW]
-        verdict = await judge.ask(
-            {"source": source, "content": window}, screen_questions(), tag="result_screen"
-        )
+        windows = screen_content_windows(output)
+        if len(windows) == 1:
+            verdict = await judge.ask(
+                {"source": source, "content": windows[0]},
+                screen_questions(),
+                tag="result_screen",
+            )
+            flagged, redact = classify_screen(verdict)
+        else:
+            verdict = await judge.ask(
+                {
+                    "source": source,
+                    "content_head": windows[0],
+                    "content_mid": windows[1],
+                    "content_tail": windows[2],
+                },
+                screen_questions_multi(),
+                tag="result_screen",
+            )
+            flagged, redact = classify_screen_multi(verdict)
         if verdict is None:
             return output
-        flagged, redact = classify_screen(verdict)
         if not flagged:
             return output
         enforced = site_mode == "enforcing"
@@ -1019,12 +1045,16 @@ class AgentLoop:
                 tag="result_screen",
                 subject=source[:200],
                 outcome="redact" if redact else "flag",
-                signals=screen_signals(verdict),
+                signals=screen_signals(verdict)
+                if len(windows) == 1
+                else screen_signals_multi(verdict),
                 enforced=enforced,
                 latency_ms=verdict.latency_ms,
                 agent_id=self.agent_id,
             )
         if not enforced:
             return output
-        wrapped = _redact_region(window) if redact else _flag_region(window)
-        return wrapped + output[len(window):]
+        # Wrap the full result so an unjudged middle slice is not trusted.
+        if redact:
+            return _redact_region(output)
+        return _flag_region(output)

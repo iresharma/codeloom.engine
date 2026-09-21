@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from runtime.judge_decisions import (
+    SEARCH_RERANK_QUESTION_KEY,
+    SYMBOL_RERANK_FLOOR,
+    SYMBOL_RERANK_TOP_N,
+    rerank_order,
+    rerank_question,
+)
 from runtime.tools import sitter as run_sitter
 from tools.base import ToolContext, tool
 
@@ -31,8 +38,76 @@ def _as_int(value, default: int) -> int:
         "required": ["path"],
     },
 )
-def list_symbols(ctx: ToolContext, path: str, language: str = "") -> str:
-    return run_sitter.list_symbols(ctx.workspace, path, language=language or "")
+async def list_symbols(ctx: ToolContext, path: str, language: str = "") -> str:
+    outline = run_sitter.list_symbols(ctx.workspace, path, language=language or "")
+    return await _maybe_rerank_symbols(ctx, outline)
+
+
+async def _maybe_rerank_symbols(ctx: ToolContext, outline: str) -> str:
+    """Phase 3 leftover: mark the top outline lines against the current
+    turn when the file is large. Advisory and judge-off keep document order.
+    Never truncates -- unmarked lines stay below a separator."""
+    lines = outline.splitlines()
+    if not lines:
+        return outline
+    header = ""
+    body = lines
+    if "symbol(s)" in lines[0]:
+        header = lines[0]
+        body = lines[1:]
+    if len(body) <= SYMBOL_RERANK_FLOOR:
+        return outline
+    ranked = await _rerank_symbol_lines(ctx, body)
+    if ranked is None:
+        return outline
+    top = ranked[:SYMBOL_RERANK_TOP_N]
+    top_set = set(top)
+    rest = [line for line in body if line not in top_set]
+    parts = []
+    if header:
+        parts.append(header)
+    parts.append("Likely relevant:")
+    parts.extend(f"* {line}" for line in top)
+    if rest:
+        parts.append("---")
+        parts.extend(rest)
+    return "\n".join(parts)
+
+
+async def _rerank_symbol_lines(ctx: ToolContext, lines: list[str]) -> list[str] | None:
+    judge = getattr(ctx, "judge", None)
+    config = ctx.config
+    site_mode = config.judge_mode_for("search") if config is not None else "off"
+    if (
+        judge is None
+        or not getattr(judge, "enabled", False)
+        or site_mode == "off"
+        or len(lines) <= SYMBOL_RERANK_FLOOR
+    ):
+        return None
+    query = ctx.user_request or ""
+    ids = {str(index + 1): line for index, line in enumerate(lines)}
+    verdict = await judge.ask(
+        {"query": query, "candidates": ids},
+        {SEARCH_RERANK_QUESTION_KEY: rerank_question(ids)},
+        tag="search_rerank",
+    )
+    if verdict is None:
+        return None
+    enforced = site_mode == "enforcing"
+    if ctx.on_judgement is not None:
+        ctx.on_judgement(
+            tag="search_rerank",
+            subject=(query or "list_symbols")[:200],
+            outcome="ranked",
+            signals={"top_confidence": verdict.confidence(SEARCH_RERANK_QUESTION_KEY)},
+            enforced=enforced,
+            latency_ms=verdict.latency_ms,
+            agent_id=ctx.agent_id,
+        )
+    if not enforced:
+        return None
+    return rerank_order(verdict, ids)
 
 
 @tool(
