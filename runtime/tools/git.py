@@ -15,6 +15,12 @@ SHOW_CAP = 40_000
 BLAME_CAP = 20_000
 _ENGINE_AUTHOR = "engine"
 _ENGINE_EMAIL = "engine@localhost"
+# GitHub renders a PR title far past this, but a title is a headline: one
+# sentence, cut on a word boundary. Never a raw character slice -- that is
+# what shipped "Add HTTP redirect cap and pin pyinstalle".
+PR_TITLE_MAX = 72
+PR_BODY_MAX = 60_000
+_SENTENCE_END = re.compile(r"(?<=[.!?])[\s]")
 
 
 def read_state(workspace: Path, *, diffs: bool = True) -> GitState:
@@ -155,6 +161,119 @@ def parse_settle_intent(text: str) -> str | None:
 
 def normalize_settle_action(text: str) -> str:
     return parse_settle_intent(text) or "keep"
+
+
+def pr_title_from_summary(summary: str, *, limit: int = PR_TITLE_MAX) -> str:
+    """First sentence of `summary`, cut on a word boundary to `limit` chars.
+
+    Never a raw character slice: a PR title that ends mid-word ("pin
+    pyinstalle") is what the two-coder trial shipped. When the first word
+    alone is longer than `limit` there is no word boundary to cut on, so
+    that single word is returned whole rather than sliced.
+    """
+    text = " ".join((summary or "").replace("\n", " ").split())
+    if not text:
+        return ""
+    # Strip a leading bullet/label the orchestrator may have opened with.
+    text = re.sub(r"^(?:[-*+\u2022]\s+|\d+[.)]\s+)", "", text)
+    sentence = _SENTENCE_END.split(text, 1)[0].strip()
+    if not sentence:
+        sentence = text
+    sentence = sentence.rstrip()
+    if len(sentence) <= limit:
+        return sentence.rstrip(".,;:")
+    words = sentence.split(" ")
+    out = ""
+    for word in words:
+        candidate = word if not out else f"{out} {word}"
+        if len(candidate) > limit:
+            break
+        out = candidate
+    if not out:
+        # A single unbreakable word: keep it whole rather than mangle it.
+        out = words[0]
+    return out.rstrip(".,;:")
+
+
+def worktree_diff_stat(workspace: Path, dest: Path) -> tuple[str, list[str]]:
+    """`git diff --stat` for a writer worktree against its merge base.
+
+    Returns (stat_text, changed_paths). Both empty when this is not a repo
+    or the base cannot be resolved -- callers degrade to summary-only.
+    """
+    workspace = Path(workspace).resolve()
+    dest = Path(dest)
+    if not dest.is_dir():
+        return "", []
+    base = _run(workspace, "rev-parse", "HEAD").strip()
+    if not base:
+        return "", []
+    merge_base = _run(dest, "merge-base", base, "HEAD").strip() or base
+    stat = exec_cmd(dest, ["git", "diff", "--stat", merge_base, "HEAD"], timeout=30)
+    names = exec_cmd(dest, ["git", "diff", "--name-only", merge_base, "HEAD"], timeout=30)
+    stat_text = (stat.stdout or "").strip() if stat.returncode == 0 else ""
+    paths: list[str] = []
+    if names.returncode == 0:
+        paths = [line.strip() for line in (names.stdout or "").splitlines() if line.strip()]
+    return stat_text, paths
+
+
+def top_level_paths(paths: list[str]) -> list[str]:
+    """First path component of each changed path, de-duplicated, ordered."""
+    out: list[str] = []
+    for path in paths or ():
+        head = (path or "").strip().split("/", 1)[0]
+        if head and head not in out:
+            out.append(head)
+    return out
+
+
+def uncovered_paths(body: str, paths: list[str]) -> list[str]:
+    """Changed top-level paths that `body` never mentions."""
+    lowered = (body or "").lower()
+    return [item for item in top_level_paths(paths) if item.lower() not in lowered]
+
+
+def build_pr_body(
+    summary: str,
+    *,
+    task: str = "",
+    stat_text: str = "",
+    changed_paths: list[str] | None = None,
+    followups: list[str] | None = None,
+) -> str:
+    """The PR body: the orchestrator's closing summary, plus a deterministic
+    coverage section when the summary misses a changed top-level path.
+
+    The coverage section is built from the diff stat, never by asking the
+    model a second time. With no summary at all the body falls back to the
+    original task prompt plus the stat -- never a lone child's report.
+    """
+    body = (summary or "").strip()
+    parts: list[str] = []
+    if body:
+        parts.append(body)
+    else:
+        fallback = (task or "").strip()
+        if fallback:
+            parts.append(f"Task:\n{fallback}")
+        if stat_text:
+            parts.append(f"## Files changed\n\n```\n{stat_text}\n```")
+        elif not fallback:
+            parts.append("(no summary available)")
+        return _clip("\n\n".join(parts), PR_BODY_MAX)
+    missing = uncovered_paths(body, changed_paths or [])
+    if missing and stat_text:
+        listed = ", ".join(missing)
+        parts.append(
+            "## Files changed\n\n"
+            f"Not mentioned above: {listed}\n\n```\n{stat_text}\n```"
+        )
+    if followups:
+        lines = "\n".join(f"- {item}" for item in followups if str(item).strip())
+        if lines:
+            parts.append(f"## Follow-ups\n\n{lines}")
+    return _clip("\n\n".join(parts), PR_BODY_MAX)
 
 
 def commit_if_dirty(dest: Path, message: str) -> str:

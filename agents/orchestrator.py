@@ -19,11 +19,14 @@ from runtime.tools.git import (
     SETTLE_CHOICES,
     add_agent_worktree,
     apply_worktree,
+    build_pr_body,
     commit_if_dirty,
     drop_empty_worktree,
     list_engine_worktrees,
     normalize_settle_action,
+    pr_title_from_summary,
     remove_agent_worktree,
+    worktree_diff_stat,
     worktree_has_changes,
 )
 from runtime.tools.tracker import FileTracker
@@ -179,6 +182,14 @@ class Orchestrator(AgentLoop):
         self._batch_id = ""
         self._batch_name = ""
         self._recent_results: list[tuple[str, str]] = []
+        # Item 1: what settle actually puts in a PR. `_closing_summary` is
+        # this orchestrator's own last reply to the user (including the
+        # inbox turn that follows the final child, which is where a
+        # two-part summary lives); `_user_task` is the original user
+        # prompt, kept verbatim for the fallback body and for the
+        # reviewer brief (item 5). Neither is ever a child's self-report.
+        self._closing_summary = ""
+        self._user_task = ""
         self._skills = kwargs.get("skills")
         self._on_skill_activated = kwargs.get("on_skill_activated")
         self._finished_transcripts: dict[str, dict] = {}
@@ -348,6 +359,11 @@ class Orchestrator(AgentLoop):
             settle.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await settle
+        normalized = normalize_settle_action(action)
+        title = summary
+        body = summary
+        if normalized == "pr":
+            title, body = await asyncio.to_thread(self._pr_fields, dest, summary)
         ok, detail, pr_url = await asyncio.to_thread(
             apply_worktree,
             self._ctx.workspace,
@@ -355,10 +371,9 @@ class Orchestrator(AgentLoop):
             wt_branch,
             action,
             message=summary,
-            title=summary,
-            body=summary,
+            title=title,
+            body=body,
         )
-        normalized = normalize_settle_action(action)
         if ok and normalized != "keep":
             self._forget_worktree(aid)
         if self._on_worktree_settled is not None:
@@ -447,12 +462,56 @@ class Orchestrator(AgentLoop):
         self._batch_name = batch_nickname(task)
         self._inbox_turn = str(task).lstrip().startswith("[agent ")
         self._recent_results = []
+        if not _is_engine_report(task):
+            # A fresh user message starts a new piece of work: keep it
+            # verbatim (the reviewer and the PR-body fallback both need the
+            # user's own words, not a paraphrase) and drop the previous
+            # turn's closing summary so a stale one cannot title a new PR.
+            self._user_task = str(task)
+            self._closing_summary = ""
         try:
-            return await super().run(task)
+            reply = await super().run(task)
         finally:
             self._batch_id = ""
             self._batch_name = ""
             self._inbox_turn = False
+        text = (reply or "").strip()
+        if text:
+            self._closing_summary = text
+        return reply
+
+    def closing_summary(self) -> str:
+        """The orchestrator's own last reply -- what settle titles a PR from."""
+        return self._closing_summary
+
+    def _pr_fields(
+        self, dest: Path, summary: str, followups: list[str] | None = None
+    ) -> tuple[str, str]:
+        """(title, body) for a pull request, from the orchestrator's closing
+        summary rather than the last child's self-report.
+
+        Falls back to the original user task plus the diff stat when this
+        orchestrator never produced a closing summary (aborted turn, a
+        settle_worktree call in the very first turn). `summary` -- the
+        writer's own report -- is only ever the last resort, and only
+        because a settle with no orchestrator text and no user task at all
+        would otherwise have nothing to say.
+        """
+        stat_text, changed = worktree_diff_stat(self._ctx.workspace, dest)
+        closing = (self._closing_summary or "").strip()
+        task = (self._user_task or "").strip()
+        source = closing or ""
+        title = pr_title_from_summary(source) or pr_title_from_summary(task)
+        if not title:
+            title = pr_title_from_summary(summary) or "engine changes"
+        body = build_pr_body(
+            source,
+            task=task or (summary or ""),
+            stat_text=stat_text,
+            changed_paths=changed,
+            followups=followups,
+        )
+        return title, body
 
     async def spawn(
         self,
@@ -680,8 +739,8 @@ class Orchestrator(AgentLoop):
             dest = self._worktrees.get(agent_id)
             if dest is not None:
                 summary = result.summary or result.outcome or task
-                self._worktree_summaries[agent_id] = (
-                    f"engine({profile.name}): {(summary or 'worktree').strip()[:72]}"
+                self._worktree_summaries[agent_id] = _commit_message(
+                    profile.name, summary
                 )
                 self._pending_settles[agent_id] = _PendingSettle(
                     agent_id=agent_id,
@@ -760,7 +819,7 @@ class Orchestrator(AgentLoop):
                 )
                 self._forget_worktree(agent_id)
                 return
-            message = f"engine({profile}): {(summary or 'worktree').strip()[:72]}"
+            message = _commit_message(profile, summary)
             self._worktree_summaries[agent_id] = message
             commit_err = await asyncio.to_thread(commit_if_dirty, dest, message)
             if commit_err:
@@ -789,6 +848,15 @@ class Orchestrator(AgentLoop):
                     return
                 except PromptTimeout:
                     answer = "keep"
+            action = normalize_settle_action(answer)
+            title = message
+            body = summary or message
+            if action == "pr":
+                # The PR headline and body come from the orchestrator's
+                # closing summary, not from `summary` (this one writer's
+                # self-report). With two sequential coders the second
+                # report knows nothing about part A.
+                title, body = await asyncio.to_thread(self._pr_fields, dest, summary)
             ok, detail, pr_url = await asyncio.to_thread(
                 apply_worktree,
                 self._ctx.workspace,
@@ -796,10 +864,9 @@ class Orchestrator(AgentLoop):
                 branch,
                 answer,
                 message=message,
-                title=message,
-                body=summary or message,
+                title=title,
+                body=body,
             )
-            action = normalize_settle_action(answer)
             if ok and action != "keep":
                 self._forget_worktree(agent_id)
             if self._on_worktree_settled is not None and not self._aborting_all:
@@ -883,6 +950,20 @@ class Orchestrator(AgentLoop):
 
 
 _SURVEY_ONCE = frozenset({"ask", "researcher"})
+
+
+def _commit_message(profile: str, summary: str) -> str:
+    """Commit subject for a writer worktree: the writer's own report is the
+    right source here (it describes that commit), but cut on a word
+    boundary rather than sliced at 72 characters."""
+    head = pr_title_from_summary(summary) or "worktree"
+    return f"engine({profile}): {head}"
+
+
+def _is_engine_report(task: str) -> bool:
+    """True for an internal "[agent ...]" / "[worktree ...]" handoff turn."""
+    head = str(task or "").lstrip()
+    return head.startswith("[agent ") or head.startswith("[worktree ")
 
 
 def batch_nickname(task: str, *, limit: int = 48) -> str:
