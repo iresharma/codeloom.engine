@@ -4,6 +4,8 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from tools.base import elide_middle
+
 # Observed provider overflow phrasing. Each entry is a verbatim substring;
 # the date is when it was recorded. A test pins these so a reword fails loudly.
 # Markers are a fallback only — STRUCTURAL_RATIO against last prompt_tokens
@@ -33,6 +35,12 @@ OUTPUT_CUTOFF_CONTINUE = (
 )
 OUTCOME_TRUNCATED = "\n... (truncated)"
 TRIM_KEEP = 400
+# Head+tail within the same TRIM_KEEP budget the head-only cut used: the
+# elision marker costs characters too, so the retained text shrinks by that
+# much rather than the trimmed message growing.
+_TRIM_MARKER_ROOM = 32
+TRIM_KEEP_HEAD = (TRIM_KEEP - _TRIM_MARKER_ROOM) * 2 // 5
+TRIM_KEEP_TAIL = TRIM_KEEP - _TRIM_MARKER_ROOM - TRIM_KEEP_HEAD
 TRIM_NOTICE = "\n... (trimmed; re-run the tool if you need this again)"
 _PATH_KEYS = ("path", "file", "target", "dest")
 _LEFTOVER_LABELS = (
@@ -218,7 +226,12 @@ def trim_tool_results(
             out.append(message)
             continue
         trimmed = dict(message)
-        trimmed["content"] = text[:TRIM_KEEP] + TRIM_NOTICE
+        # Head+tail: a trimmed run_command result kept only its first 400
+        # characters, so the runner's own verdict line was the first thing
+        # to go and a later turn had nothing but prose to guess from.
+        trimmed["content"] = (
+            elide_middle(text, TRIM_KEEP_HEAD, TRIM_KEEP_TAIL) + TRIM_NOTICE
+        )
         saved += len(text) - len(trimmed["content"])
         out.append(trimmed)
     return out, saved

@@ -4,9 +4,14 @@ import importlib
 import pkgutil
 
 import tools as tools_pkg
-from tools.base import Tool, ToolContext
+from tools.base import Tool, ToolContext, elide_middle
 
 MAX_RESULT = 80_000
+# Head+tail split for an over-cap result. Head-only dropped the end of a
+# long tool result -- for run_command that is exactly where a test runner
+# prints "N passed, M failed".
+RESULT_HEAD = MAX_RESULT // 2
+RESULT_TAIL = MAX_RESULT - RESULT_HEAD
 DEFAULT_MCP_PROFILES = {"researcher", "debugger"}
 
 
@@ -67,7 +72,7 @@ class ToolRegistry:
         except Exception as exc:  # noqa: BLE001
             return f"error: {exc}"
         if len(text) > MAX_RESULT:
-            return text[:MAX_RESULT] + "\n...[truncated]"
+            return elide_middle(text, RESULT_HEAD, RESULT_TAIL)
         return text
 
 

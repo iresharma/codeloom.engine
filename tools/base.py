@@ -9,6 +9,25 @@ from typing import Any, Union, get_args, get_origin
 _SKIP_PARAMS = {"ctx", "context", "self"}
 _JSON_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean"}
 
+ELIDED_MARKER = "\n... [{n} chars elided] ...\n"
+
+
+def elide_middle(text: str, head: int, tail: int) -> str:
+    """Keep the first `head` and last `tail` characters, naming what went.
+
+    Head *and* tail, never head alone. Every runner prints its verdict last
+    ("92 passed, 2 failed in 4.2s"), so a head-only cut removes the one line
+    an agent needs and leaves it free to invent the counts. Each caller
+    names its own budget; this is only the mechanism.
+    """
+    if head < 0 or tail < 0:
+        raise ValueError("head and tail must be non-negative")
+    if len(text) <= head + tail:
+        return text
+    omitted = len(text) - head - tail
+    kept_tail = text[-tail:] if tail else ""
+    return text[:head] + ELIDED_MARKER.format(n=omitted) + kept_tail
+
 
 @dataclass
 class ToolContext:
