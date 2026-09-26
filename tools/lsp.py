@@ -18,7 +18,17 @@ def _as_int(value, default: int) -> int:
     return int(value)
 
 
-def _require_lsp(ctx: ToolContext) -> str | None:
+def _require_lsp(ctx: ToolContext, path: str = "") -> str | None:
+    """Reasons an LSP call cannot possibly answer, checked before the manager.
+
+    The extension check comes first and never touches `ctx.lsp`: starting or
+    reusing a server for a file no server claims is three round trips to
+    learn what the filename already said.
+    """
+    if path:
+        note = run_lsp.unsupported_extension_note(path)
+        if note is not None:
+            return note
     if ctx.lsp is None:
         return _LSP_MISSING
     return None
@@ -28,7 +38,10 @@ def _require_lsp(ctx: ToolContext) -> str | None:
     description=(
         "Jump to the definition of the symbol at a 1-based line/character "
         "using the language server. Understands imports and types, unlike "
-        "find_symbol. Get coordinates from find_symbol or read_file."
+        "find_symbol. Get coordinates from find_symbol or read_file. "
+        "Language servers cover python, go, and javascript/typescript "
+        "only; for any other file this returns immediately and points "
+        "at the right alternative."
     ),
     parameters={
         "type": "object",
@@ -50,7 +63,7 @@ def _require_lsp(ctx: ToolContext) -> str | None:
     },
 )
 async def goto_definition(ctx: ToolContext, path: str, line, character) -> str:
-    err = _require_lsp(ctx)
+    err = _require_lsp(ctx, path)
     if err:
         return err
     return await asyncio.to_thread(
@@ -67,7 +80,10 @@ async def goto_definition(ctx: ToolContext, path: str, line, character) -> str:
     description=(
         "Find every usage of the symbol at a 1-based position across the "
         "indexed workspace, including the declaration. Use before changing "
-        "or renaming something."
+        "or renaming something. "
+        "Language servers cover python, go, and "
+        "javascript/typescript only; for any other file this returns "
+        "immediately and points at the right alternative."
     ),
     parameters={
         "type": "object",
@@ -89,7 +105,7 @@ async def goto_definition(ctx: ToolContext, path: str, line, character) -> str:
     },
 )
 async def find_references(ctx: ToolContext, path: str, line, character) -> str:
-    err = _require_lsp(ctx)
+    err = _require_lsp(ctx, path)
     if err:
         return err
     return await asyncio.to_thread(
@@ -106,7 +122,10 @@ async def find_references(ctx: ToolContext, path: str, line, character) -> str:
     description=(
         "Type signature and documentation for the symbol at a 1-based "
         "position, like hovering in an editor. Use get_node_at for local "
-        "syntax instead of types."
+        "syntax instead of types. "
+        "Language servers cover python, go, and "
+        "javascript/typescript only; for any other file this returns "
+        "immediately and points at the right alternative."
     ),
     parameters={
         "type": "object",
@@ -128,7 +147,7 @@ async def find_references(ctx: ToolContext, path: str, line, character) -> str:
     },
 )
 async def hover(ctx: ToolContext, path: str, line, character) -> str:
-    err = _require_lsp(ctx)
+    err = _require_lsp(ctx, path)
     if err:
         return err
     return await asyncio.to_thread(
@@ -144,7 +163,12 @@ async def hover(ctx: ToolContext, path: str, line, character) -> str:
 @tool(
     description=(
         "Compiler/type-checker diagnostics for a file (errors, warnings, "
-        "hints). Same information as editor squiggles."
+        "hints). Same information as editor squiggles. Language servers "
+        "cover python, go, and javascript/typescript only; for any other "
+        "file this returns immediately and points at the right "
+        "alternative. "
+        "For a shell script use run_command with `bash -n`; documents and "
+        "config files have no diagnostics at all."
     ),
     parameters={
         "type": "object",
@@ -158,7 +182,7 @@ async def hover(ctx: ToolContext, path: str, line, character) -> str:
     },
 )
 async def get_diagnostics(ctx: ToolContext, path: str) -> str:
-    err = _require_lsp(ctx)
+    err = _require_lsp(ctx, path)
     if err:
         return err
     return await asyncio.to_thread(
@@ -170,7 +194,10 @@ async def get_diagnostics(ctx: ToolContext, path: str) -> str:
     description=(
         "Language-server outline of a file with SymbolKind (includes "
         "interfaces and enums tree-sitter may miss). Prefer list_symbols "
-        "first; use this when that outline looks incomplete."
+        "first; use this when that outline looks incomplete. "
+        "Language servers cover python, go, and "
+        "javascript/typescript only; for any other file this returns "
+        "immediately and points at the right alternative."
     ),
     parameters={
         "type": "object",
@@ -184,7 +211,7 @@ async def get_diagnostics(ctx: ToolContext, path: str) -> str:
     },
 )
 async def document_symbols(ctx: ToolContext, path: str) -> str:
-    err = _require_lsp(ctx)
+    err = _require_lsp(ctx, path)
     if err:
         return err
     return await asyncio.to_thread(
@@ -196,7 +223,10 @@ async def document_symbols(ctx: ToolContext, path: str) -> str:
     description=(
         "Rename a symbol at a 1-based position via the language server. "
         "Updates references correctly, unlike search-and-replace on the name. "
-        "Read the file first. Get coordinates from find_symbol or read_file."
+        "Read the file first. Get coordinates from find_symbol or read_file. "
+        "Language servers cover python, go, and javascript/typescript "
+        "only; for any other file this returns immediately and points "
+        "at the right alternative."
     ),
     parameters={
         "type": "object",
@@ -222,7 +252,7 @@ async def document_symbols(ctx: ToolContext, path: str) -> str:
     },
 )
 async def rename_symbol(ctx: ToolContext, path: str, line, character, new_name: str) -> str:
-    err = _require_lsp(ctx)
+    err = _require_lsp(ctx, path)
     if err:
         return err
     payload = await asyncio.to_thread(

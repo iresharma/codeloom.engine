@@ -245,6 +245,13 @@ class LSPManager:
                 return cfg
         return None
 
+    @classmethod
+    def config_for_extension(cls, ext: str) -> ServerConfig | None:
+        """Public form of `_config_for_extension`: whether any configured
+        server claims this extension. Callers short-circuit on None rather
+        than paying for a server round trip that can only fail."""
+        return cls._config_for_extension(ext)
+
     @staticmethod
     def _language_id(cfg: ServerConfig, ext: str) -> str:
         if ext == ".tsx":
@@ -770,6 +777,64 @@ def _resolve(workspace: Path, path: str) -> str | None:
     except WorkspacePathError as exc:
         return f"error: {exc}"
     return None
+
+
+# What to suggest instead, per extension family, when no language server can
+# possibly answer. Three consecutive get_diagnostics calls on .sh, .md and
+# .gitignore all failed with "No LSP server configured for extension X" --
+# three round trips to learn something the extension already said.
+_ALTERNATIVES: dict[str, str] = {
+    ".sh": "run_command with `bash -n <path>` (or `shellcheck <path>` if it is installed)",
+    ".bash": "run_command with `bash -n <path>` (or `shellcheck <path>` if it is installed)",
+    ".zsh": "run_command with `zsh -n <path>`",
+    ".fish": "run_command with `fish --no-execute <path>`",
+    ".json": "run_command with `python3 -m json.tool <path>`",
+    ".yaml": "run_command with `python3 -c 'import sys,yaml;yaml.safe_load(open(sys.argv[1]))' <path>`",
+    ".yml": "run_command with `python3 -c 'import sys,yaml;yaml.safe_load(open(sys.argv[1]))' <path>`",
+    ".toml": "run_command with `python3 -c 'import sys,tomllib;tomllib.load(open(sys.argv[1],\"rb\"))' <path>`",
+    ".md": "nothing — prose has no diagnostics; just read_file it",
+    ".markdown": "nothing — prose has no diagnostics; just read_file it",
+    ".txt": "nothing — plain text has no diagnostics; just read_file it",
+    ".rst": "nothing — prose has no diagnostics; just read_file it",
+    ".dockerfile": "run_command with `docker build --check .` if docker is available",
+    ".sql": "nothing — read_file it, or run it against the project's own tooling",
+}
+_ALTERNATIVE_BY_NAME: dict[str, str] = {
+    "dockerfile": _ALTERNATIVES[".dockerfile"],
+    "makefile": "run_command with `make -n <target>`",
+}
+_LSP_LANGUAGES = "python, go, javascript/typescript"
+
+
+def unsupported_extension_note(path: str) -> str | None:
+    """A ready answer for a path no language server handles, or None.
+
+    Returned before the LSP manager is touched: starting (or reusing) a
+    server, opening the document and waiting for diagnostics cannot succeed
+    for an extension with no configured server, and the extension alone is
+    enough to know that.
+    """
+    name = Path(path or "").name
+    if not name:
+        return None
+    ext = Path(name).suffix.lower()
+    if ext and LSPManager.config_for_extension(ext) is not None:
+        return None
+    hint = _ALTERNATIVES.get(ext) or _ALTERNATIVE_BY_NAME.get(name.lower())
+    if hint is None:
+        if not ext:
+            hint = f"nothing — LSP tools only apply to {_LSP_LANGUAGES}"
+        else:
+            hint = (
+                f"nothing — LSP tools only apply to {_LSP_LANGUAGES}; "
+                "read_file, list_symbols, or run_command instead"
+            )
+    label = ext or f"the name {name!r}"
+    return (
+        f"no language server handles {label} — LSP tools only apply to "
+        f"{_LSP_LANGUAGES}. Do not retry an LSP tool on this file. "
+        f"Instead: {hint}"
+    )
 
 
 def goto_definition(workspace: Path, lsp: LSPManager, path: str, line: int, character: int) -> str:
