@@ -40,6 +40,32 @@ _LEFTOVER_LABELS = (
     "leftover questions:",
     "leftover:",
 )
+# Coder handoff blocks. Each runs from its label to the next labeled line, so
+# a multi-line reasoning or test plan reaches the reviewer and tester whole.
+HANDOFF_CLIP = 4000
+_REASONING_LABELS = ("reasoning",)
+_TEST_PLAN_LABELS = ("test_plan", "test plan")
+_BRIEFING_LABELS = frozenset(
+    {
+        "what",
+        "paths",
+        "facts",
+        "verdict",
+        "leftover",
+        "leftover_questions",
+        "leftover questions",
+        "reasoning",
+        "test_plan",
+        "test plan",
+        "checks",
+        "checks run",
+        "changes",
+        "files",
+        "summary",
+        "status",
+        "outcome",
+    }
+)
 _OMITTED_MIDDLE = {"role": "system", "content": "(middle omitted)"}
 
 
@@ -200,6 +226,32 @@ def _leftover_from_text(text: str) -> list[str]:
         value = stripped[len(matched) :].strip()
         leftover.extend(part.strip() for part in value.split(";") if part.strip())
     return leftover
+
+
+def _line_label(line: str) -> str | None:
+    stripped = line.strip().lstrip("-*# ").strip()
+    if ":" not in stripped:
+        return None
+    label = stripped.split(":", 1)[0].strip().strip("*`").lower()
+    return label if label in _BRIEFING_LABELS else None
+
+
+def _labeled_block(text: str, labels: tuple[str, ...]) -> str:
+    """Text under the first line labeled with one of ``labels``, through the
+    line before the next known briefing label."""
+    lines = (text or "").splitlines()
+    for index, line in enumerate(lines):
+        if _line_label(line) not in labels:
+            continue
+        head = line.split(":", 1)[1].strip()
+        body = [head] if head else []
+        for follow in lines[index + 1 :]:
+            if _line_label(follow) is not None:
+                break
+            body.append(follow.rstrip())
+        block = "\n".join(body).strip()
+        return _clip_labeled(block, HANDOFF_CLIP)
+    return ""
 
 
 def trim_tool_results(
@@ -544,6 +596,8 @@ class AgentResult:
     files_touched: list[str] = field(default_factory=list)
     leftover_questions: list[str] = field(default_factory=list)
     missing_checks: list[str] = field(default_factory=list)
+    reasoning: str = ""
+    test_plan: str = ""
 
     def as_text(self) -> str:
         lines = [
@@ -552,6 +606,11 @@ class AgentResult:
         ]
         if self.outcome and self.outcome != self.summary:
             lines.append(f"outcome: {self.outcome}")
+        elif self.reasoning or self.test_plan:
+            if self.reasoning:
+                lines.append(f"reasoning: {self.reasoning}")
+            if self.test_plan:
+                lines.append(f"test_plan: {self.test_plan}")
         if self.files_touched:
             lines.append("files_touched: " + ", ".join(self.files_touched))
         if self.leftover_questions:
@@ -655,6 +714,8 @@ async def compress_for_parent(
         status = "incomplete"
     closer = _last_assistant_text(messages)
     leftover = _leftover_from_text(closer)
+    reasoning = _labeled_block(closer, _REASONING_LABELS)
+    test_plan = _labeled_block(closer, _TEST_PLAN_LABELS)
     outcome = _clip_labeled(closer, OUTCOME_CLIP)
     if closer and len(outcome) < len(closer.strip()):
         outcome = outcome.rstrip() + OUTCOME_TRUNCATED
@@ -679,6 +740,8 @@ async def compress_for_parent(
                     "This transcript is from a subagent. Report to the orchestrator, "
                     "not a human. No markdown, headings, bullets, or filler. "
                     "Labeled lines for what / paths / facts / verdict / leftover. "
+                    "If the subagent edited code, also keep its reasoning: and "
+                    "test_plan: blocks. "
                     "facts must be specific (paths, versions, quoted APIs). "
                     "Do not collapse a survey into a one-liner. "
                     "Omit empty fields. No preamble."
@@ -692,6 +755,8 @@ async def compress_for_parent(
             if text.strip():
                 leftover = _leftover_from_text(text) or leftover
                 summary = _clip_labeled(text, SUMMARY_CLIP)
+                reasoning = reasoning or _labeled_block(text, _REASONING_LABELS)
+                test_plan = test_plan or _labeled_block(text, _TEST_PLAN_LABELS)
         except Exception as exc:  # noqa: BLE001
             summary = f"summarize failed: {exc.__class__.__name__}"
     return AgentResult(
@@ -701,5 +766,7 @@ async def compress_for_parent(
         files_touched=files,
         leftover_questions=leftover,
         missing_checks=missing,
+        reasoning=reasoning,
+        test_plan=test_plan,
     )
 

@@ -92,6 +92,20 @@ def _is_inbox_report(text: str) -> bool:
     return stripped.startswith(_INBOX_REPORT_PREFIXES)
 
 
+_META_PHRASES = {
+    "undo": "undo",
+    "undo last edit": "undo",
+    "undo the last edit": "undo",
+    "what changed": "what_changed",
+    "what changed?": "what_changed",
+    "list edits": "list_edits",
+}
+
+
+def _normalize_meta(text: str) -> str:
+    return " ".join(str(text).lower().split()).rstrip(".!")
+
+
 class EngineSession:
     def __init__(self, workspace: Path, db_path: Path):
         self._workspace = workspace.resolve()
@@ -311,88 +325,15 @@ class EngineSession:
             self._flush_settles_if_idle()
 
     async def _maybe_route_turn(self, text: str) -> str | None:
-        """Phase 5 (docs/impl-plans/jev-exp-1.md): classify the turn before
-        handing it to the full agent loop. Returns the final reply text
-        when this method fully handled the turn (meta action, resolved
-        locate query, or a clarified retry); returns None to fall through
-        to `self._loop.run(text)` unchanged -- the always-safe default."""
-        if self._loop is None:
+        """Answer an exact session command (undo, what changed, list edits)
+        without a model call. Everything else goes to the orchestrator, which
+        does the routing. Returns None to fall through to `self._loop.run`."""
+        if self._loop is None or _is_inbox_report(text):
             return None
-        if _is_inbox_report(text):
-            # An internal "[agent ...]"/"[worktree ...]" handoff, not
-            # something a user typed -- user-intent routing doesn't apply.
+        meta_action = _META_PHRASES.get(_normalize_meta(text))
+        if meta_action is None:
             return None
-        site_mode = self._config.judge_mode_for("intent")
-        if site_mode == "off":
-            return None
-        from agents.resolver import classify_turn
-
-        classified = await classify_turn(self._judge, text)
-        if classified is None:
-            return None
-        enforced = site_mode == "enforcing"
-        if classified.route != "default":
-            self._on_judgement(
-                tag="intent_route",
-                subject=text[:200],
-                outcome=classified.route,
-                signals=classified.signals,
-                enforced=enforced,
-                latency_ms=classified.latency_ms,
-            )
-        if not enforced:
-            # Advisory: classify and emit, but do not run the locate
-            # resolver (rg + rank + two reads) just to change nothing.
-            return None
-        if classified.route == "ambiguous":
-            return await self._route_ambiguous(text)
-        if classified.route == "meta":
-            reply = await self._handle_meta_action(classified.meta_action)
-            if reply is not None:
-                return reply
-            return None
-        if classified.route == "locate":
-            return await self._route_locate(text)
-        if classified.route == "edit_multi_file":
-            from runtime.judge_decisions import EDIT_MULTI_FILE_MAX_TURNS_BONUS
-
-            self._config.max_turns += EDIT_MULTI_FILE_MAX_TURNS_BONUS
-            if self._config.model_strong:
-                self._loop.use_model(self._config.model_strong)
-            return None
-        return None
-
-    async def _route_ambiguous(self, text: str) -> str:
-        try:
-            answer = await self._prompts.ask(
-                "Your last message looks underspecified -- could you "
-                "clarify what you'd like me to do?",
-                kind="text",
-            )
-        except PromptTimeout:
-            answer = ""
-        combined = f"{text}\n\n(clarification: {answer})" if answer else text
-        return await self._loop.run(combined)
-
-    async def _route_locate(self, text: str) -> str | None:
-        from agents.orchestrator import Orchestrator
-        from agents.resolver import resolve_locate
-
-        resolution = await resolve_locate(self._workspace, self._judge, text)
-        if resolution is None:
-            return None
-        orch = self._loop
-        if not isinstance(orch, Orchestrator):
-            if resolution.complete:
-                return await orch.run_with_context(text, resolution)
-            return None
-        if resolution.complete:
-            return await orch.spawn("ask", text, resolution=resolution)
-        task = (
-            f"{text}\n\nGathered context (continue investigating; "
-            f"do not rediscover from zero):\n{resolution.context}"
-        )
-        return await orch.spawn("ask", task)
+        return await self._handle_meta_action(meta_action)
 
     async def _handle_meta_action(self, meta_action: str) -> str | None:
         ctx = getattr(self._loop, "_ctx", None)

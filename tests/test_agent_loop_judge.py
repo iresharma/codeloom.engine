@@ -145,12 +145,32 @@ def test_verify_call_none_verdict_is_a_noop(tmp_path):
     assert loop.judgements == []
 
 
-def test_verify_call_bad_schema_blocks_when_enforcing(tmp_path):
+def test_verify_call_skips_edit_tools(tmp_path):
     judge = FakeJudge()
     judge.responses["call_verify"] = FakeVerdict(nouls={"arguments_match_schema": 0.1})
     loop = _loop(tmp_path, tools=_registry_with("str_replace"), judge=judge)
 
     result = asyncio.run(loop._verify_call("str_replace", {"path": "a.py"}))
+
+    assert result is None
+    assert judge.calls == []
+
+
+def test_verify_call_bad_schema_blocks_when_enforcing(tmp_path):
+    judge = FakeJudge()
+    judge.responses["call_verify"] = FakeVerdict(nouls={"arguments_match_schema": 0.1})
+    loop = _loop(
+        tmp_path,
+        tools=_registry_with(
+            "goto_definition",
+            {"type": "object", "properties": {"path": {}, "line": {}, "character": {}}},
+        ),
+        judge=judge,
+    )
+
+    result = asyncio.run(
+        loop._verify_call("goto_definition", {"path": "a.py", "line": 1, "character": 0})
+    )
 
     assert result is not None
     assert "schema" in result
@@ -176,9 +196,16 @@ def test_verify_call_bad_coordinates_blocks_position_tools_only(tmp_path):
 def test_verify_call_advisory_mode_logs_but_never_blocks(tmp_path):
     judge = FakeJudge()
     judge.responses["call_verify"] = FakeVerdict(nouls={"arguments_match_schema": 0.0})
-    loop = _loop(tmp_path, tools=_registry_with("str_replace"), judge=judge, judge_mode="advisory")
+    loop = _loop(
+        tmp_path,
+        tools=_registry_with("goto_definition"),
+        judge=judge,
+        judge_mode="advisory",
+    )
 
-    result = asyncio.run(loop._verify_call("str_replace", {"path": "a.py"}))
+    result = asyncio.run(
+        loop._verify_call("goto_definition", {"path": "a.py", "line": 1, "character": 0})
+    )
 
     assert result is None  # advisory never blocks
     assert loop.judgements[0]["outcome"] == "block"
@@ -186,8 +213,10 @@ def test_verify_call_advisory_mode_logs_but_never_blocks(tmp_path):
 
 
 def test_verify_call_disabled_judge_is_a_noop(tmp_path):
-    loop = _loop(tmp_path, tools=_registry_with("str_replace"), judge=None)
-    result = asyncio.run(loop._verify_call("str_replace", {"path": "a.py"}))
+    loop = _loop(tmp_path, tools=_registry_with("goto_definition"), judge=None)
+    result = asyncio.run(
+        loop._verify_call("goto_definition", {"path": "a.py", "line": 1, "character": 0})
+    )
     assert result is None
 
 
@@ -346,7 +375,7 @@ def test_loop_progress_none_verdict_is_a_noop(tmp_path):
     assert loop.judgements == []
 
 
-def test_loop_progress_stops_early_when_repeating_without_progress(tmp_path):
+def test_loop_progress_never_stops_when_repeating_without_progress(tmp_path):
     judge = FakeJudge()
     judge.responses["loop_control"] = FakeVerdict(
         nouls={"repeating_itself": 0.9, "making_progress": 0.05}
@@ -355,12 +384,12 @@ def test_loop_progress_stops_early_when_repeating_without_progress(tmp_path):
 
     stop = asyncio.run(loop._maybe_judge_loop_progress(5, "fix the bug"))
 
-    assert stop is True
-    assert loop.judgements[0]["outcome"] == "stop_early"
-    assert loop.judgements[0]["enforced"] is True
+    assert stop is False
+    assert loop._stopped_by_judge is False
+    assert loop._exit_status == "ok"
 
 
-def test_loop_progress_advisory_mode_logs_but_never_stops(tmp_path):
+def test_loop_progress_advisory_mode_never_stops(tmp_path):
     judge = FakeJudge()
     judge.responses["loop_control"] = FakeVerdict(
         nouls={"repeating_itself": 0.9, "making_progress": 0.05}
@@ -369,9 +398,8 @@ def test_loop_progress_advisory_mode_logs_but_never_stops(tmp_path):
 
     stop = asyncio.run(loop._maybe_judge_loop_progress(5, "fix the bug"))
 
-    assert stop is False  # advisory never changes behaviour
-    assert loop.judgements[0]["outcome"] == "stop_early"
-    assert loop.judgements[0]["enforced"] is False
+    assert stop is False
+    assert loop._stopped_by_judge is False
 
 
 def test_loop_progress_needs_input_asks_user_and_continues(tmp_path):
@@ -435,7 +463,7 @@ def test_loop_progress_throttled_between_intervals(tmp_path):
     assert judge.calls == []  # 1 % 3 != 0, not near ceiling -> skipped
 
     stop = asyncio.run(loop._maybe_judge_loop_progress(3, "fix the bug"))
-    assert stop is True  # 3 % 3 == 0 -> checked, and the fake verdict says stop
+    assert stop is False  # 3 % 3 == 0 -> checked, but loop control never stops
     assert len(judge.calls) == 1
 
 
@@ -451,16 +479,15 @@ def test_loop_progress_always_checked_near_ceiling_regardless_of_interval(tmp_pa
     assert len(judge.calls) == 1
 
 
-def test_run_stops_early_via_loop_control_end_to_end(tmp_path):
-    """Drives the real run() loop (not just the isolated method) to prove
-    the wiring: an infinite ping-tool loop that would otherwise burn to
-    max_turns instead stops after turn 1 because the judge says so."""
+def test_run_does_not_stop_early_via_loop_control(tmp_path):
+    """A repeating probe is not a reason to kill the run. The ping loop
+    burns to max_turns even when the judge would once have said stop."""
     judge = FakeJudge()
     judge.responses["loop_control"] = FakeVerdict(
         nouls={"repeating_itself": 0.9, "making_progress": 0.05}
     )
     judgements: list[dict] = []
-    config = EngineConfig(judge_mode="enforcing", max_turns=16, loop_control_interval=1)
+    config = EngineConfig(judge_mode="enforcing", max_turns=4, loop_control_interval=1)
     loop = AgentLoop(
         llm=_AlwaysPing(),
         tools=_ping_registry(),
@@ -470,15 +497,12 @@ def test_run_stops_early_via_loop_control_end_to_end(tmp_path):
         on_judgement=lambda **kw: judgements.append(kw),
     )
 
-    final = asyncio.run(loop.run("do something repeatedly"))
+    asyncio.run(loop.run("do something repeatedly"))
 
-    assert loop._exit_status == "stopped"
-    assert loop._stopped_by_judge is True
-    assert "repeating" in final
-    # Stopped after turn 1, nowhere near the 16-turn ceiling.
+    assert loop._exit_status == "max_turns"
+    assert loop._stopped_by_judge is False
     tool_calls_made = sum(1 for m in loop._history if m.get("tool_calls"))
-    assert tool_calls_made == 1
-    assert any(j["tag"] == "loop_control" for j in judgements)
+    assert tool_calls_made == 4
 
 
 def test_loop_progress_signals_include_all_four_questions(tmp_path):
@@ -505,7 +529,7 @@ def test_loop_progress_signals_include_all_four_questions(tmp_path):
 
 
 # ---------------------------------------------------------------------
-# Phase 5: AgentLoop.use_model / run_with_context
+# Phase 5: AgentLoop.use_model
 # ---------------------------------------------------------------------
 
 
@@ -520,44 +544,3 @@ def test_use_model_sets_and_clears_override(tmp_path):
     assert loop._model is None
 
 
-def test_run_with_context_seeds_history_and_fires_tool_hooks(tmp_path):
-    from agents.resolver import Resolution, ToolCallRecord
-
-    started = []
-    finished = []
-    loop = _loop(tmp_path)
-    loop._hooks.on_tool_start = lambda call_id, name, args: started.append(name)
-    loop._hooks.on_tool = lambda call_id, name, args, result: finished.append(name)
-    resolution = Resolution(
-        context="gathered context",
-        trace=[
-            ToolCallRecord("search", {"pattern": "retry"}, "a.py:1:def retry(): ..."),
-            ToolCallRecord("read_file", {"path": "a.py"}, "1|def retry(): ..."),
-        ],
-    )
-
-    reply = asyncio.run(loop.run_with_context("where is retry?", resolution))
-
-    assert reply  # FakeProvider's default LLMResult has text="done"
-    assert started == ["search", "read_file"]
-    assert finished == ["search", "read_file"]
-    roles = [m.get("role") for m in loop._history]
-    assert roles == ["user", "assistant", "tool", "assistant", "tool", "assistant"]
-    assert "search" in loop._tools_called
-    assert "read_file" in loop._tools_called
-
-
-def test_run_with_context_does_not_call_llm_tools_that_were_never_registered(tmp_path):
-    """The resolver's synthetic tool calls (search/read_file) don't need to
-    exist in this loop's own tool registry -- the model never calls them,
-    it only reads their pre-seeded results."""
-    from agents.resolver import Resolution, ToolCallRecord
-
-    loop = _loop(tmp_path, tools=ToolRegistry())  # empty registry
-    resolution = Resolution(
-        context="x", trace=[ToolCallRecord("search", {}, "some result")]
-    )
-
-    reply = asyncio.run(loop.run_with_context("q", resolution))
-
-    assert reply

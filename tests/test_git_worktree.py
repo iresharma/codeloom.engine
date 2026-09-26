@@ -22,6 +22,7 @@ from runtime.tools.git import (
 from tests.test_orchestrator import (
     _HangChild,
     _bind,
+    _diagnostics_first,
     _init_git,
     _is_orch,
     _queued,
@@ -226,10 +227,11 @@ class _HangEachChild(FakeProvider):
     async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
         if _is_orch(tools):
             return LLMResult(text="ok")
-        hang = asyncio.Event()
-        self.hangs.append(hang)
-        await hang.wait()
-        return LLMResult(text="child")
+        if not any(message.get("role") == "tool" for message in messages):
+            hang = asyncio.Event()
+            self.hangs.append(hang)
+            await hang.wait()
+        return _diagnostics_first(messages, tools) or LLMResult(text="child")
 
 
 def test_reviewer_joins_writer_then_prompts(tmp_path):

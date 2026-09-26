@@ -83,24 +83,96 @@ DEP = ["dep_why"]
 REPORT_TO_ORCH = (
     "Your only reader is the orchestrator, not a human. "
     "Do not greet, apologize, or recap the task. No markdown headings or filler. "
-    "End with a complete briefing: labeled lines for what / paths / facts / verdict / leftover. "
-    "Facts must be specific enough that a later coder can work without re-surveying. "
-    "A filename is not an answer. Finish the investigation before you report. "
-    "Omit empty fields. If a command or fetch failed for environment reasons "
-    "(missing dependency, auth, network) rather than a code bug, say so in "
-    "leftover instead of retrying blindly."
+    "End with a complete briefing as labeled blocks: what / paths / facts / "
+    "verdict / leftover. A writer also adds reasoning: (why the change is "
+    "shaped this way) and test_plan: (commands, cases, expected results). "
+    "Those two blocks must stay complete; do not shrink them to a slogan. "
+    "Facts must be specific enough that the next agent can work without "
+    "re-surveying. A filename is not an answer. Finish the work before you "
+    "report. Omit empty fields. If a command or fetch failed for environment "
+    "reasons (missing dependency, auth, network) rather than a code bug, say "
+    "so in leftover instead of retrying blindly."
 )
 
 TEST_GLOBS = [
     "**/test_*.py",
     "**/*_test.py",
+    "**/*_test.go",
     "**/tests/**",
+    "**/test/**",
     "**/__tests__/**",
     "**/*.spec.*",
     "**/*.test.*",
+    "**/*_spec.rb",
+    "**/*Test.java",
+    "**/*Test.kt",
     "**/cypress/**",
     "**/e2e/**",
 ]
+# Source files that should come with a test when the repo already has tests.
+CODE_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".go",
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".tsx",
+        ".rs",
+        ".java",
+        ".kt",
+        ".rb",
+        ".php",
+        ".cs",
+        ".swift",
+        ".scala",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".ex",
+        ".exs",
+    }
+)
+_TEST_SCAN_LIMIT = 20_000
+_TEST_SCAN_SKIP = frozenset(
+    {".git", ".engine", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
+)
+
+
+def is_test_path(rel: str) -> bool:
+    from runtime.tools.writeglob import write_allowed
+
+    return write_allowed(rel, TEST_GLOBS)
+
+
+def is_code_path(rel: str) -> bool:
+    name = rel.rsplit("/", 1)[-1]
+    dot = name.rfind(".")
+    return dot > 0 and name[dot:].lower() in CODE_SUFFIXES
+
+
+def repo_has_tests(workspace) -> bool:
+    """True when the workspace already has at least one test source file."""
+    from pathlib import Path
+
+    from runtime.tools.git import tracked_paths
+
+    root = Path(workspace)
+    paths = tracked_paths(root)
+    if paths is None:
+        paths = []
+        for index, path in enumerate(root.rglob("*")):
+            if index >= _TEST_SCAN_LIMIT:
+                break
+            if any(part in _TEST_SCAN_SKIP for part in path.parts):
+                continue
+            if path.is_file():
+                paths.append(path.relative_to(root).as_posix())
+    return any(is_test_path(rel) and is_code_path(rel) for rel in paths)
 
 
 # Tester only. Ask inherits OPENROUTER_MODEL — the briefing is the map
@@ -121,6 +193,9 @@ class AgentProfile:
     temperature: float = 0.2
     needs_worktree: bool = False
     join_worktree: bool = False
+    # When the repo already has tests, a source edit is not finished until a
+    # test path was edited too. Checked in Subagent._finish_nudge.
+    requires_tests: bool = False
 
 
 class ProfileRegistry:

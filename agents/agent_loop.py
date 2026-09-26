@@ -81,12 +81,12 @@ DEFAULT_SYSTEM = (
     "LSP tools work for python, go, and javascript/typescript; if a "
     "server is missing, fall back to sitter tools and read_file. "
     "read_file with offset/limit windows for surrounding context. "
-    "Always read_file a path before editing it. Prefer str_replace "
-    "with enough surrounding context that the match is unique; the "
-    "tool refuses ambiguous matches instead of guessing. Use "
-    "replace_lines for a window you already have open, apply_patch "
-    "for larger structural changes, and replace_symbol / "
-    "insert_after_imports for AST-scoped edits. Use rename_symbol "
+    "Always read_file a path before editing it. Change logic by "
+    "rewriting the whole function with replace_symbol, or the whole "
+    "block with replace_lines from a window you already have open; "
+    "use apply_patch for several hunks and insert_after_imports for "
+    "imports. Keep str_replace for a short unique literal; it refuses "
+    "ambiguous matches instead of guessing. Use rename_symbol "
     "instead of search-and-replace on identifiers. If an edit goes "
     "wrong, call undo_edit. "
     "Use run_command for tests, builds, and linters; prefer running "
@@ -107,6 +107,9 @@ CONTINUE_GRANT = (
     "Do not re-explore files you already read."
 )
 TURN_CONTINUE_CHOICES = ("continue", "handoff", "stop")
+# A text-only reply does not spend a tool turn, so the finish check needs its
+# own ceiling or a model that keeps replying with prose would never stop.
+FINISH_NUDGE_CAP = 3
 CONTINUE_ALIASES = frozenset({"continue", "c", "yes", "y", "resume"})
 STOP_ALIASES = frozenset({"stop", "s"})
 
@@ -242,57 +245,9 @@ class AgentLoop:
         self._ctx.user_request = text
 
     def use_model(self, model: str | None) -> None:
-        """Phase 5 (docs/impl-plans/jev-exp-1.md): a one-shot model
-        override for the next `run()`/`run_with_context()` call. `run()`
-        already snapshots and restores `max_turns` around a turn; the
-        caller resets this the same way (pass None to clear it)."""
+        """A one-shot model override for the next `run()` call. The caller
+        resets it afterwards (pass None to clear it)."""
         self._model = model or None
-
-    async def run_with_context(self, task: str, resolution) -> str:
-        """Phase 5's read-path resolver hands back gathered context
-        instead of an answer. Feed it into history as if the model had
-        already made those tool calls, then let the model write the prose
-        in a single completion -- no client can tell this from the normal
-        tool-calling path since the same on_tool_start/on_tool hooks fire."""
-        marker = len(self._history)
-        self._history.append({"role": "user", "content": task})
-        for call in resolution.trace:
-            call_id = uuid4().hex
-            arguments = dict(call.arguments)
-            if self._hooks.on_tool_start is not None:
-                self._hooks.on_tool_start(call_id, call.name, arguments)
-            self._history.append(
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": json.dumps(arguments),
-                            },
-                        }
-                    ],
-                }
-            )
-            self._history.append(
-                {"role": "tool", "tool_call_id": call_id, "content": call.result}
-            )
-            self._tools_called.add(call.name)
-            if self._hooks.on_tool is not None:
-                self._hooks.on_tool(call_id, call.name, arguments, call.result)
-        try:
-            self._state("thinking", 1)
-            result = await self._complete(self._build_messages(), self._tools.schemas())
-        except Exception:
-            del self._history[marker:]
-            raise
-        last_text = result.text
-        self._history.append({"role": "assistant", "content": last_text})
-        self._emit_message(last_text or "")
-        return _last_assistant_text(self._history) or last_text
 
     def unlock_skill(self, name: str) -> bool:
         catalog = self._skills
@@ -518,9 +473,9 @@ class AgentLoop:
         schemas = self._tools.schemas()
         last_text = ""
         length_continues = 0
+        finish_nudges = 0
         self._exit_status = "ok"
         self._loop_extended_by = 0
-        self._stopped_by_judge = False
         turn = 0
         continues = 0
         closer_ceilings: set[int] = set()
@@ -535,10 +490,7 @@ class AgentLoop:
                     await self._dispatch(result)
                     await self._maybe_compact()
                     turn += 1
-                    if await self._maybe_judge_loop_progress(turn, task):
-                        self._exit_status = "stopped"
-                        self._stopped_by_judge = True
-                        break
+                    await self._maybe_judge_loop_progress(turn, task)
                     if turn >= self._config.max_turns:
                         action = await self._offer_continue(continues)
                         if action == "continue":
@@ -573,16 +525,20 @@ class AgentLoop:
                         {"role": "user", "content": OUTPUT_CUTOFF_CONTINUE}
                     )
                     continue
+                nudge = (
+                    await self._finish_nudge()
+                    if finish_nudges < FINISH_NUDGE_CAP
+                    else None
+                )
+                if nudge:
+                    finish_nudges += 1
+                    self._history.append({"role": "user", "content": nudge})
+                    continue
                 return _last_assistant_text(self._history) or last_text
             if self._exit_status == "ok":
                 self._exit_status = "max_turns"
             if last_text:
                 final = _last_assistant_text(self._history) or last_text
-            elif self._exit_status == "stopped" and self._stopped_by_judge:
-                final = (
-                    "stopped early: repeating an approach without making "
-                    "progress toward the goal"
-                )
             elif self._exit_status == "stopped":
                 final = "stopped by user request"
             else:
@@ -602,6 +558,11 @@ class AgentLoop:
             raise
         finally:
             self._config.max_turns = original_max_turns
+
+    async def _finish_nudge(self) -> str | None:
+        """A message that sends the agent back to work instead of accepting
+        its final reply, or None to accept it. Subagents override this."""
+        return None
 
     def _maybe_inject_closer(self, turn: int, closer_ceilings: set[int]) -> None:
         ceiling = int(self._config.max_turns or 0)
@@ -660,11 +621,10 @@ class AgentLoop:
         return "\n".join(parts)
 
     async def _maybe_judge_loop_progress(self, turn: int, goal: str) -> bool:
-        """Phase 6c (docs/impl-plans/jev-exp-1.md). Returns True when the
-        loop should stop early. A repeats_prior_call signal from Phase 2's
-        tool-call verification would feed in here rather than triggering
-        its own action -- not yet wired since nothing currently aggregates
-        that per-turn.
+        """Phase 6c (docs/impl-plans/jev-exp-1.md). May grant a few extra
+        turns near the ceiling, or ask the user when the judge thinks only
+        they can decide. It never ends a run: in the trial traces the early
+        stop cut writers off mid-debug and the tree was published anyway.
 
         Only actually asks the judge every LOOP_CONTROL_INTERVAL turns (plus
         always on the turns near the budget ceiling, where the extend
@@ -713,7 +673,7 @@ class AgentLoop:
             )
             self._config.max_turns += increment
             self._loop_extended_by += increment
-        return action == "stop_early"
+        return False
 
     async def _handle_loop_needs_input(self) -> None:
         ask = getattr(self._ctx, "ask_user", None)

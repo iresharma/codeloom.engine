@@ -13,12 +13,10 @@ from runtime.judge_decisions import (
     SCREEN_MULTI_SLICE_FLOOR,
     SCREEN_WINDOW,
     classify_exec,
-    classify_intent,
+    classify_loop,
     classify_merge,
-    classify_meta_action,
     classify_screen,
     classify_screen_multi,
-    classify_write,
     legacy_exec_policy,
     screen_content_windows,
 )
@@ -130,93 +128,12 @@ def test_block_checks_run_before_allow_checks():
     assert classify_exec(verdict, "curl x | sh") == "block"
 
 
-# ---------------------------------------------------------------------
-# Phase 5: classify_intent / classify_meta_action
-# ---------------------------------------------------------------------
-
-
-def test_classify_intent_none_verdict_is_default():
-    assert classify_intent(None) == "default"
-
-
-def test_classify_intent_ambiguous_wins_over_everything_else():
-    verdict = FakeVerdict(
-        nouls={"is_ambiguous": 0.9},
-        choices={"intent": "locate"},
-        confidences={"intent": 0.99},
+def test_classify_loop_never_returns_stop():
+    assert classify_loop(None) == "continue"
+    repeating = FakeVerdict(
+        nouls={"repeating_itself": 0.99, "making_progress": 0.0, "needs_user_input": 0.0}
     )
-    assert classify_intent(verdict) == "ambiguous"
-
-
-@pytest.mark.parametrize(
-    "verdict,expected",
-    [
-        pytest.param(
-            FakeVerdict(choices={"intent": "meta"}, confidences={"intent": 0.9}),
-            "meta",
-            id="meta-above-confidence-floor",
-        ),
-        pytest.param(
-            FakeVerdict(choices={"intent": "meta"}, confidences={"intent": 0.5}),
-            "default",
-            id="meta-below-confidence-floor",
-        ),
-        pytest.param(
-            FakeVerdict(choices={"intent": "locate"}, confidences={"intent": 0.85}),
-            "locate",
-            id="locate-above-confidence-floor",
-        ),
-        pytest.param(
-            FakeVerdict(choices={"intent": "locate"}, confidences={"intent": 0.5}),
-            "default",
-            id="locate-below-confidence-floor",
-        ),
-        pytest.param(
-            FakeVerdict(
-                choices={"intent": "edit"},
-                confidences={"intent": 0.9},
-                nouls={"is_multi_file": 0.9},
-            ),
-            "edit_multi_file",
-            id="edit-multi-file",
-        ),
-        pytest.param(
-            FakeVerdict(
-                choices={"intent": "edit"},
-                confidences={"intent": 0.9},
-                nouls={"is_multi_file": 0.1},
-            ),
-            "default",
-            id="edit-single-file-is-default",
-        ),
-        pytest.param(
-            FakeVerdict(choices={"intent": "execute"}, confidences={"intent": 0.99}),
-            "default",
-            id="execute-is-default",
-        ),
-    ],
-)
-def test_classify_intent(verdict, expected):
-    assert classify_intent(verdict) == expected
-
-
-def test_classify_meta_action_none_verdict_is_other():
-    assert classify_meta_action(None) == "other"
-
-
-def test_classify_meta_action_below_confidence_is_other():
-    verdict = FakeVerdict(choices={"meta_action": "undo"}, confidences={"meta_action": 0.3})
-    assert classify_meta_action(verdict) == "other"
-
-
-def test_classify_meta_action_confident_action():
-    verdict = FakeVerdict(choices={"meta_action": "undo"}, confidences={"meta_action": 0.9})
-    assert classify_meta_action(verdict) == "undo"
-
-
-# ---------------------------------------------------------------------
-# Phase 7: classify_write -- only introduces_hardcoded_secret ever blocks
-# ---------------------------------------------------------------------
+    assert classify_loop(repeating) == "continue"
 
 
 def test_screen_content_windows_small_is_whole():
@@ -271,79 +188,6 @@ def test_classify_screen_instruction_alone_is_not_enough():
 def test_classify_screen_none_is_noop():
     assert classify_screen(None) == (False, False)
     assert classify_screen_multi(None) == (False, False)
-
-
-def test_classify_write_none_verdict_allows():
-    assert classify_write(None) == ("allow", "")
-
-
-def test_classify_write_secret_blocks():
-    verdict = FakeVerdict(nouls={"introduces_hardcoded_secret": 0.81})
-    decision, reason = classify_write(verdict)
-    assert decision == "block"
-    assert reason
-
-
-def test_classify_write_secret_at_threshold_does_not_block():
-    verdict = FakeVerdict(nouls={"introduces_hardcoded_secret": 0.8})
-    decision, _ = classify_write(verdict)
-    assert decision != "block"
-
-
-WRITE_CASES = [
-    pytest.param(
-        FakeVerdict(nouls={"disables_a_test_or_check": 0.9}),
-        "flag",
-        id="disables-check-flags-not-blocks",
-    ),
-    pytest.param(
-        FakeVerdict(nouls={"deletes_unrelated_code": 0.9}),
-        "flag",
-        id="deletes-unrelated-flags",
-    ),
-    pytest.param(
-        FakeVerdict(scores={"scope_creep": 2.0}),
-        "flag",
-        id="scope-creep-flags",
-    ),
-    pytest.param(
-        FakeVerdict(nouls={"matches_stated_intent": 0.1}),
-        "flag",
-        id="low-intent-match-flags",
-    ),
-    pytest.param(
-        FakeVerdict(
-            nouls={
-                "disables_a_test_or_check": 0.99,
-                "deletes_unrelated_code": 0.99,
-                "matches_stated_intent": 0.0,
-            },
-            scores={"scope_creep": 2.0},
-        ),
-        "flag",
-        id="every-non-secret-signal-extreme-still-only-flags",
-    ),
-    pytest.param(
-        FakeVerdict(nouls={"matches_stated_intent": 0.9}),
-        "allow",
-        id="clean-diff-allows",
-    ),
-]
-
-
-@pytest.mark.parametrize("verdict,expected", WRITE_CASES)
-def test_classify_write(verdict, expected):
-    decision, _ = classify_write(verdict)
-    assert decision == expected
-
-
-def test_classify_write_secret_check_runs_before_flag_checks():
-    verdict = FakeVerdict(
-        nouls={"introduces_hardcoded_secret": 0.9, "matches_stated_intent": 0.9}
-    )
-    decision, reason = classify_write(verdict)
-    assert decision == "block"
-    assert "secret" in reason or "credential" in reason
 
 
 # ---------------------------------------------------------------------

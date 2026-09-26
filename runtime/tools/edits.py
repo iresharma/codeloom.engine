@@ -762,108 +762,17 @@ async def _apply_edit_body(
             before = ctx.lsp.cached_diagnostics(path)
         except Exception:  # noqa: BLE001
             before = []
-    blocked, gate_note = await _judge_write_gate(ctx, path, mutate, tool_name, creating=creating)
-    if blocked is not None:
-        return blocked
     result = _apply_sync(ctx, path, mutate, tool_name, creating=creating)
     if not result.ok:
         return result.message
     extra = ""
     if ctx.lsp is not None and result.diff:
         extra = await _lsp_after(ctx, result, before, tool_name)
-    if gate_note:
-        extra = f"{gate_note}\n{extra}" if extra else gate_note
     if ctx.on_edit is not None and result.diff:
         ctx.on_edit(result.rel, result.diff, tool_name, result.edit_id)
     if ctx.on_edit is not None and result.created and not result.diff:
         ctx.on_edit(result.rel, result.diff or "", tool_name, result.edit_id)
     return _format_success(result, extra)
-
-
-def _preview_diff(ctx: ToolContext, path: str, mutate: Callable[[FileSource], str], *, creating: bool) -> str | None:
-    """A throwaway diff for the write gate's judge call only. Never feeds
-    into the actual commit -- `_apply_sync` below redoes `_prepare` fresh,
-    staleness check included, in one uninterrupted synchronous call. This
-    is what keeps invariant 5 intact: the only `await` (the judge call) sits
-    entirely before any real staleness check or write, never between one.
-
-    `_prepare(creating=True)` mkdirs missing parent directories for real
-    (`_ensure_parents`) so it can synthesize a source to diff against. Since
-    this call is thrown away regardless of outcome, prune anything it
-    created immediately -- otherwise a preview whose real commit never
-    happens (blocked by the gate, or fails) leaves empty directories behind
-    as a side effect of a call that was never supposed to touch disk."""
-    try:
-        prepared = _prepare(ctx, path, mutate, creating=creating)
-    except (EditError, WorkspacePathError, FileNotFoundError, OSError, ValueError):
-        return None
-    for directory in reversed(prepared.created_dirs):
-        _rmdir_if_empty(ctx.workspace / directory)
-    if prepared.noop:
-        return ""
-    return prepared.diff
-
-
-async def _judge_write_gate(
-    ctx: ToolContext,
-    path: str,
-    mutate: Callable[[FileSource], str],
-    tool_name: str,
-    *,
-    creating: bool = False,
-) -> tuple[str | None, str]:
-    """Phase 7 (docs/impl-plans/jev-exp-1.md): the semantic write gate.
-    Returns (block_error, note) -- block_error is non-None only when the
-    edit must be refused outright (Stage 2: a hardcoded secret, enforcing
-    mode only); note is a non-blocking heads-up appended to a successful
-    result. Runs entirely before `_apply_sync`, never inside it."""
-    judge = getattr(ctx, "judge", None)
-    config = ctx.config
-    if judge is None or not getattr(judge, "enabled", False) or config is None:
-        return None, ""
-    site_mode = config.judge_mode_for("write")
-    if site_mode == "off":
-        return None, ""
-    diff = _preview_diff(ctx, path, mutate, creating=creating)
-    if not diff:
-        return None, ""
-    from runtime.judge_decisions import (
-        classify_write,
-        write_diff_window,
-        write_gate_questions,
-        write_signals,
-    )
-
-    verdict = await judge.ask(
-        {
-            "user_request": getattr(ctx, "user_request", ""),
-            "path": path,
-            "diff": write_diff_window(diff),
-            "tool": tool_name,
-        },
-        write_gate_questions(),
-        tag="write_gate",
-    )
-    if verdict is None:
-        return None, ""
-    enforced = site_mode == "enforcing"
-    decision, reason = classify_write(verdict)
-    if decision == "allow":
-        return None, ""
-    on_judgement = getattr(ctx, "on_judgement", None)
-    if on_judgement is not None:
-        on_judgement(
-            tag="write_gate",
-            subject=f"{tool_name}:{path}"[:200],
-            outcome=decision,
-            signals=write_signals(verdict),
-            enforced=enforced,
-            latency_ms=verdict.latency_ms,
-            agent_id=getattr(ctx, "agent_id", ""),
-        )
-    if enforced and decision == "block":
-        return f"error: refused — {reason}", ""
-    return None, f"[engine: judge flagged this diff -- {reason}]"
 
 
 def _apply_workspace_sync(
@@ -946,9 +855,6 @@ async def _apply_workspace_edit_body(
     edits_by_path: list[tuple[str, list[TextEdit]]],
     tool_name: str,
 ) -> str:
-    blocked, gate_note = await _judge_workspace_write_gate(ctx, edits_by_path, tool_name)
-    if blocked is not None:
-        return blocked
     results, err = _apply_workspace_sync(ctx, edits_by_path, tool_name)
     if err:
         return err
@@ -962,82 +868,7 @@ async def _apply_workspace_edit_body(
         extras.append(_format_success(result, extra))
     if not extras:
         return "error: rename produced no edits"
-    body = "\n\n".join(extras)
-    return f"{gate_note}\n{body}" if gate_note else body
-
-
-def _preview_workspace_diff(
-    ctx: ToolContext, edits_by_path: list[tuple[str, list[TextEdit]]]
-) -> str | None:
-    """One combined diff across every file in the batch -- a multi-file
-    rename is one logical edit, so it gets one judgment, not one per file."""
-    parts: list[str] = []
-    for path, edits in edits_by_path:
-        try:
-            prepared = _prepare(
-                ctx,
-                path,
-                lambda src, captured=edits: apply_text_edits(src.text, captured),
-                check_stale=False,
-            )
-        except (EditError, WorkspacePathError, FileNotFoundError, OSError, ValueError):
-            continue
-        if prepared.diff:
-            parts.append(prepared.diff)
-    return "\n\n".join(parts) if parts else None
-
-
-async def _judge_workspace_write_gate(
-    ctx: ToolContext, edits_by_path: list[tuple[str, list[TextEdit]]], tool_name: str
-) -> tuple[str | None, str]:
-    judge = getattr(ctx, "judge", None)
-    config = ctx.config
-    if judge is None or not getattr(judge, "enabled", False) or config is None:
-        return None, ""
-    site_mode = config.judge_mode_for("write")
-    if site_mode == "off":
-        return None, ""
-    diff = _preview_workspace_diff(ctx, edits_by_path)
-    if not diff:
-        return None, ""
-    from runtime.judge_decisions import (
-        classify_write,
-        write_diff_window,
-        write_gate_questions,
-        write_signals,
-    )
-
-    paths = ", ".join(path for path, _ in edits_by_path)
-    verdict = await judge.ask(
-        {
-            "user_request": getattr(ctx, "user_request", ""),
-            "path": paths,
-            "diff": write_diff_window(diff),
-            "tool": tool_name,
-        },
-        write_gate_questions(),
-        tag="write_gate",
-    )
-    if verdict is None:
-        return None, ""
-    enforced = site_mode == "enforcing"
-    decision, reason = classify_write(verdict)
-    if decision == "allow":
-        return None, ""
-    on_judgement = getattr(ctx, "on_judgement", None)
-    if on_judgement is not None:
-        on_judgement(
-            tag="write_gate",
-            subject=f"{tool_name}:{paths}"[:200],
-            outcome=decision,
-            signals=write_signals(verdict),
-            enforced=enforced,
-            latency_ms=verdict.latency_ms,
-            agent_id=getattr(ctx, "agent_id", ""),
-        )
-    if enforced and decision == "block":
-        return f"error: refused — {reason}", ""
-    return None, f"[engine: judge flagged this diff -- {reason}]"
+    return "\n\n".join(extras)
 
 
 def normalize_workspace_edit(workspace: Path, payload: dict) -> list[tuple[str, list[TextEdit]]]:

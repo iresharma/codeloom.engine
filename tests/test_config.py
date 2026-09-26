@@ -199,11 +199,13 @@ def test_phase6_judge_site_overrides(monkeypatch, tmp_path):
     assert config.judge_mode_for("loop") == "enforcing"
 
 
-def test_phase5_intent_judge_site_override(monkeypatch, tmp_path):
-    monkeypatch.setenv("ENGINE_JUDGE", "advisory")
+def test_removed_intent_and_write_sites_are_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "enforcing")
     monkeypatch.setenv("ENGINE_JUDGE_INTENT", "enforcing")
+    monkeypatch.setenv("ENGINE_JUDGE_WRITE", "enforcing")
     config = EngineConfig.from_env(tmp_path)
-    assert config.judge_mode_for("intent") == "enforcing"
+    assert config.judge_mode_for("intent") == "off"
+    assert config.judge_mode_for("write") == "off"
 
 
 def test_model_cheap_and_strong_default_empty(monkeypatch, tmp_path):
@@ -232,12 +234,8 @@ def test_calibrated_profile_enforces_read_sites_and_write_secrets(
     assert config.judge_mode_for("exec") == "enforcing"
     assert config.judge_mode_for("search") == "enforcing"
     assert config.judge_mode_for("screen") == "enforcing"
-    assert config.judge_mode_for("intent") == "enforcing"
-    # The write gate can only ever block on introduces_hardcoded_secret, so
-    # the recommended calibrated profile enforces it too -- unlike a blanket
-    # ENGINE_JUDGE=enforcing, which still requires an explicit opt-in (see
-    # test_write_gate_never_silently_inherits_global_enforcing below).
-    assert config.judge_mode_for("write") == "enforcing"
+    assert config.judge_mode_for("intent") == "off"
+    assert config.judge_mode_for("write") == "off"
     assert config.judge_mode_for("merge") == "advisory"
     assert config.judge_usable is True
 
@@ -245,28 +243,9 @@ def test_calibrated_profile_enforces_read_sites_and_write_secrets(
 def test_calibrated_site_override_still_wins(monkeypatch, tmp_path):
     monkeypatch.setenv("TYPESAFE_API_KEY", "sk-real-typesafe-key")
     monkeypatch.setenv("ENGINE_JUDGE", "calibrated")
-    monkeypatch.setenv("ENGINE_JUDGE_WRITE", "advisory")
+    monkeypatch.setenv("ENGINE_JUDGE_LOOP", "enforcing")
     config = EngineConfig.from_env(tmp_path)
-    assert config.judge_mode_for("write") == "advisory"
-
-
-def test_write_gate_never_silently_inherits_global_enforcing(monkeypatch, tmp_path):
-    monkeypatch.setenv("ENGINE_JUDGE", "enforcing")
-    config = EngineConfig.from_env(tmp_path)
-    assert config.judge_mode == "enforcing"
-    assert config.judge_mode_for("write") == "advisory"
-    assert config.judge_mode_for("exec") == "enforcing"  # other sites unaffected
-
-
-def test_write_gate_respects_off_and_explicit_override(monkeypatch, tmp_path):
-    monkeypatch.setenv("ENGINE_JUDGE", "off")
-    off_config = EngineConfig.from_env(tmp_path)
-    assert off_config.judge_mode_for("write") == "off"
-
-    monkeypatch.setenv("ENGINE_JUDGE", "enforcing")
-    monkeypatch.setenv("ENGINE_JUDGE_WRITE", "enforcing")
-    explicit_config = EngineConfig.from_env(tmp_path)
-    assert explicit_config.judge_mode_for("write") == "enforcing"
+    assert config.judge_mode_for("loop") == "enforcing"
 
 
 def test_merge_gate_judge_site_override(monkeypatch, tmp_path):

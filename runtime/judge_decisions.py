@@ -123,23 +123,15 @@ LIST_FILES_REDIRECT = (
 )
 
 # Tools worth the extra ~100ms: LSP tools where a wrong line/character
-# silently returns nothing useful, and the editing tools. Deliberately an
-# allowlist rather than "everything except a denylist" -- list_files,
-# list_edits, and undo_edit are cheap to get wrong and cheap to retry, so
-# they are simply never in this set.
+# silently returns nothing useful. Edit tools are not here: the check only
+# asked whether the JSON matched the schema, which the write funnel already
+# enforces, and never whether the new code was right.
 VERIFY_TOOLS = frozenset(
     {
         "goto_definition",
         "find_references",
         "hover",
         "rename_symbol",
-        "str_replace",
-        "replace_lines",
-        "insert_at_line",
-        "create_file",
-        "apply_patch",
-        "replace_symbol",
-        "insert_after_imports",
     }
 )
 
@@ -504,10 +496,8 @@ def classify_diagnostic(verdict, key: str) -> bool:
 # Phase 6c -- loop progress control (agents/agent_loop.py)
 # --------------------------------------------------------------------------
 
-LoopAction = Literal["continue", "stop_early", "needs_input"]
+LoopAction = Literal["continue", "needs_input"]
 
-LOOP_STOP_PROGRESS_FLOOR = 0.3
-LOOP_STOP_REPEAT_CEILING = 0.6
 LOOP_NEEDS_INPUT_FLOOR = 0.7
 LOOP_EXTEND_PROGRESS_FLOOR = 0.7
 LOOP_EXTEND_COMPLETE_CEILING = 0.5
@@ -544,15 +534,11 @@ def loop_questions() -> dict:
 
 
 def classify_loop(verdict) -> LoopAction:
+    """No stop outcome: a low progress score is not a reason to end a run."""
     if verdict is None:
         return "continue"
     if verdict.noul("needs_user_input") > LOOP_NEEDS_INPUT_FLOOR:
         return "needs_input"
-    if (
-        verdict.noul("repeating_itself") > LOOP_STOP_REPEAT_CEILING
-        and verdict.noul("making_progress") < LOOP_STOP_PROGRESS_FLOOR
-    ):
-        return "stop_early"
     return "continue"
 
 
@@ -567,223 +553,6 @@ def should_extend_turns(verdict) -> bool:
 
 def loop_signals(verdict) -> dict[str, float]:
     return {key: verdict.noul(key) for key in LOOP_SIGNAL_KEYS}
-
-
-# --------------------------------------------------------------------------
-# Phase 5 -- intent routing and the read-path resolver (agents/resolver.py)
-# --------------------------------------------------------------------------
-
-IntentRoute = Literal["ambiguous", "meta", "locate", "edit_multi_file", "default"]
-
-INTENT_CRITERIA = {
-    "meta": {
-        "what": "About the session itself: undo, what changed, list edits",
-        "not_for": "Anything requiring reading project code",
-    },
-    "locate": {
-        "what": "Find where something lives, or explain existing code",
-        "not_for": "Requests to change code",
-    },
-    "edit": {"what": "Modify, add, refactor, or fix code"},
-    "execute": {"what": "Run, build, or test something"},
-}
-
-INTENT_AMBIGUOUS_FLOOR = 0.7
-INTENT_META_CONFIDENCE = 0.85
-INTENT_LOCATE_CONFIDENCE = 0.8
-INTENT_MULTI_FILE_FLOOR = 0.5
-# Bounded: an edit_multi_file turn gets more room, never unlimited.
-EDIT_MULTI_FILE_MAX_TURNS_BONUS = 8
-
-INTENT_SIGNAL_KEYS = ("is_multi_file", "needs_types", "is_ambiguous")
-
-
-def intent_questions() -> dict:
-    from runtime.judge import Choice, Noul
-
-    return {
-        "intent": Choice(
-            instructions="What kind of turn is `message`?", criteria=INTENT_CRITERIA
-        ),
-        "is_multi_file": Noul(
-            instructions="Would satisfying `message` require changes across several files?"
-        ),
-        "needs_types": Noul(
-            instructions="Does `message` depend on cross-file type information?"
-        ),
-        "is_ambiguous": Noul(
-            instructions="Is `message` too underspecified to act on without asking a clarifying question?"
-        ),
-    }
-
-
-def classify_intent(verdict) -> IntentRoute:
-    """Confidence compounds across the whole resolver chain, so this first
-    gate is deliberately conservative (see EDIT_MULTI_FILE_MAX_TURNS_BONUS
-    and the resolver's own floors) -- a route that falls through often and
-    is right when it doesn't is the success case, not a resolve rate."""
-    if verdict is None:
-        return "default"
-    if verdict.noul("is_ambiguous") > INTENT_AMBIGUOUS_FLOOR:
-        return "ambiguous"
-    intent = verdict.choice("intent")
-    confidence = verdict.confidence("intent")
-    if intent == "meta" and confidence > INTENT_META_CONFIDENCE:
-        return "meta"
-    if intent == "locate" and confidence > INTENT_LOCATE_CONFIDENCE:
-        return "locate"
-    if intent == "edit" and verdict.noul("is_multi_file") > INTENT_MULTI_FILE_FLOOR:
-        return "edit_multi_file"
-    return "default"
-
-
-def intent_signals(verdict) -> dict[str, float]:
-    signals = {key: verdict.noul(key) for key in INTENT_SIGNAL_KEYS}
-    signals["intent_confidence"] = verdict.confidence("intent")
-    return signals
-
-
-META_ACTION_CRITERIA = {
-    "undo": {"what": "Undo the last edit made this session"},
-    "what_changed": {"what": "Summarize uncommitted changes (git status)"},
-    "list_edits": {"what": "List recent edits made this session"},
-    "other": {"what": "Anything else about the session"},
-}
-META_ACTION_CONFIDENCE = 0.8
-
-
-def meta_action_questions() -> dict:
-    from runtime.judge import Choice
-
-    return {
-        "meta_action": Choice(
-            instructions="Which session-management action does `message` request?",
-            criteria=META_ACTION_CRITERIA,
-        )
-    }
-
-
-def classify_meta_action(verdict) -> str:
-    """Returns "other" (a no-op for the caller) unless confidently one of
-    the three narrow, already-ungated actions listed above -- undo has no
-    confirmation gate today even when the LLM calls it directly, so this
-    adds no new risk beyond what a normal turn could already do."""
-    if verdict is None:
-        return "other"
-    if verdict.confidence("meta_action") < META_ACTION_CONFIDENCE:
-        return "other"
-    return verdict.choice("meta_action")
-
-
-# --- read-path resolver gates -----------------------------------------
-
-RESOLVER_CANDIDATE_FLOOR = 3
-RESOLVER_RANK_CONFIDENCE_FLOOR = 0.3
-RESOLVER_ANSWERS_MESSAGE_FLOOR = 0.5
-
-
-def resolver_answers_question() -> dict:
-    from runtime.judge import Noul
-
-    return {
-        "answers_message": Noul(
-            instructions="Does `context` gathered so far answer `message`?"
-        )
-    }
-
-
-# --------------------------------------------------------------------------
-# Phase 7 -- the semantic write gate (runtime/tools/edits.py)
-# --------------------------------------------------------------------------
-
-WriteDecision = Literal["allow", "flag", "block"]
-
-SCOPE_CREEP_CRITERIA = [
-    "Exactly what was asked",
-    "Small incidental cleanup alongside the change",
-    "Substantial unrequested changes",
-]
-
-# Stage 2 of the plan's rollout discipline: only introduces_hardcoded_secret
-# ever blocks. The other three signals only ever flag (Stage 1, permanently,
-# in this implementation) -- "Stage 3: consider blocking on the others...
-# It may never be right to" is deliberately not implemented here. A high
-# matches_stated_intent can never override guard_write_path, the staleness
-# check, or the syntax gate; this gate can only ever add a refusal.
-WRITE_SECRET_BLOCK = 0.8
-WRITE_DISABLES_CHECK_FLAG = 0.5
-WRITE_DELETES_UNRELATED_FLAG = 0.5
-WRITE_SCOPE_CREEP_FLAG = 1.6  # >= "substantial unrequested changes"
-WRITE_MATCHES_INTENT_FLAG = 0.3
-
-WRITE_SIGNAL_KEYS = (
-    "matches_stated_intent",
-    "deletes_unrelated_code",
-    "introduces_hardcoded_secret",
-    "disables_a_test_or_check",
-)
-
-
-# A flat head-only truncation hides a secret added in a later hunk of a
-# large diff from the only signal that can block (introduces_hardcoded_secret).
-# Head+tail, same trick as screen_content_windows, keeps both ends in view
-# for the price of one request instead of silently dropping the tail.
-WRITE_DIFF_WINDOW = 8000
-
-
-def write_diff_window(diff: str) -> str:
-    if len(diff) <= WRITE_DIFF_WINDOW:
-        return diff
-    half = WRITE_DIFF_WINDOW // 2
-    return f"{diff[:half]}\n...\n{diff[-half:]}"
-
-
-def write_gate_questions() -> dict:
-    from runtime.judge import Noul, Score
-
-    return {
-        "matches_stated_intent": Noul(
-            instructions="Does `diff` accomplish what `user_request` asked for?"
-        ),
-        "deletes_unrelated_code": Noul(
-            instructions="Does `diff` remove code that `user_request` did not ask to remove?"
-        ),
-        "introduces_hardcoded_secret": Noul(
-            instructions="Does `diff` add a literal credential, API key, token, or password?"
-        ),
-        "disables_a_test_or_check": Noul(
-            instructions="Does `diff` skip, delete, or weaken a test, assertion, or validation?"
-        ),
-        "scope_creep": Score(
-            instructions="How far beyond `user_request` does `diff` reach?",
-            criteria=SCOPE_CREEP_CRITERIA,
-        ),
-    }
-
-
-def classify_write(verdict) -> tuple[WriteDecision, str]:
-    if verdict is None:
-        return "allow", ""
-    if verdict.noul("introduces_hardcoded_secret") > WRITE_SECRET_BLOCK:
-        return "block", "diff appears to introduce a hardcoded credential, key, or password"
-    flags = []
-    if verdict.noul("disables_a_test_or_check") > WRITE_DISABLES_CHECK_FLAG:
-        flags.append("may disable or weaken a test or check")
-    if verdict.noul("deletes_unrelated_code") > WRITE_DELETES_UNRELATED_FLAG:
-        flags.append("removes code unrelated to the request")
-    if verdict.score("scope_creep") >= WRITE_SCOPE_CREEP_FLAG:
-        flags.append("reaches substantially beyond what was asked")
-    if verdict.noul("matches_stated_intent") < WRITE_MATCHES_INTENT_FLAG:
-        flags.append("may not accomplish what was asked")
-    if flags:
-        return "flag", "; ".join(flags)
-    return "allow", ""
-
-
-def write_signals(verdict) -> dict[str, float]:
-    signals = {key: verdict.noul(key) for key in WRITE_SIGNAL_KEYS}
-    signals["scope_creep"] = verdict.score("scope_creep")
-    return signals
 
 
 # --------------------------------------------------------------------------

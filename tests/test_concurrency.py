@@ -70,10 +70,10 @@ class SlowJudge:
 
 
 def test_concurrent_edits_with_slow_judge_still_exactly_one_winner(ctx):
-    """Phase 7's write gate must never reopen the staleness-check-to-write
-    race: even with a judge call that actively yields control mid-flight,
-    exactly one of two conflicting concurrent edits wins and the other is
-    cleanly refused -- never silent corruption, never two winners."""
+    """The write lock must never reopen the staleness-check-to-write
+    race: even when a judge (or anything else) yields mid-flight, exactly
+    one of two conflicting concurrent edits wins and the other is cleanly
+    refused -- never silent corruption, never two winners."""
     from runtime.config import EngineConfig
 
     seed(ctx, "a.py", "value = 1\n")
@@ -101,7 +101,6 @@ def test_concurrent_edits_with_slow_judge_still_exactly_one_winner(ctx):
         )
 
     results = asyncio.run(run())
-    assert ctx.judge.calls  # the gate actually ran and actually awaited
     a_ok = sum(1 for item in results[:2] if item.startswith("ok:"))
     a_err = sum(1 for item in results[:2] if item.startswith("error:"))
     assert a_ok == 1

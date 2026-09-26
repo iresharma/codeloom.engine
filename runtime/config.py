@@ -10,7 +10,8 @@ EXEC_APPROVALS = ("auto", "always", "never", "judged")
 TURN_CONTINUES = ("prompt", "never")
 JUDGE_MODES = ("off", "advisory", "calibrated", "enforcing")
 # Recommended production profile: enforce the calibrated read/exec sites,
-# keep write + merge advisory. Per-site ENGINE_JUDGE_* still wins.
+# keep merge advisory. Per-site ENGINE_JUDGE_* still wins. There is no write
+# or intent site: the judge does not gate edits or route turns.
 CALIBRATED_SITE_MODES = {
     "exec": "enforcing",
     "tools": "advisory",
@@ -19,13 +20,6 @@ CALIBRATED_SITE_MODES = {
     "compaction": "advisory",
     "diagnostics": "advisory",
     "loop": "advisory",
-    "intent": "enforcing",
-    # classify_write can only ever block on introduces_hardcoded_secret
-    # (Stage 2 of docs/impl-plans/jev-exp-1.md's rollout discipline) --
-    # nothing else in the write gate can escalate past "flag". Enforcing it
-    # here means the recommended one-line profile actually blocks a
-    # hardcoded secret instead of silently writing it to disk with a note.
-    "write": "enforcing",
     "merge": "advisory",
 }
 TYPESAFE_PLACEHOLDERS = {"", "...", "your-key", "changeme"}
@@ -37,8 +31,6 @@ JUDGE_SITES = (
     "compaction",
     "diagnostics",
     "loop",
-    "intent",
-    "write",
     "merge",
 )
 # 2.0 never fires in-loop; overflow still force-compacts. Must ship with
@@ -87,25 +79,16 @@ class EngineConfig:
     judge_mode_compaction: str = ""
     judge_mode_diagnostics: str = ""
     judge_mode_loop: str = ""
-    judge_mode_intent: str = ""
-    judge_mode_write: str = ""
     judge_mode_merge: str = ""
 
     def judge_mode_for(self, site: str) -> str:
         """Effective judge mode for a call site: its own override, or the
-        global default -- except "write" (Phase 7's semantic write gate)
-        under a *blanket* ENGINE_JUDGE=enforcing, which never silently
-        inherits that: only an explicit ENGINE_JUDGE_WRITE=enforcing opts
-        it in there. The curated `calibrated` profile is deliberately
-        exempt from that carve-out -- CALIBRATED_SITE_MODES sets write to
-        "enforcing" itself, since the write gate can only ever block on a
-        hardcoded secret (nothing else escalates past "flag"), so the
-        recommended one-line profile should not silently skip it."""
+        global default."""
+        if site not in JUDGE_SITES:
+            return "off"
         override = getattr(self, f"judge_mode_{site}", "")
         if override:
             return override
-        if site == "write" and self.judge_mode == "enforcing":
-            return "advisory"
         if self.judge_mode == "calibrated":
             return CALIBRATED_SITE_MODES.get(site, "advisory")
         return self.judge_mode

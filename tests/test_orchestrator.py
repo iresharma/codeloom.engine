@@ -673,6 +673,22 @@ class _AskHangThenDone(FakeProvider):
         return LLMResult(text="child")
 
 
+def _diagnostics_first(messages, tools):
+    """A compliant writer calls get_diagnostics once before its closing report."""
+    if "get_diagnostics" not in _tool_names(tools):
+        return None
+    if any(message.get("role") == "tool" for message in messages):
+        return None
+    return LLMResult(
+        text="",
+        tool_calls=[
+            ToolCall(
+                id="diag", name="get_diagnostics", arguments_json='{"path": "flag.py"}'
+            )
+        ],
+    )
+
+
 class _HangChild(FakeProvider):
     def __init__(self, hang):
         super().__init__()
@@ -682,7 +698,7 @@ class _HangChild(FakeProvider):
         if _is_orch(tools):
             return LLMResult(text="ok")
         await self.hang.wait()
-        return LLMResult(text="child")
+        return _diagnostics_first(messages, tools) or LLMResult(text="child")
 
 
 def test_discover_tools_includes_new_families():

@@ -16,9 +16,11 @@ def _as_int(value, default: int) -> int:
 
 @tool(
     description=(
-        "Replace one unique exact substring in a file. The match must occur "
-        "exactly once; zero or multiple matches fail instead of guessing. "
-        "Read the file first. Include enough surrounding context to be unique."
+        "Replace one unique exact substring in a file. For a short literal "
+        "only: a string, an import, a constant, one line. To change logic, "
+        "use replace_symbol for a whole function or replace_lines for a whole "
+        "block. The match must occur exactly once; zero or multiple matches "
+        "fail instead of guessing. Read the file first."
     ),
     parameters={
         "type": "object",
@@ -51,7 +53,9 @@ async def str_replace(
 @tool(
     description=(
         "Replace an inclusive 1-based line range in a file. Mirrors the "
-        "read_file window (start-end). Read the file first."
+        "read_file window (start-end). Use it for a whole block that is not "
+        "one named definition (a config section, a run of statements); write "
+        "every line of the block as it should read. Read the file first."
     ),
     parameters={
         "type": "object",
