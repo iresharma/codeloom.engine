@@ -722,3 +722,124 @@ async def test_the_reviewers_run_verify_tool_also_drops_engine_env(tmp_path, mon
         verify_command='echo "trace=${ENGINE_TRACE_CALLS:-unset}"',
     )
     assert "trace=unset" in await run_verify_tool(ctx)
+
+
+# --------------------------------------------------------------------------
+# the reviewer's run_verify tool makes the same baseline comparison as the gate
+#
+# Reach's reviewer saw a plain "FAILED / preexisting_failures_only: false" from
+# the tool while the engine's own gate had let the change through on the same
+# failures. It reasoned its way to the right answer, but the two disagreed.
+
+
+def _reviewer_ctx(repo: Path, failures: str):
+    """A worktree whose verify fails, plus the base it branched from."""
+    from runtime.verify import merge_base_of
+    from tools.base import ToolContext
+
+    dest, _branch, err = add_agent_worktree(repo, "rv", "coder")
+    assert not err, err
+    work = Path(dest)
+    (work / "failures.txt").write_text(failures)
+    commit_if_dirty(work, "change")
+    return ToolContext(
+        workspace=work,
+        config=EngineConfig(),
+        verify_command="cat failures.txt; exit 1",
+        verify_base=merge_base_of(repo, work),
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_verify_tool_reports_a_preexisting_failure_as_such(tmp_path):
+    from tools.verify import run_verify as run_verify_tool
+
+    repo = _repo_with_failing_base(tmp_path, PYTEST_FAILS)
+    ctx = _reviewer_ctx(repo, PYTEST_FAILS)
+    out = await run_verify_tool(ctx)
+    assert "already fail on the base commit" in out
+    assert '"preexisting_failures_only": true' in out
+    assert "tests/test_a.py::test_x" in out
+
+
+@pytest.mark.asyncio
+async def test_run_verify_tool_lists_what_the_change_introduced(tmp_path):
+    from tools.verify import run_verify as run_verify_tool
+
+    repo = _repo_with_failing_base(tmp_path, PYTEST_FAILS)
+    ctx = _reviewer_ctx(repo, PYTEST_FAILS + "FAILED tests/test_c.py::test_new - oops\n")
+    out = await run_verify_tool(ctx)
+    assert "Failures this change introduced" in out
+    assert "pytest:tests/test_c.py::test_new" in out
+    assert '"preexisting_failures_only": false' in out
+
+
+@pytest.mark.asyncio
+async def test_run_verify_tool_without_a_base_reports_a_plain_failure(tmp_path):
+    from tools.verify import run_verify as run_verify_tool
+
+    repo = _repo_with_failing_base(tmp_path, PYTEST_FAILS)
+    ctx = _reviewer_ctx(repo, PYTEST_FAILS)
+    ctx.verify_base = ""
+    out = await run_verify_tool(ctx)
+    assert "verdict: FAILED\n" in out
+    assert "already fail" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_spot_check_never_runs_the_baseline(tmp_path, monkeypatch):
+    """A mutation is supposed to make verify fail; comparing that failure to
+    the base would tell the reviewer the mutation 'predates the change'."""
+    import tools.verify as verify_tool
+
+    repo = _repo_with_failing_base(tmp_path, PYTEST_FAILS)
+    ctx = _reviewer_ctx(repo, PYTEST_FAILS)
+    called: list[str] = []
+
+    async def spy(*args, **kwargs):
+        called.append("baseline")
+
+    monkeypatch.setattr(verify_tool, "run_baseline_at", spy)
+    out = await verify_tool.run_verify(
+        ctx,
+        mutate_path="failures.txt",
+        mutate_old="test_x",
+        mutate_new="test_mutated",
+    )
+    assert "spot-check" in out
+    assert called == []
+    assert "already fail" not in out
+
+
+@pytest.mark.asyncio
+async def test_the_orchestrator_hands_the_reviewer_its_base_commit(tmp_path):
+    from runtime.verify import merge_base_of
+
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    provider = _ReviewerSpawn()
+    orch = _orch(repo, verify_command="true")
+    orch._llm = provider
+    dest, branch, err = add_agent_worktree(repo, "hb", "coder")
+    assert not err, err
+    work = Path(dest)
+    (work / "http.py").write_text("cap = 5\n")
+    commit_if_dirty(work, "work")
+    orch._remember_worktree("hb", work, branch, "coder", "b1")
+
+    contexts: list = []
+    real = orch._make_subagent
+
+    def spy(profile, agent_id, workspace, isolated):
+        child = real(profile, agent_id, workspace, isolated)
+        if profile.name == "reviewer":
+            contexts.append(child._ctx)
+        return child
+
+    orch._make_subagent = spy
+    await orch.run("cap redirects")
+    await _wait_children(orch)
+
+    assert contexts, "no reviewer was started"
+    assert contexts[0].verify_base
+    assert contexts[0].verify_base == merge_base_of(repo, work)

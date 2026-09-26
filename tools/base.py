@@ -57,6 +57,9 @@ class ToolContext:
     # The verify command the harness chose for this worktree. `run_verify`
     # runs only this; an agent cannot choose or override it.
     verify_command: str = ""
+    # The commit that worktree branched from, so `run_verify` can tell a
+    # failure the change caused from one already there.
+    verify_base: str = ""
     # The last run_command this agent ran that exited 0. The harness verify
     # stage falls back to it when config and detection both come up empty.
     last_command_ok: str = ""

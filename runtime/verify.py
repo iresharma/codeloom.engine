@@ -14,6 +14,7 @@ brief and to the settle gate. Nothing downstream has to trust prose.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -302,35 +303,40 @@ def compare_to_baseline(change: VerifyResult, baseline: VerifyResult | None) -> 
     return change
 
 
-async def run_baseline(
-    workspace: Path,
-    dest: Path,
+def merge_base_of(workspace: Path, dest: Path) -> str:
+    """The commit a writer's worktree branched from, or "" if unknown."""
+    from runtime.tools.git import exec_cmd
+
+    head = exec_cmd(Path(workspace).resolve(), ["git", "rev-parse", "HEAD"], timeout=20)
+    if head.returncode != 0:
+        return ""
+    return exec_cmd(
+        Path(dest), ["git", "merge-base", head.stdout.strip(), "HEAD"], timeout=20
+    ).stdout.strip()
+
+
+async def run_baseline_at(
+    repo_dir: Path,
+    base: str,
     plan: VerifyPlan | list[str],
     *,
     timeout: int = VERIFY_TIMEOUT_S,
 ) -> VerifyResult | None:
-    """Run `plan` on the commit `dest` branched from, in a throwaway checkout.
+    """Run `plan` on commit `base` in a detached throwaway checkout.
 
-    Only called when the change's own verify failed, so a healthy run never
-    pays for it. Returns None when no checkout could be made (not a repo, no
-    merge base): the caller then keeps the failure counted against the change.
-    The checkout is detached, outside the workspace, and always removed.
+    `repo_dir` is any checkout of the same repository (the main workspace, or
+    a linked worktree -- `git worktree add` works from either). The checkout
+    is outside the workspace and always removed. None when it cannot be made.
     """
     from runtime.tools.git import exec_cmd, remove_agent_worktree
 
-    workspace = Path(workspace).resolve()
-    head = exec_cmd(workspace, ["git", "rev-parse", "HEAD"], timeout=20)
-    if head.returncode != 0:
-        return None
-    base = exec_cmd(
-        dest, ["git", "merge-base", head.stdout.strip(), "HEAD"], timeout=20
-    ).stdout.strip()
+    repo_dir = Path(repo_dir).resolve()
     if not base:
         return None
     tmp = Path(tempfile.mkdtemp(prefix="engine-baseline-"))
     tree = tmp / "tree"
     added = exec_cmd(
-        workspace, ["git", "worktree", "add", "--detach", str(tree), base], timeout=60
+        repo_dir, ["git", "worktree", "add", "--detach", str(tree), base], timeout=60
     )
     if added.returncode != 0:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -338,8 +344,25 @@ async def run_baseline(
     try:
         return await run_verify(tree, plan, source="baseline", timeout=timeout)
     finally:
-        remove_agent_worktree(workspace, tree)
+        remove_agent_worktree(repo_dir, tree)
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def run_baseline(
+    workspace: Path,
+    dest: Path,
+    plan: VerifyPlan | list[str],
+    *,
+    timeout: int = VERIFY_TIMEOUT_S,
+) -> VerifyResult | None:
+    """Run `plan` on the commit `dest` branched from.
+
+    Only called when the change's own verify failed, so a healthy run never
+    pays for it. Returns None when no base can be found (not a repo, no merge
+    base): the caller then keeps the failure counted against the change.
+    """
+    base = await asyncio.to_thread(merge_base_of, workspace, dest)
+    return await run_baseline_at(workspace, base, plan, timeout=timeout)
 
 
 def format_verify_block(result: VerifyResult) -> str:

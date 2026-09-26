@@ -38,6 +38,7 @@ from runtime.verify import (
     compare_to_baseline,
     detect_verify_commands,
     format_verify_block,
+    merge_base_of,
     run_baseline,
     run_verify,
     settle_verify_refusal,
@@ -802,6 +803,9 @@ class Orchestrator(AgentLoop):
                     )
                     return
                 child._ctx.verify_command = gate.result.command if gate.result else ""
+                child._ctx.verify_base = await asyncio.to_thread(
+                    merge_base_of, self._ctx.workspace, Path(worktree)
+                )
                 verify_block = gate.brief
             # Item 5: the original user prompt goes in verbatim and labelled
             # as the authority; the orchestrator's `task` is labelled as an

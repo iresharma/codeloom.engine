@@ -12,7 +12,13 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from runtime.verify import DisposableWorktree, VerifyPlan, format_verify_block
+from runtime.verify import (
+    DisposableWorktree,
+    VerifyPlan,
+    compare_to_baseline,
+    format_verify_block,
+    run_baseline_at,
+)
 from runtime.verify import run_verify as run_verify_impl
 from tools.base import ToolContext, tool
 
@@ -89,12 +95,20 @@ async def run_verify(
     holder, err = await asyncio.to_thread(prepare)
     if err:
         return err
+    plan = VerifyPlan([command], "config")
     try:
-        result = await run_verify_impl(
-            holder.path, VerifyPlan([command], "config")
-        )
+        result = await run_verify_impl(holder.path, plan)
     finally:
         await asyncio.to_thread(holder.__exit__, None, None, None)
+    if not mutate_path and result.command and not result.ok and ctx.verify_base:
+        # Same comparison the engine's own gate makes: a failure the base
+        # commit already had is not the change's. Skipped for a spot-check,
+        # where the mutation is *supposed* to make verify fail.
+        try:
+            baseline = await run_baseline_at(ctx.workspace, ctx.verify_base, plan)
+        except Exception:  # noqa: BLE001 - no baseline means "unknown", not an error
+            baseline = None
+        result = compare_to_baseline(result, baseline)
     header = ""
     if mutate_path:
         header = (
