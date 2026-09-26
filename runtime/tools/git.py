@@ -171,6 +171,13 @@ def pr_title_from_summary(summary: str, *, limit: int = PR_TITLE_MAX) -> str:
     alone is longer than `limit` there is no word boundary to cut on, so
     that single word is returned whole rather than sliced.
     """
+    first = next((ln for ln in (summary or "").splitlines() if ln.strip()), "")
+    heading = _TITLE_LINE.match(first)
+    if heading:
+        # A summary that opens with a standalone **Title** or `# Title` line
+        # already has one: use it whole rather than its first sentence.
+        title = " ".join(next(g for g in heading.groups() if g).split())
+        return pr_title_from_summary(title, limit=limit)
     text = " ".join((summary or "").replace("\n", " ").split())
     if not text:
         return ""
@@ -193,6 +200,74 @@ def pr_title_from_summary(summary: str, *, limit: int = PR_TITLE_MAX) -> str:
         # A single unbreakable word: keep it whole rather than mangle it.
         out = words[0]
     return out.rstrip(".,;:")
+
+
+_RULE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+_QUOTE = re.compile(r"^\s*>\s?(.*)$")
+# A reply that talks *to the user* -- offers a choice, invites a reply -- is a
+# conversation turn, not a description of the change.
+_ASKS_USER = re.compile(
+    r"(would you like|do you want|want me to|shall i|should i|let me know|"
+    r"which (?:would|do) you|how would you like|please (?:confirm|choose|tell))",
+    re.IGNORECASE,
+)
+_TITLE_LINE = re.compile(r"^\s*(?:#{1,6}\s+(.+?)|\*\*(.+?)\*\*|__(.+?)__)\s*$")
+
+
+def pr_summary_from_reply(reply: str) -> str:
+    """The PR-ready summary inside an orchestrator reply, or "" when there is none.
+
+    A headless run cannot answer the orchestrator, so its last reply is
+    usually a conversation turn: a preamble, the summary the task asked for,
+    and a closing "would you like me to merge, open a PR, or keep it?". Using
+    the whole reply as a PR body put that question -- and, in one trial, a bare
+    status update -- on the pull request.
+
+    So a summary counts only when it is set apart: a block between `---`
+    rules, or a `>` blockquote (the longest wins). Failing that, the whole
+    reply counts only if it never addresses the user. Anything else returns
+    "" and settle falls back to the task plus the diff stat.
+    """
+    text = (reply or "").strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+
+    blocks: list[str] = []
+    rules = [i for i, line in enumerate(lines) if _RULE.match(line)]
+    for start, end in zip(rules[0::2], rules[1::2], strict=False):
+        block = "\n".join(lines[start + 1 : end]).strip()
+        if block:
+            blocks.append(block)
+    quoted: list[str] = []
+    for line in lines:
+        match = _QUOTE.match(line)
+        if match:
+            quoted.append(match.group(1))
+        elif quoted and quoted[-1] != "\x00":
+            quoted.append("\x00")
+    run: list[str] = []
+    for item in quoted + ["\x00"]:
+        if item == "\x00":
+            block = "\n".join(run).strip()
+            if block:
+                blocks.append(block)
+            run = []
+        else:
+            run.append(item)
+    blocks = [b for b in blocks if len(b) >= 40 and not _asks_user(b)]
+    if blocks:
+        return max(blocks, key=len)
+
+    if _asks_user(text):
+        return ""
+    return text
+
+
+def _asks_user(text: str) -> bool:
+    if _ASKS_USER.search(text):
+        return True
+    return any(line.rstrip().endswith("?") for line in text.splitlines())
 
 
 def worktree_diff_stat(workspace: Path, dest: Path) -> tuple[str, list[str]]:

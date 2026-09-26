@@ -381,3 +381,185 @@ async def test_run_records_the_closing_summary_and_the_user_task(tmp_path):
     await orch.run("[agent coder abcd1234 finished]\npinned pyinstaller")
     assert orch._user_task == "do two things"
     assert orch.closing_summary() == "Part A and part B are both done."
+
+
+# --------------------------------------------------------------------------
+# which part of an orchestrator reply may become the PR text
+#
+# The three shapes below are the real pre-settle replies from the trial
+# re-run, trimmed: a preamble, a summary set apart in some way, and a closing
+# question. Nobody answers in a headless run, so the last reply is what the PR
+# got -- question included.
+
+from runtime.tools.git import pr_summary_from_reply  # noqa: E402
+
+REPLY_BLOCKQUOTE = """Everything is complete and verified clean.
+
+**PR-ready summary:**
+
+> **Add authentication in front of the collector's UI and API**
+>
+> The collector's README warned there was no auth. This closes that gap: the UI, query API and static assets use Basic Auth while ingest uses its own bearer token.
+
+Would you like me to **merge** this, **open a PR**, or keep the worktree?"""
+
+REPLY_RULED = """The reviewer approved.
+
+Here is the PR summary, as requested:
+
+---
+**Harden `http_request` against real-world HTTP failures, and investigate packaging**
+
+Part A hardens raw_request with timeouts, TLS errors and bounded retries. Part B adds a PyInstaller build script and a packaging doc.
+
+---
+
+Would you like me to merge, open a PR, or keep the worktree?"""
+
+REPLY_STATUS_AND_QUESTION = """The reviewer stopped without completing.
+
+Here's where things stand:
+- Feature implemented, build and vet pass.
+
+Would you like me to:
+1. Try the review again, or
+2. Skip re-review and settle?"""
+
+
+def test_a_blockquoted_summary_is_extracted_and_the_question_dropped():
+    out = pr_summary_from_reply(REPLY_BLOCKQUOTE)
+    assert out.startswith("**Add authentication in front of the collector")
+    assert "Basic Auth" in out
+    assert "Would you like" not in out
+    assert "verified clean" not in out
+
+
+def test_a_ruled_block_is_extracted_and_the_question_dropped():
+    out = pr_summary_from_reply(REPLY_RULED)
+    assert out.startswith("**Harden `http_request`")
+    assert "PyInstaller" in out
+    assert "Would you like" not in out
+    assert "as requested" not in out
+
+
+def test_a_status_update_that_asks_the_user_is_not_a_summary():
+    assert pr_summary_from_reply(REPLY_STATUS_AND_QUESTION) == ""
+
+
+def test_a_plain_reply_that_never_addresses_the_user_is_kept_whole():
+    text = "Part A and part B are both done. The build passes."
+    assert pr_summary_from_reply(text) == text
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Done. Let me know if you want anything changed.",
+        "Ready. Shall I open the PR?",
+        "Which branch should this target?",
+        "Should this be merged\n?",
+    ],
+)
+def test_replies_that_address_the_user_are_not_summaries(reply):
+    assert pr_summary_from_reply(reply) == ""
+
+
+def test_the_longest_set_apart_block_wins():
+    reply = (
+        "Notes:\n> short aside that is long enough to pass the length floor here\n\n"
+        "---\nThe real, longer description of what changed and why, in a full "
+        "paragraph that clearly outweighs the aside above.\n---\n"
+    )
+    assert pr_summary_from_reply(reply).startswith("The real, longer description")
+
+
+def test_a_set_apart_block_that_itself_asks_a_question_is_skipped():
+    reply = "---\nShould I merge this change into the current branch now?\n---\n"
+    assert pr_summary_from_reply(reply) == ""
+
+
+def test_empty_reply_is_empty():
+    assert pr_summary_from_reply("") == ""
+    assert pr_summary_from_reply("   \n") == ""
+
+
+def test_a_bold_first_line_is_used_whole_as_the_title():
+    summary = "**Harden `http_request` and investigate packaging**\n\nBody text here."
+    assert pr_title_from_summary(summary) == "Harden `http_request` and investigate packaging"
+    assert pr_title_from_summary("# Cap redirects\n\nBody.") == "Cap redirects"
+    # A bold *phrase inside* a sentence is not a title line.
+    assert pr_title_from_summary("Added **auth** to the collector. More.") == (
+        "Added **auth** to the collector"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_keeps_only_the_summary_from_a_chatty_reply(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    orch = _orch(repo)
+    from llm.provider import LLMResult
+
+    orch._llm = FakeProvider(results=[LLMResult(text=REPLY_BLOCKQUOTE)])
+    await orch.run("Add auth to the collector.")
+    assert orch.closing_summary().startswith("**Add authentication in front")
+    assert "Would you like" not in orch.closing_summary()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_asks_the_user_leaves_no_closing_summary(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    orch = _orch(repo)
+    from llm.provider import LLMResult
+
+    orch._llm = FakeProvider(results=[LLMResult(text=REPLY_STATUS_AND_QUESTION)])
+    await orch.run("Add redis caching for the kanban endpoints.")
+    assert orch.closing_summary() == ""
+
+
+@pytest.mark.asyncio
+async def test_pr_falls_back_to_the_task_when_the_reply_only_asked_a_question(tmp_path):
+    """The reach-auth-proxy shape end to end: the PR must not carry the
+    orchestrator's question."""
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    orch = _orch(repo)
+    from llm.provider import LLMResult
+
+    dest, branch, err = add_agent_worktree(repo, "q1", "coder")
+    assert not err, err
+    work = Path(dest)
+    (work / "kanban.go").write_text("package routes\n")
+    commit_if_dirty(work, "work")
+
+    orch._llm = FakeProvider(results=[LLMResult(text=REPLY_STATUS_AND_QUESTION)])
+    await orch.run("Add redis caching for the kanban read endpoints.")
+    title, body = orch._pr_fields(work, "coder said something else")
+    assert title == "Add redis caching for the kanban read endpoints"
+    assert "Would you like" not in body
+    assert "reviewer stopped" not in body
+    assert "Add redis caching for the kanban read endpoints." in body
+    assert "kanban.go" in body
+
+
+@pytest.mark.asyncio
+async def test_pr_uses_the_extracted_summary_end_to_end(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    orch = _orch(repo)
+    from llm.provider import LLMResult
+
+    dest, branch, err = add_agent_worktree(repo, "q2", "coder")
+    assert not err, err
+    work = Path(dest)
+    (work / "auth.go").write_text("package collector\n")
+    commit_if_dirty(work, "work")
+
+    orch._llm = FakeProvider(results=[LLMResult(text=REPLY_RULED)])
+    await orch.run("Harden http_request and investigate packaging.")
+    title, body = orch._pr_fields(work, "coder said something else")
+    assert title.startswith("Harden `http_request` against real-world HTTP failures")
+    assert len(title) <= PR_TITLE_MAX
+    assert "PyInstaller" in body
+    assert "Would you like" not in body

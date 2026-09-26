@@ -25,6 +25,7 @@ from runtime.tools.git import (
     drop_empty_worktree,
     list_engine_worktrees,
     normalize_settle_action,
+    pr_summary_from_reply,
     pr_title_from_summary,
     remove_agent_worktree,
     worktree_diff_stat,
@@ -515,9 +516,10 @@ class Orchestrator(AgentLoop):
             self._batch_id = ""
             self._batch_name = ""
             self._inbox_turn = False
-        text = (reply or "").strip()
-        if text:
-            self._closing_summary = text
+        # Only a deliberately set-apart summary counts (see
+        # `pr_summary_from_reply`); an empty result makes settle fall back to
+        # the task plus the diff stat instead of pasting chatter into the PR.
+        self._closing_summary = pr_summary_from_reply(reply)
         return reply
 
     def closing_summary(self) -> str:
