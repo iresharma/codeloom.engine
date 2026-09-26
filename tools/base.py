@@ -54,6 +54,12 @@ class ToolContext:
     judge: Any = None
     on_judgement: Any = None
     user_request: str = ""
+    # The verify command the harness chose for this worktree. `run_verify`
+    # runs only this; an agent cannot choose or override it.
+    verify_command: str = ""
+    # The last run_command this agent ran that exited 0. The harness verify
+    # stage falls back to it when config and detection both come up empty.
+    last_command_ok: str = ""
 
 
 @dataclass

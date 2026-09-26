@@ -30,6 +30,13 @@ from runtime.tools.git import (
     worktree_has_changes,
 )
 from runtime.tools.tracker import FileTracker
+from runtime.verify import (
+    VerifyResult,
+    detect_verify_commands,
+    format_verify_block,
+    run_verify,
+    settle_verify_refusal,
+)
 from tools.base import Tool, ToolContext
 from tools.registry import ToolRegistry
 
@@ -77,6 +84,28 @@ If a child returns status=incomplete, respawn once with a tighter task or tell t
 
 Do not call write tools or run_command. You do not have them.
 """
+
+
+@dataclass
+class _ReviewGate:
+    """Outcome of the harness verify that runs before a reviewer's turn."""
+
+    ok: bool
+    brief: str
+    result: VerifyResult | None = None
+
+    def failure_result(self) -> AgentResult:
+        detail = self.result
+        command = detail.command if detail else ""
+        code = detail.exit_code if detail else -1
+        summary = (
+            f"review not run: harness verify failed (`{command}` exited {code})"
+        )
+        return AgentResult(
+            status="blocked",
+            summary=summary,
+            outcome=f"{summary}\n\n{self.brief}",
+        )
 
 
 @dataclass
@@ -190,6 +219,17 @@ class Orchestrator(AgentLoop):
         # reviewer brief (item 5). Neither is ever a child's self-report.
         self._closing_summary = ""
         self._user_task = ""
+        # Item 3: the latest harness verify per worktree, keyed by resolved
+        # path rather than agent_id -- `continue_from` transfers a tree to a
+        # new agent_id, and the verify result belongs to the tree.
+        self._verify_by_tree: dict[str, VerifyResult] = {}
+        # The last command each writer ran successfully, the third choice in
+        # `detect_verify_commands`.
+        self._last_writer_command: dict[str, str] = {}
+        # Set only while `_start_fix_slice` is spawning, so `_make_subagent`
+        # clamps that one child's turn budget.
+        self._fix_slice_turns = 0
+        self._fix_slice_reason = ""
         self._skills = kwargs.get("skills")
         self._on_skill_activated = kwargs.get("on_skill_activated")
         self._finished_transcripts: dict[str, dict] = {}
@@ -363,6 +403,9 @@ class Orchestrator(AgentLoop):
         title = summary
         body = summary
         if normalized == "pr":
+            refusal = self._pr_verify_refusal(dest)
+            if refusal:
+                return f"error: {refusal}"
             title, body = await asyncio.to_thread(self._pr_fields, dest, summary)
         ok, detail, pr_url = await asyncio.to_thread(
             apply_worktree,
@@ -660,6 +703,20 @@ class Orchestrator(AgentLoop):
     ) -> None:
         status = "ok"
         outcome = ""
+        if profile.name == "reviewer" and worktree:
+            # Item 3: the harness verifies before the reviewer gets a turn.
+            # This happens inside the child task, not inside spawn(), so
+            # spawn stays fire-and-forget -- but the reviewer loop never
+            # runs when verification fails, and never sees a brief without
+            # the structured verify result when it passes.
+            gate = await self._verify_before_review(Path(worktree), task)
+            if not gate.ok:
+                await self._report_blocked_review(
+                    agent_id, profile, child, task, branch, worktree, gate
+                )
+                return
+            child._ctx.verify_command = gate.result.command if gate.result else ""
+            task = f"{task}\n\n{gate.brief}"
         try:
             child.set_catalog_query(task)
             if resolution is not None and getattr(resolution, "complete", True):
@@ -703,6 +760,10 @@ class Orchestrator(AgentLoop):
             pass
         if getattr(self._ctx, "on_memory", None) is not None:
             self._ctx.on_memory()
+        if worktree:
+            last_ok = (getattr(child._ctx, "last_command_ok", "") or "").strip()
+            if last_ok:
+                self._last_writer_command[str(Path(worktree).resolve())] = last_ok
         self._shutdown_child_lsp(agent_id)
         owns_worktree = agent_id in self._worktrees
         should_settle = owns_worktree and status != "aborted" and not self._aborting_all
@@ -749,6 +810,115 @@ class Orchestrator(AgentLoop):
                     branch=branch or self._worktree_branches.get(agent_id, ""),
                     summary=summary,
                 )
+
+    # ----------------------------------------------------------------
+    # Item 3: harness verify
+
+    async def _verify_before_review(self, dest: Path, task: str) -> _ReviewGate:
+        """Run the project's verify command in `dest` before the reviewer.
+
+        The harness chooses the command and runs it; no agent is asked to.
+        On failure the reviewer is not given a turn at all -- the failure
+        goes back to the coder as a capped continue slice instead.
+        """
+        key = str(dest.resolve())
+        plan = await asyncio.to_thread(
+            detect_verify_commands,
+            dest,
+            config=self._config,
+            last_command=self._last_writer_command.get(key, ""),
+        )
+        result = await run_verify(dest, plan)
+        self._verify_by_tree[key] = result
+        if not result.command:
+            # Nothing to run: the reviewer still gets told so, in the brief,
+            # and reviews an explicitly unverified change. Blocking here
+            # would stall every project the harness cannot detect.
+            return _ReviewGate(ok=True, brief=format_verify_block(result), result=result)
+        if result.ok:
+            return _ReviewGate(ok=True, brief=format_verify_block(result), result=result)
+        return _ReviewGate(ok=False, brief=format_verify_block(result), result=result)
+
+    def _pr_verify_refusal(self, dest: Path) -> str:
+        """Why this worktree must not become a pull request, or "".
+
+        Settle does not open a PR on an unverified tree. The only carve-out
+        is a task that explicitly says there are no tests -- and a build,
+        where the project has one, still has to have succeeded.
+        """
+        return settle_verify_refusal(
+            self.latest_verify(dest), task=self._user_task
+        )
+
+    def latest_verify(self, dest: Path | str) -> VerifyResult | None:
+        return self._verify_by_tree.get(str(Path(dest).resolve()))
+
+    async def _report_blocked_review(
+        self,
+        agent_id: str,
+        profile,
+        child: Subagent,
+        task: str,
+        branch: str,
+        worktree: str,
+        gate: _ReviewGate,
+    ) -> None:
+        """Hand the verify failure back as this reviewer's result, and start
+        one capped coder slice in the same worktree to fix it."""
+        result = gate.failure_result()
+        owner = self._continue_target(worktree)
+        started = ""
+        if owner:
+            started = await self._start_fix_slice(
+                owner,
+                (
+                    "Harness verification failed in your worktree before the "
+                    "reviewer could run. Fix it. Do not change the tests to "
+                    "match broken behaviour.\n\n"
+                    f"{gate.brief}"
+                ),
+                reason="verify-failed",
+            )
+            result.outcome = f"{result.outcome}\n\nfix-up slice: {started}"
+        else:
+            result.leftover_questions = list(result.leftover_questions or []) + [
+                "no open writer worktree to continue; respawn a coder on this branch"
+            ]
+        self._shutdown_child_lsp(agent_id)
+        if self._on_agent_finished is not None:
+            self._on_agent_finished(
+                agent_id, profile.name, result.status, result.summary, usage=child._usage
+            )
+        if self._on_agent_result is not None and not self._aborting_all:
+            self._on_agent_result(agent_id, profile.name, result.as_text())
+        self._store_transcript(agent_id, child)
+        self._child_tasks.pop(agent_id, None)
+        self._children.pop(agent_id, None)
+
+    def _continue_target(self, worktree: str) -> str:
+        """The agent_id that currently owns `worktree`, if any."""
+        want = str(Path(worktree).resolve())
+        for agent_id, dest in self._worktrees.items():
+            if str(Path(dest).resolve()) == want:
+                return agent_id
+        return ""
+
+    async def _start_fix_slice(self, owner: str, task: str, *, reason: str) -> str:
+        """One capped coder continue slice in an existing worktree.
+
+        Reuses the turn-budget continue mechanism: the child is a coder in
+        the same worktree (`continue_from`), with `max_turns` clamped to
+        `config.nit_fixup_turns` so a fix-up cannot turn into a second
+        implementation pass.
+        """
+        budget = max(1, int(getattr(self._config, "nit_fixup_turns", 4) or 4))
+        self._fix_slice_turns = budget
+        self._fix_slice_reason = reason
+        try:
+            return await self.spawn("coder", task, continue_from=owner)
+        finally:
+            self._fix_slice_turns = 0
+            self._fix_slice_reason = ""
 
     async def _apply_merge_gate(self, profile: str, task: str, result: AgentResult) -> str:
         """Phase 8 (scoped; see docs/impl-plans/jev-exp-1.md), the merge
@@ -852,6 +1022,14 @@ class Orchestrator(AgentLoop):
             title = message
             body = summary or message
             if action == "pr":
+                refusal = self._pr_verify_refusal(dest)
+                if refusal:
+                    if self._on_worktree_settled is not None and not self._aborting_all:
+                        self._on_worktree_settled(
+                            agent_id, profile, "keep", f"error: {refusal}",
+                            branch, "", False,
+                        )
+                    return
                 # The PR headline and body come from the orchestrator's
                 # closing summary, not from `summary` (this one writer's
                 # self-report). With two sequential coders the second
@@ -888,9 +1066,17 @@ class Orchestrator(AgentLoop):
     def _make_subagent(
         self, profile, agent_id: str, workspace: Path, isolated: bool
     ) -> Subagent:
+        max_turns = profile.max_turns or self._config.max_turns
+        if self._fix_slice_turns:
+            # A fix-up slice is capped: it exists to apply a known, small
+            # change, not to start a second implementation pass. The profile
+            # itself has to carry the clamp -- Subagent.__init__ re-applies
+            # `profile.max_turns` over whatever the config says.
+            max_turns = min(max_turns, self._fix_slice_turns)
+            profile = replace(profile, max_turns=max_turns)
         child_config = replace(
             self._config,
-            max_turns=profile.max_turns or self._config.max_turns,
+            max_turns=max_turns,
             compact_trigger=CHILD_COMPACT_TRIGGER,
             keep_full_tools=CHILD_KEEP_FULL_TOOLS,
         )

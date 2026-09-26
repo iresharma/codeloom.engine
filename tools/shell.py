@@ -124,6 +124,10 @@ async def run_command(
         file_limit_mb=file_limit,
         on_proc=ctx.on_proc,
     )
+    if result.exit_code == 0 and not result.timed_out:
+        # Remembered so the harness verify stage has a third choice when
+        # config and detection both come up empty (runtime/verify.py).
+        ctx.last_command_ok = result.command
     return format_command_result(result)
 
 

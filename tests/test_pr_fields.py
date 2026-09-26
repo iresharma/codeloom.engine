@@ -211,6 +211,23 @@ def _orch(repo: Path) -> Orchestrator:
     )
 
 
+def _seed_passing_verify(orch: Orchestrator, dest: Path) -> None:
+    """Settle refuses a PR on an unverified tree (item 3). These cases are
+    about *which text* ends up in the PR, so they start from the state the
+    real pipeline reaches: a harness verify that already passed."""
+    from runtime.verify import VerifyResult
+
+    orch._verify_by_tree[str(dest.resolve())] = VerifyResult(
+        command="pytest -q",
+        exit_code=0,
+        runner="pytest",
+        passed=12,
+        failed=0,
+        skipped=0,
+        source="detected",
+    )
+
+
 @pytest.mark.asyncio
 async def test_settle_pr_body_covers_both_children(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
@@ -241,6 +258,7 @@ async def test_settle_pr_body_covers_both_children(tmp_path, monkeypatch):
     (work / "scripts" / "build.sh").write_text("pyinstaller==6.6.0\n")
     commit_if_dirty(work, "part B")
     orch._remember_worktree("a1", work, branch, "coder", "batch")
+    _seed_passing_verify(orch, work)
 
     # The orchestrator's own closing summary after both coders finished.
     orch._user_task = "Harden the HTTP client and make packaging reproducible."
@@ -303,6 +321,7 @@ async def test_settle_pr_appends_files_changed_when_summary_omits_one(
     (work / "scripts" / "build.sh").write_text("pyinstaller==6.6.0\n")
     commit_if_dirty(work, "both")
     orch._remember_worktree("a2", work, branch, "coder", "batch")
+    _seed_passing_verify(orch, work)
 
     orch._closing_summary = "Capped HTTP redirects at five hops in tools/http.py."
     reply = await orch.apply_named_worktree("pr", agent_id="a2")
