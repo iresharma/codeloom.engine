@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import random
 import socket
+import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +14,10 @@ from runtime.tools.web import MAX_FETCH, USER_AGENT
 
 METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
 SAFE_METHODS = {"GET", "HEAD"}
+# Methods safe to retry automatically on a transient failure. POST/PATCH are
+# not idempotent, so a single attempt only — a retried POST could double an
+# action on the server.
+IDEMPOTENT_METHODS = {"GET", "HEAD", "PUT", "DELETE"}
 OPENAPI_CAP = 80
 BODY_CAP = 50_000
 BLOCKED_HOSTS = {
@@ -18,6 +25,25 @@ BLOCKED_HOSTS = {
     "metadata.gce.internal",
     "169.254.169.254",
 }
+# Retry defaults: kept small so a hung endpoint doesn't stall the agent loop.
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_BACKOFF_BASE = 0.5
+# The exact text urllib.request.HTTPRedirectHandler uses when it gives up on
+# a redirect chain (too many hops to one URL, or too many hops overall). It
+# raises this as an HTTPError rather than a URLError, so without this check
+# raw_request would treat a redirect loop as a normal (bogus) response.
+_REDIRECT_LOOP_MARKER = urllib.request.HTTPRedirectHandler.inf_msg
+# Sleep hook so tests can stub out backoff delays without actually waiting.
+_sleep = time.sleep
+# Error strings that indicate a transient, worth-retrying failure. TLS
+# errors, blocked hosts, bad schemes, redirect loops, etc. are deliberately
+# excluded — retrying those wastes time on a failure that won't resolve.
+_TRANSIENT_ERROR_PREFIXES = (
+    "error: fetch timed out",
+    "error: DNS resolution failed",
+    "error: connection reset",
+    "error: connection error",
+)
 
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
@@ -31,6 +57,8 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def urlopen(request, timeout=20.0):
+    # Note: urllib.request only exposes a single socket timeout that covers
+    # both connect and read phases — there's no stdlib knob to split them.
     opener = urllib.request.build_opener(_SafeRedirect)
     return opener.open(request, timeout=timeout)
 
@@ -77,8 +105,16 @@ def raw_request(
     body: bytes | None = None,
     timeout: float = 20.0,
     cap: int = MAX_FETCH,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff_base: float = DEFAULT_BACKOFF_BASE,
 ) -> tuple[int, dict[str, str], str, str]:
-    """Return (status, headers, text, error). error is set on failure."""
+    """Return (status, headers, text, error). error is set on failure.
+
+    Transient failures (timeouts, connection errors, 5xx responses) are
+    retried with exponential backoff and jitter, but only for idempotent
+    methods (see IDEMPOTENT_METHODS) — POST/PATCH always get a single
+    attempt. 4xx responses are never retried.
+    """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return 0, {}, "", "error: url must be http or https"
@@ -90,13 +126,51 @@ def raw_request(
     hdrs = {"User-Agent": USER_AGENT}
     if headers:
         hdrs.update(headers)
-    request = urllib.request.Request(url, data=body, headers=hdrs, method=method)
+
+    attempts = max_retries + 1 if method in IDEMPOTENT_METHODS else 1
+    result: tuple[int, dict[str, str], str, str] = (0, {}, "", "error: request never attempted")
+    for attempt in range(attempts):
+        request = urllib.request.Request(url, data=body, headers=hdrs, method=method)
+        result = _attempt(request, method, url, parsed, timeout=timeout, cap=cap)
+        status, _resp_headers, _text, err = result
+        if not _is_transient(status, err):
+            return result
+        if attempt + 1 >= attempts:
+            return result
+        delay = backoff_base * (2**attempt) + random.uniform(0, backoff_base)
+        _sleep(delay)
+    return result
+
+
+def _is_transient(status: int, err: str) -> bool:
+    """Only retry on timeouts, connection errors, and 5xx — never on 4xx or
+    non-network failures (bad scheme, blocked host, TLS errors, etc.)."""
+    if status >= 500:
+        return True
+    if not err:
+        return False
+    return err.startswith(_TRANSIENT_ERROR_PREFIXES)
+
+
+def _attempt(
+    request: urllib.request.Request,
+    method: str,
+    url: str,
+    parsed: urllib.parse.ParseResult,
+    *,
+    timeout: float,
+    cap: int,
+) -> tuple[int, dict[str, str], str, str]:
+    """Make a single request attempt, translating exceptions into clear errors."""
+    host = parsed.hostname or parsed.netloc
     try:
         with urlopen(request, timeout=timeout) as response:
             status = int(getattr(response, "status", 200) or 200)
             resp_headers = {k: v for k, v in response.headers.items()}
             raw = b"" if method == "HEAD" else response.read(cap + 1)
     except urllib.error.HTTPError as exc:
+        if _REDIRECT_LOOP_MARKER in (exc.msg or ""):
+            return 0, {}, "", f"error: too many redirects (possible redirect loop) for {url}"
         try:
             raw = exc.read(cap + 1) if method != "HEAD" else b""
         except OSError:
@@ -108,9 +182,17 @@ def raw_request(
             text += "\n...[truncated]"
         return status, resp_headers, text, ""
     except urllib.error.URLError as exc:
-        return 0, {}, "", f"error: {exc.reason}"
+        return 0, {}, "", _describe_url_error(exc, url, host)
     except TimeoutError:
-        return 0, {}, "", "error: fetch timed out"
+        return 0, {}, "", f"error: fetch timed out after {timeout}s for {url}"
+    except ConnectionResetError:
+        return 0, {}, "", f"error: connection reset by {host}"
+    except ConnectionError as exc:
+        return 0, {}, "", f"error: connection error for {host}: {exc}"
+    except ssl.SSLError as exc:
+        return 0, {}, "", f"error: TLS certificate verification failed for {url}: {exc}"
+    except socket.gaierror:
+        return 0, {}, "", f"error: DNS resolution failed for {host}"
     except OSError as exc:
         return 0, {}, "", f"error: {exc}"
     truncated = len(raw) > cap
@@ -118,6 +200,25 @@ def raw_request(
     if truncated:
         text += "\n...[truncated]"
     return status, resp_headers, text, ""
+
+
+def _describe_url_error(exc: urllib.error.URLError, url: str, host: str) -> str:
+    reason = exc.reason
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return f"error: TLS certificate verification failed for {url}: {reason}"
+    if isinstance(reason, ssl.SSLError):
+        return f"error: TLS certificate verification failed for {url}: {reason}"
+    if isinstance(reason, socket.gaierror):
+        return f"error: DNS resolution failed for {host}"
+    if isinstance(reason, ConnectionResetError):
+        return f"error: connection reset by {host}"
+    if isinstance(reason, ConnectionError):
+        return f"error: connection error for {host}: {reason}"
+    if isinstance(reason, TimeoutError) or isinstance(exc, socket.timeout):
+        return f"error: fetch timed out for {url}"
+    if _REDIRECT_LOOP_MARKER in str(reason):
+        return f"error: too many redirects (possible redirect loop) for {url}"
+    return f"error: {reason}"
 
 
 def get_json(url: str, *, timeout: float = 20.0, headers: dict[str, str] | None = None):

@@ -190,9 +190,10 @@ class TestRawRequest:
             raise TimeoutError("timed out")
         
         monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        monkeypatch.setattr(http_impl, "_sleep", lambda *_a: None)
         status, hdrs, text, err = raw_request("GET", "https://example.com")
         assert status == 0
-        assert err == "error: fetch timed out"
+        assert err.startswith("error: fetch timed out")
 
     def test_raw_request_urlerror(self, monkeypatch):
         """Test URLError handling."""
