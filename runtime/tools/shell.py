@@ -103,6 +103,7 @@ async def run_command(
     approval: str = "auto",
     file_limit_mb: int = 2048,
     on_proc: Callable[[object, bool], None] | None = None,
+    drop_env_prefixes: tuple[str, ...] = (),
 ) -> CommandResult:
     if not command or not command.strip():
         raise ValueError("command is required")
@@ -132,7 +133,7 @@ async def run_command(
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith("OPENROUTER_") and not key.startswith("TYPESAFE_")
+        if not key.startswith(("OPENROUTER_", "TYPESAFE_", *drop_env_prefixes))
     }
     env["PYTHONUNBUFFERED"] = "1"
     env["CI"] = "1"

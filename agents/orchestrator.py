@@ -34,8 +34,10 @@ from runtime.tools.git import (
 from runtime.tools.tracker import FileTracker
 from runtime.verify import (
     VerifyResult,
+    compare_to_baseline,
     detect_verify_commands,
     format_verify_block,
+    run_baseline,
     run_verify,
     settle_verify_refusal,
 )
@@ -866,15 +868,29 @@ class Orchestrator(AgentLoop):
             last_command=self._last_writer_command.get(key, ""),
         )
         result = await run_verify(dest, plan)
+        if result.command and not result.ok:
+            # A failing verify is only the change's fault if the base commit
+            # did not already fail the same way. Two of three trial runs
+            # were derailed by a failure that predated the change.
+            result = compare_to_baseline(
+                result, await self._baseline_for(dest, plan)
+            )
         self._verify_by_tree[key] = result
         if not result.command:
             # Nothing to run: the reviewer still gets told so, in the brief,
             # and reviews an explicitly unverified change. Blocking here
             # would stall every project the harness cannot detect.
             return _ReviewGate(ok=True, brief=format_verify_block(result), result=result)
-        if result.ok:
-            return _ReviewGate(ok=True, brief=format_verify_block(result), result=result)
-        return _ReviewGate(ok=False, brief=format_verify_block(result), result=result)
+        return _ReviewGate(
+            ok=result.passes_gate, brief=format_verify_block(result), result=result
+        )
+
+    async def _baseline_for(self, dest: Path, plan) -> VerifyResult | None:
+        """Verify result on the commit `dest` branched from, or None."""
+        try:
+            return await run_baseline(self._ctx.workspace, dest, plan)
+        except Exception:  # noqa: BLE001 - a baseline we cannot get means "unknown"
+            return None
 
     def _pr_verify_refusal(self, dest: Path) -> str:
         """Why this worktree must not become a pull request, or "".

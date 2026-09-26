@@ -50,6 +50,19 @@ _NO_TESTS = re.compile(
     re.IGNORECASE,
 )
 _BUILD_ONLY_RUNNERS = frozenset({"go build", "go vet", "tsc", "make"})
+# The engine's own control variables must not reach the project under test.
+# The trial harness exports ENGINE_TRACE_CALLS=1 for its tracing, and a
+# project's test that reads it (codeloom.engine's test_session_trace) failed
+# under verify while passing everywhere else.
+VERIFY_DROP_ENV = ("ENGINE_",)
+
+_PYTEST_ID = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)", re.MULTILINE)
+_GO_FAIL_TEST = re.compile(r"^\s*--- FAIL:\s+(\S+)", re.MULTILINE)
+_GO_FAIL_PKG = re.compile(r"^FAIL[ \t]+(\S+)", re.MULTILINE)
+# `path/file.go:12:3: message` -- compiler and `go vet` diagnostics. Line and
+# column are dropped so an unrelated edit shifting a line does not make an old
+# failure look new.
+_GO_DIAG = re.compile(r"^(\S+\.go):\d+(?::\d+)?:\s+(.+?)\s*$", re.MULTILINE)
 
 
 @dataclass
@@ -65,10 +78,24 @@ class VerifyResult:
     output: str = ""
     source: str = ""  # config | detected | coder | none
     reason: str = ""  # why there is no result at all
+    # What failed, normalised so two runs can be compared (see
+    # `failure_signature`). Empty when the output was not recognisable.
+    signature: frozenset[str] = frozenset()
+    # Set by `compare_to_baseline` on a failing result.
+    preexisting: bool = False
+    new_failures: list[str] = field(default_factory=list)
+    baseline_failures: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return self.exit_code == 0 and bool(self.command)
+
+    @property
+    def passes_gate(self) -> bool:
+        """True when nothing this change did makes verification worse: a clean
+        run, or a failing run whose every failure was already there on the
+        base commit."""
+        return self.ok or (bool(self.command) and self.preexisting)
 
     @property
     def is_build(self) -> bool:
@@ -83,6 +110,7 @@ class VerifyResult:
             "failed": self.failed,
             "skipped": self.skipped,
             "source": self.source,
+            "preexisting_failures_only": self.preexisting,
         }
 
     @classmethod
@@ -211,6 +239,7 @@ async def run_verify(
             command,
             timeout=timeout,
             approval="never",
+            drop_env_prefixes=VERIFY_DROP_ENV,
         )
         parsed = result.parsed or parse_runner_result(
             command, result.exit_code, result.stdout, result.stderr
@@ -234,7 +263,83 @@ def _to_verify(command, result, parsed: RunnerResult, source: str) -> VerifyResu
         skipped=parsed.skipped,
         output=elide_middle(body, MODEL_HEAD_CHARS, MODEL_TAIL_CHARS),
         source=source,
+        signature=failure_signature(body),
     )
+
+
+def failure_signature(output: str) -> frozenset[str]:
+    """The failures named in a runner's output, normalised for comparison.
+
+    pytest: the `FAILED`/`ERROR` test ids. go test: failing tests and
+    packages. go build / go vet: `file: message` with line numbers removed.
+    Anything else yields an empty set, which `compare_to_baseline` treats as
+    "cannot tell" -- and therefore as introduced by the change.
+    """
+    found: set[str] = set()
+    found.update(f"pytest:{m}" for m in _PYTEST_ID.findall(output or ""))
+    found.update(f"go-test:{m}" for m in _GO_FAIL_TEST.findall(output or ""))
+    found.update(f"go-pkg:{m}" for m in _GO_FAIL_PKG.findall(output or ""))
+    found.update(f"go:{f}: {msg}" for f, msg in _GO_DIAG.findall(output or ""))
+    return frozenset(found)
+
+
+def compare_to_baseline(change: VerifyResult, baseline: VerifyResult | None) -> VerifyResult:
+    """Mark which of `change`'s failures were already failing on the base.
+
+    Conservative on purpose. A failure is only called pre-existing when both
+    runs failed, both outputs were recognisable, and the change added nothing
+    to the base's set. An unrecognisable output, a base that passed, or a base
+    that could not be run all leave the failure counted against the change.
+    """
+    if change.ok or baseline is None or not baseline.command or baseline.ok:
+        return change
+    if not change.signature or not baseline.signature:
+        return change
+    new = sorted(change.signature - baseline.signature)
+    change.baseline_failures = sorted(baseline.signature)
+    change.new_failures = new
+    change.preexisting = not new
+    return change
+
+
+async def run_baseline(
+    workspace: Path,
+    dest: Path,
+    plan: VerifyPlan | list[str],
+    *,
+    timeout: int = VERIFY_TIMEOUT_S,
+) -> VerifyResult | None:
+    """Run `plan` on the commit `dest` branched from, in a throwaway checkout.
+
+    Only called when the change's own verify failed, so a healthy run never
+    pays for it. Returns None when no checkout could be made (not a repo, no
+    merge base): the caller then keeps the failure counted against the change.
+    The checkout is detached, outside the workspace, and always removed.
+    """
+    from runtime.tools.git import exec_cmd, remove_agent_worktree
+
+    workspace = Path(workspace).resolve()
+    head = exec_cmd(workspace, ["git", "rev-parse", "HEAD"], timeout=20)
+    if head.returncode != 0:
+        return None
+    base = exec_cmd(
+        dest, ["git", "merge-base", head.stdout.strip(), "HEAD"], timeout=20
+    ).stdout.strip()
+    if not base:
+        return None
+    tmp = Path(tempfile.mkdtemp(prefix="engine-baseline-"))
+    tree = tmp / "tree"
+    added = exec_cmd(
+        workspace, ["git", "worktree", "add", "--detach", str(tree), base], timeout=60
+    )
+    if added.returncode != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    try:
+        return await run_verify(tree, plan, source="baseline", timeout=timeout)
+    finally:
+        remove_agent_worktree(workspace, tree)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def format_verify_block(result: VerifyResult) -> str:
@@ -245,12 +350,29 @@ def format_verify_block(result: VerifyResult) -> str:
             f"not run: {result.reason or 'unavailable'}\n"
             "Treat the change as unverified. Say so in your verdict."
         )
-    verdict = "PASSED" if result.ok else "FAILED"
+    if result.ok:
+        verdict = "PASSED"
+    elif result.preexisting:
+        verdict = "FAILED — but only on failures that already fail on the base commit"
+    else:
+        verdict = "FAILED"
     lines = [
         "=== HARNESS VERIFY (run by the engine, not by an agent) ===",
         f"verdict: {verdict}",
         f"command: {result.command}  (chosen from: {result.source})",
         f"structured: {json.dumps(result.as_dict(), sort_keys=True)}",
+    ]
+    if result.preexisting:
+        lines.append(
+            "These failures also occur on the untouched base commit, so this "
+            "change did not cause them. Do not treat them as a defect of the "
+            "change, and do not widen the scope to fix them:"
+        )
+        lines.extend(f"  - {item}" for item in result.baseline_failures[:20])
+    elif result.new_failures:
+        lines.append("Failures this change introduced (absent on the base commit):")
+        lines.extend(f"  - {item}" for item in result.new_failures[:20])
+    lines += [
         "output:",
         result.output or "(empty)",
         "=== END HARNESS VERIFY ===",
@@ -267,7 +389,7 @@ def settle_verify_refusal(
     task that explicitly says there are no tests -- and even then a build,
     where the project has one, must still have succeeded.
     """
-    if result is not None and result.ok:
+    if result is not None and result.passes_gate:
         return ""
     no_tests = task_declares_no_tests(task)
     if result is None or not result.command:

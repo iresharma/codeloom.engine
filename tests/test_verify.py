@@ -506,3 +506,219 @@ def test_detects_python_from_tox_ini(tmp_path):
     assert detect_verify_commands(tmp_path, config=EngineConfig()).commands == [
         "pytest -q"
     ]
+
+
+# --------------------------------------------------------------------------
+# failures that predate the change must not block it
+#
+# Two of three trial runs were derailed by one: reach-auth-proxy's `go vet`
+# copylocks, and codeloom.engine's test_session_trace under the harness's
+# ENGINE_TRACE_CALLS. `git` is real here, and so are the verify subprocesses.
+
+from runtime.verify import (  # noqa: E402
+    compare_to_baseline,
+    failure_signature,
+    run_baseline,
+)
+
+PYTEST_FAILS = (
+    "FAILED tests/test_a.py::test_x - AssertionError: boom\n"
+    "FAILED tests/test_b.py::test_y - KeyError: 'k'\n"
+    "==== 2 failed, 9 passed in 1.0s ====\n"
+)
+GO_VET = (
+    "# example.com/app/internal/RPC/storage\n"
+    "internal/RPC/storage/main.go:45:9: return copies lock value: "
+    "protoimpl.MessageState contains sync.Mutex\n"
+    "internal/RPC/page/main.go:12:3: return copies lock value: "
+    "protoimpl.MessageState contains sync.Mutex\n"
+)
+
+
+def test_failure_signature_reads_pytest_ids():
+    assert failure_signature(PYTEST_FAILS) == {
+        "pytest:tests/test_a.py::test_x",
+        "pytest:tests/test_b.py::test_y",
+    }
+
+
+def test_failure_signature_reads_go_test_and_packages():
+    out = "--- FAIL: TestCap (0.00s)\nFAIL\nFAIL\texample.com/app/http\t0.1s\n"
+    assert failure_signature(out) == {
+        "go-test:TestCap",
+        "go-pkg:example.com/app/http",
+    }
+
+
+def test_failure_signature_drops_line_and_column_from_go_diagnostics():
+    shifted = GO_VET.replace(":45:9:", ":51:2:")
+    assert failure_signature(GO_VET) == failure_signature(shifted)
+    assert any("return copies lock value" in item for item in failure_signature(GO_VET))
+
+
+def test_failure_signature_is_empty_for_unrecognised_output():
+    assert failure_signature("something went wrong\n") == frozenset()
+
+
+def _fail(sig, **kw):
+    return VerifyResult(command="x", exit_code=1, signature=frozenset(sig), **kw)
+
+
+def test_identical_failures_are_preexisting():
+    change = compare_to_baseline(_fail({"a", "b"}), _fail({"a", "b"}))
+    assert change.preexisting is True
+    assert change.passes_gate is True
+    assert change.ok is False
+
+
+def test_a_failure_the_base_did_not_have_is_introduced():
+    change = compare_to_baseline(_fail({"a", "new"}), _fail({"a"}))
+    assert change.preexisting is False
+    assert change.new_failures == ["new"]
+    assert change.passes_gate is False
+
+
+def test_fewer_failures_than_the_base_is_still_preexisting():
+    assert compare_to_baseline(_fail({"a"}), _fail({"a", "b"})).preexisting is True
+
+
+def test_a_passing_base_means_the_failure_is_the_changes():
+    base = VerifyResult(command="x", exit_code=0)
+    assert compare_to_baseline(_fail({"a"}), base).preexisting is False
+
+
+def test_unrecognisable_output_is_never_called_preexisting():
+    assert compare_to_baseline(_fail(set()), _fail({"a"})).preexisting is False
+    assert compare_to_baseline(_fail({"a"}), _fail(set())).preexisting is False
+
+
+def test_no_baseline_leaves_the_failure_counted_against_the_change():
+    assert compare_to_baseline(_fail({"a"}), None).passes_gate is False
+
+
+def test_a_clean_result_is_untouched():
+    clean = VerifyResult(command="x", exit_code=0)
+    assert compare_to_baseline(clean, _fail({"a"})) is clean
+    assert clean.passes_gate is True
+
+
+def _repo_with_failing_base(tmp_path: Path, failures: str) -> Path:
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    (repo / "failures.txt").write_text(failures)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "red base"], cwd=repo, check=True, capture_output=True
+    )
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_run_baseline_runs_on_the_base_commit_and_cleans_up(tmp_path):
+    repo = _repo_with_failing_base(tmp_path, PYTEST_FAILS)
+    dest, branch, err = add_agent_worktree(repo, "b1", "coder")
+    assert not err, err
+    work = Path(dest)
+    # The change touches the worktree; the base checkout must not see it.
+    (work / "failures.txt").write_text("FAILED tests/test_zzz.py::test_changed\n")
+    commit_if_dirty(work, "change")
+
+    plan = VerifyPlan(["cat failures.txt; exit 1"], "config")
+    baseline = await run_baseline(repo, work, plan)
+    assert baseline is not None
+    assert baseline.source == "baseline"
+    assert baseline.signature == {
+        "pytest:tests/test_a.py::test_x",
+        "pytest:tests/test_b.py::test_y",
+    }
+    listed = subprocess.run(
+        ["git", "worktree", "list"], cwd=repo, capture_output=True, text=True
+    ).stdout
+    assert "engine-baseline-" not in listed
+
+
+@pytest.mark.asyncio
+async def test_run_baseline_returns_none_outside_a_repo(tmp_path):
+    assert await run_baseline(tmp_path, tmp_path, VerifyPlan(["true"], "config")) is None
+
+
+async def _gate(tmp_path, base_failures: str, change_failures: str):
+    repo = _repo_with_failing_base(tmp_path, base_failures)
+    provider = _ReviewerSpawn()
+    orch = _orch(repo, verify_command="cat failures.txt; exit 1")
+    orch._llm = provider
+    dest, branch, err = add_agent_worktree(repo, "g1", "coder")
+    assert not err, err
+    work = Path(dest)
+    (work / "failures.txt").write_text(change_failures)
+    commit_if_dirty(work, "change")
+    orch._remember_worktree("g1", work, branch, "coder", "b1")
+    await orch.run("cap redirects")
+    await _wait_children(orch)
+    return orch, provider, work
+
+
+@pytest.mark.asyncio
+async def test_a_failure_that_predates_the_change_does_not_block_the_reviewer(tmp_path):
+    orch, provider, work = await _gate(tmp_path, PYTEST_FAILS, PYTEST_FAILS)
+    assert provider.reviewer_tasks, "the reviewer was blocked by a pre-existing failure"
+    brief = provider.reviewer_tasks[0]
+    assert "already fail on the base commit" in brief
+    assert "tests/test_a.py::test_x" in brief
+    assert "do not widen the scope" in brief
+    result = orch.latest_verify(work)
+    assert result.ok is False and result.preexisting is True
+    # ...and settle agrees.
+    assert orch._pr_verify_refusal(work) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_failure_the_change_introduced_still_blocks_the_reviewer(tmp_path):
+    changed = PYTEST_FAILS + "FAILED tests/test_c.py::test_new - oops\n"
+    orch, provider, work = await _gate(tmp_path, PYTEST_FAILS, changed)
+    assert provider.reviewer_tasks == []
+    result = orch.latest_verify(work)
+    assert result.preexisting is False
+    assert result.new_failures == ["pytest:tests/test_c.py::test_new"]
+    assert "harness verify failed" in orch._pr_verify_refusal(work)
+
+
+def test_the_verify_block_lists_what_the_change_introduced():
+    result = _fail({"a", "new"})
+    result = compare_to_baseline(result, _fail({"a"}))
+    block = format_verify_block(result)
+    assert "Failures this change introduced" in block
+    assert "- new" in block
+
+
+# --------------------------------------------------------------------------
+# the engine's own env vars do not reach the project under test
+
+
+@pytest.mark.asyncio
+async def test_verify_does_not_inherit_engine_env_vars(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENGINE_TRACE_CALLS", "1")
+    monkeypatch.setenv("PROJECT_FLAG", "kept")
+    result = await run_verify(
+        tmp_path,
+        VerifyPlan(
+            ['echo "trace=${ENGINE_TRACE_CALLS:-unset} flag=${PROJECT_FLAG:-unset}"'],
+            "config",
+        ),
+    )
+    assert "trace=unset" in result.output
+    assert "flag=kept" in result.output
+
+
+@pytest.mark.asyncio
+async def test_the_reviewers_run_verify_tool_also_drops_engine_env(tmp_path, monkeypatch):
+    from tools.base import ToolContext
+    from tools.verify import run_verify as run_verify_tool
+
+    monkeypatch.setenv("ENGINE_TRACE_CALLS", "1")
+    ctx = ToolContext(
+        workspace=tmp_path,
+        config=EngineConfig(),
+        verify_command='echo "trace=${ENGINE_TRACE_CALLS:-unset}"',
+    )
+    assert "trace=unset" in await run_verify_tool(ctx)
