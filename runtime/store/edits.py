@@ -158,61 +158,6 @@ def last_batch(db_path: Path, session_id: str) -> list[EditRecord]:
     return [_row(row) for row in rows]
 
 
-def max_edit_id(db_path: Path, session_id: str) -> int:
-    """Highest journalled edit id for this session, or 0 when there are none.
-
-    The marker a fix-up slice is rolled back to (item 6).
-    """
-    if not Path(db_path).is_file():
-        return 0
-    conn = _connect(db_path)
-    try:
-        row = conn.execute(
-            "SELECT MAX(id) FROM edits WHERE session_id = ?", (session_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-    return int(row[0]) if row and row[0] is not None else 0
-
-
-def batches_after(
-    db_path: Path, session_id: str, after_id: int
-) -> list[list[EditRecord]]:
-    """Every batch journalled after `after_id`, oldest batch first.
-
-    A row with no batch_id is its own single-record batch, matching what
-    `last_batch` does.
-    """
-    if not Path(db_path).is_file():
-        return []
-    conn = _connect(db_path)
-    try:
-        rows = conn.execute(
-            """
-            SELECT id, session_id, batch_id, path, tool, before, after,
-                   before_sha, after_sha, diff, created_dirs, applied_at
-            FROM edits
-            WHERE session_id = ? AND id > ?
-            ORDER BY id ASC
-            """,
-            (session_id, int(after_id or 0)),
-        ).fetchall()
-    finally:
-        conn.close()
-    grouped: list[list[EditRecord]] = []
-    index: dict[str, list[EditRecord]] = {}
-    for raw in rows:
-        record = _row(raw)
-        key = record.batch_id or f"__solo_{record.id}"
-        bucket = index.get(key)
-        if bucket is None:
-            bucket = []
-            index[key] = bucket
-            grouped.append(bucket)
-        bucket.append(record)
-    return grouped
-
-
 def _row(row: tuple) -> EditRecord:
     dirs_raw = row[10]
     try:
