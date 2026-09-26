@@ -762,12 +762,16 @@ async def _apply_edit_body(
             before = ctx.lsp.cached_diagnostics(path)
         except Exception:  # noqa: BLE001
             before = []
-    blocked, gate_note = await _judge_write_gate(ctx, path, mutate, tool_name, creating=creating)
+    blocked, gate_note, pending_gate = await _judge_write_gate(
+        ctx, path, mutate, tool_name, creating=creating
+    )
     if blocked is not None:
         return blocked
     result = _apply_sync(ctx, path, mutate, tool_name, creating=creating)
     if not result.ok:
         return result.message
+    if pending_gate is not None:
+        pending_gate.record(ctx, result.edit_id)
     extra = ""
     if ctx.lsp is not None and result.diff:
         extra = await _lsp_after(ctx, result, before, tool_name)
@@ -804,6 +808,59 @@ def _preview_diff(ctx: ToolContext, path: str, mutate: Callable[[FileSource], st
     return prepared.diff
 
 
+@dataclass
+class _GateDecision:
+    """A write-gate verdict, held until the edit it judged has an id.
+
+    Recording after `_apply_sync` is what lets a judgement be joined with the
+    edit it was about (`edit_id`), so precision can be measured instead of
+    guessed at. A blocked edit is recorded immediately -- there is no edit to
+    wait for.
+    """
+
+    tag: str
+    subject: str
+    outcome: str
+    signals: dict
+    enforced: bool
+    latency_ms: int
+
+    def record(self, ctx: ToolContext, edit_id: int | None = None) -> None:
+        on_judgement = getattr(ctx, "on_judgement", None)
+        if on_judgement is None:
+            return
+        on_judgement(
+            tag=self.tag,
+            subject=self.subject,
+            outcome=self.outcome,
+            signals=self.signals,
+            enforced=self.enforced,
+            latency_ms=self.latency_ms,
+            agent_id=getattr(ctx, "agent_id", ""),
+            edit_id=edit_id,
+        )
+
+
+def _write_gate_state(
+    ctx: ToolContext, path: str, diff: str, tool_name: str
+) -> dict:
+    """What the write gate shows the judge.
+
+    `diff` is this edit's own preview diff (never the cumulative worktree
+    diff), and `changed_lines` narrows it further to the +/- lines the edit
+    itself wrote -- see `edit_hunk_changes`.
+    """
+    from runtime.judge_decisions import edit_hunk_changes, write_diff_window
+
+    return {
+        "user_request": getattr(ctx, "user_request", ""),
+        "path": path,
+        "diff": write_diff_window(diff),
+        "changed_lines": write_diff_window(edit_hunk_changes(diff)),
+        "tool": tool_name,
+    }
+
+
 async def _judge_write_gate(
     ctx: ToolContext,
     path: str,
@@ -811,59 +868,48 @@ async def _judge_write_gate(
     tool_name: str,
     *,
     creating: bool = False,
-) -> tuple[str | None, str]:
+) -> tuple[str | None, str, _GateDecision | None]:
     """Phase 7 (docs/impl-plans/jev-exp-1.md): the semantic write gate.
-    Returns (block_error, note) -- block_error is non-None only when the
-    edit must be refused outright (Stage 2: a hardcoded secret, enforcing
+    Returns (block_error, note, pending) -- block_error is non-None only when
+    the edit must be refused outright (Stage 2: a hardcoded secret, enforcing
     mode only); note is a non-blocking heads-up appended to a successful
-    result. Runs entirely before `_apply_sync`, never inside it."""
+    result; pending is the judgement to record once the edit has an id. Runs
+    entirely before `_apply_sync`, never inside it."""
     judge = getattr(ctx, "judge", None)
     config = ctx.config
     if judge is None or not getattr(judge, "enabled", False) or config is None:
-        return None, ""
+        return None, "", None
     site_mode = config.judge_mode_for("write")
     if site_mode == "off":
-        return None, ""
+        return None, "", None
     diff = _preview_diff(ctx, path, mutate, creating=creating)
     if not diff:
-        return None, ""
-    from runtime.judge_decisions import (
-        classify_write,
-        write_diff_window,
-        write_gate_questions,
-        write_signals,
-    )
+        return None, "", None
+    from runtime.judge_decisions import classify_write, write_gate_questions, write_signals
 
     verdict = await judge.ask(
-        {
-            "user_request": getattr(ctx, "user_request", ""),
-            "path": path,
-            "diff": write_diff_window(diff),
-            "tool": tool_name,
-        },
+        _write_gate_state(ctx, path, diff, tool_name),
         write_gate_questions(),
         tag="write_gate",
     )
     if verdict is None:
-        return None, ""
+        return None, "", None
     enforced = site_mode == "enforcing"
     decision, reason = classify_write(verdict)
     if decision == "allow":
-        return None, ""
-    on_judgement = getattr(ctx, "on_judgement", None)
-    if on_judgement is not None:
-        on_judgement(
-            tag="write_gate",
-            subject=f"{tool_name}:{path}"[:200],
-            outcome=decision,
-            signals=write_signals(verdict),
-            enforced=enforced,
-            latency_ms=verdict.latency_ms,
-            agent_id=getattr(ctx, "agent_id", ""),
-        )
+        return None, "", None
+    pending = _GateDecision(
+        tag="write_gate",
+        subject=f"{tool_name}:{path}"[:200],
+        outcome=decision,
+        signals=write_signals(verdict),
+        enforced=enforced,
+        latency_ms=verdict.latency_ms,
+    )
     if enforced and decision == "block":
-        return f"error: refused — {reason}", ""
-    return None, f"[engine: judge flagged this diff -- {reason}]"
+        pending.record(ctx)
+        return f"error: refused — {reason}", "", None
+    return None, f"[engine: judge flagged this diff -- {reason}]", pending
 
 
 def _apply_workspace_sync(
@@ -946,12 +992,17 @@ async def _apply_workspace_edit_body(
     edits_by_path: list[tuple[str, list[TextEdit]]],
     tool_name: str,
 ) -> str:
-    blocked, gate_note = await _judge_workspace_write_gate(ctx, edits_by_path, tool_name)
+    blocked, gate_note, pending_gate = await _judge_workspace_write_gate(
+        ctx, edits_by_path, tool_name
+    )
     if blocked is not None:
         return blocked
     results, err = _apply_workspace_sync(ctx, edits_by_path, tool_name)
     if err:
         return err
+    if pending_gate is not None:
+        first = next((item.edit_id for item in results if item.edit_id), None)
+        pending_gate.record(ctx, first)
     extras: list[str] = []
     for result in results:
         extra = ""
@@ -989,55 +1040,43 @@ def _preview_workspace_diff(
 
 async def _judge_workspace_write_gate(
     ctx: ToolContext, edits_by_path: list[tuple[str, list[TextEdit]]], tool_name: str
-) -> tuple[str | None, str]:
+) -> tuple[str | None, str, _GateDecision | None]:
     judge = getattr(ctx, "judge", None)
     config = ctx.config
     if judge is None or not getattr(judge, "enabled", False) or config is None:
-        return None, ""
+        return None, "", None
     site_mode = config.judge_mode_for("write")
     if site_mode == "off":
-        return None, ""
+        return None, "", None
     diff = _preview_workspace_diff(ctx, edits_by_path)
     if not diff:
-        return None, ""
-    from runtime.judge_decisions import (
-        classify_write,
-        write_diff_window,
-        write_gate_questions,
-        write_signals,
-    )
+        return None, "", None
+    from runtime.judge_decisions import classify_write, write_gate_questions, write_signals
 
     paths = ", ".join(path for path, _ in edits_by_path)
     verdict = await judge.ask(
-        {
-            "user_request": getattr(ctx, "user_request", ""),
-            "path": paths,
-            "diff": write_diff_window(diff),
-            "tool": tool_name,
-        },
+        _write_gate_state(ctx, paths, diff, tool_name),
         write_gate_questions(),
         tag="write_gate",
     )
     if verdict is None:
-        return None, ""
+        return None, "", None
     enforced = site_mode == "enforcing"
     decision, reason = classify_write(verdict)
     if decision == "allow":
-        return None, ""
-    on_judgement = getattr(ctx, "on_judgement", None)
-    if on_judgement is not None:
-        on_judgement(
-            tag="write_gate",
-            subject=f"{tool_name}:{paths}"[:200],
-            outcome=decision,
-            signals=write_signals(verdict),
-            enforced=enforced,
-            latency_ms=verdict.latency_ms,
-            agent_id=getattr(ctx, "agent_id", ""),
-        )
+        return None, "", None
+    pending = _GateDecision(
+        tag="write_gate",
+        subject=f"{tool_name}:{paths}"[:200],
+        outcome=decision,
+        signals=write_signals(verdict),
+        enforced=enforced,
+        latency_ms=verdict.latency_ms,
+    )
     if enforced and decision == "block":
-        return f"error: refused — {reason}", ""
-    return None, f"[engine: judge flagged this diff -- {reason}]"
+        pending.record(ctx)
+        return f"error: refused — {reason}", "", None
+    return None, f"[engine: judge flagged this diff -- {reason}]", pending
 
 
 def normalize_workspace_edit(workspace: Path, payload: dict) -> list[tuple[str, list[TextEdit]]]:
