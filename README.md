@@ -359,7 +359,14 @@ reviewer's brief. The command is chosen in order: `ENGINE_VERIFY_CMD` /
 `EngineConfig.verify_command`; then detection (`go build ./... && go vet ./...
 && go test ./...` for a `go.mod`, `pytest -q` for a Python project, `npm test`
 when `package.json` has a real test script); then the last command the writer
-itself ran successfully. If verification fails the reviewer is never given a
+itself ran successfully. If verification fails, the engine first runs the same command on the commit the
+worktree branched from (a detached throwaway checkout, only after a failure). A
+failure the base already had — same pytest ids, go tests, or `go build`/`go vet`
+diagnostics with line numbers ignored — does not block the change; the reviewer
+is told which failures predate it and not to widen the scope. A failure the
+change introduced, or one whose output can't be compared, does block. The
+verify environment drops every `ENGINE_*` variable, so the engine's own
+controls never reach the project under test. If a blocking failure remains, the reviewer is never given a
 turn: its report comes back as `status=blocked` with the verify output and the
 id of the still-open worktree, and the orchestrator decides what to do. No coder
 is started automatically — that was tried and removed, because a failure that
@@ -387,14 +394,19 @@ instruction, including the soft ones.
 ### What a pull request says
 
 `settle_worktree pr` takes its title and body from the **orchestrator's closing
-summary** — its own last reply to you, including the follow-up turn after the
-final child — never from whichever child happened to finish last. The title is
-the first sentence of that summary, cut on a word boundary to 72 characters.
+summary** — never from whichever child happened to finish last. A headless run
+can't answer the orchestrator, so its last reply is usually a conversation turn
+(preamble, the summary, then "would you like me to merge?"). Only a summary set
+apart in that reply counts: a block between `---` rules or a `>` blockquote, or
+the whole reply if it never addresses you. A reply that asks you something and
+has no such block leaves no summary. The title is a standalone `**Title**` or
+`# Title` first line if there is one, else the first sentence, cut on a word
+boundary to 72 characters.
 The body is checked against `git diff --stat`: any changed top-level path the
 summary does not mention gets a deterministic **Files changed** section built
-from the stat, with no second call to the model. With no closing summary the
+from the stat, with no second call to the model. With no usable summary the
 fallback is the original task prompt plus the stat. Settle refuses to open a
-pull request unless the latest harness verify exited 0 — unless the task
+pull request unless the latest harness verify exited 0 (or failed only on failures the base commit already had) — unless the task
 explicitly says there are no tests, and even then a failing build still blocks.
 
 You can keep talking to the orch while children run: a second `SubmitUserMessage` is queued if the orch is mid-reply, then played when that reply finishes. `AbortAgent` with no id cancels only the orch's current reply; with `agent_id` it cancels that child. Session shutdown still aborts every child and removes live worktrees.
@@ -1101,7 +1113,7 @@ back to the repo with `[skip ci]` so the badge stays current without
 retriggering the workflow.
 
 88 test modules under `tests/` (plus 4 live calibration fixtures in
-`tests/live/`, marked `judge`), 1599 tests in the default run. The table below
+`tests/live/`, marked `judge`), 1633 tests in the default run. The table below
 is the core set rather than the whole list — the original write-path suite,
 the runtime foundation (config, streaming, turns, stats, shell, prompts,
 compaction), and the pipeline-handoff stages:
