@@ -102,6 +102,13 @@ CLOSER_MESSAGE = (
     "You have two tool turns left. Finish the current edit, or write a closer "
     "with labeled leftover: (paths, done, next). Do not start new exploration."
 )
+LOOP_WRAP_UP = (
+    "You are repeating the same steps without new information, so investigation "
+    "stops here. Do not call any tools. Report now, in your normal final format: "
+    "what you found, what you checked and how, and what you did NOT get to "
+    "verify. Findings you already have are the point of this report; do not "
+    "hold them back because the investigation was cut short."
+)
 CONTINUE_GRANT = (
     "The user granted another {slice} tool turns. Continue from leftover. "
     "Do not re-explore files you already read."
@@ -538,6 +545,14 @@ class AgentLoop:
                     if await self._maybe_judge_loop_progress(turn, task):
                         self._exit_status = "stopped"
                         self._stopped_by_judge = True
+                        # Cutting the agent off dropped everything it had
+                        # learned: a reviewer stopped for repeating searches
+                        # took its one real finding with it, in three of the
+                        # last four trial runs. One tool-less turn to report
+                        # what it has costs little and keeps the findings.
+                        wrapped = await self._wrap_up_after_stop()
+                        if wrapped:
+                            last_text = wrapped
                         break
                     if turn >= self._config.max_turns:
                         action = await self._offer_continue(continues)
@@ -602,6 +617,28 @@ class AgentLoop:
             raise
         finally:
             self._config.max_turns = original_max_turns
+
+    async def _wrap_up_after_stop(self) -> str:
+        """One final turn, after a loop-control stop, to report what the agent
+        has. Returns the report text, or "" if the call fails or the model
+        answers with tool calls instead of text -- in which case the stop
+        behaves exactly as it did before (no report, status=stopped)."""
+        self._history.append({"role": "user", "content": LOOP_WRAP_UP})
+        try:
+            result = await self._complete(self._build_messages(), self._tools.schemas())
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a failed wrap-up must not fail the stop
+            self._history.pop()
+            return ""
+        text = (getattr(result, "text", "") or "").strip()
+        if not text:
+            # Tool calls (or nothing): drop the nudge so history stays valid.
+            self._history.pop()
+            return ""
+        self._history.append({"role": "assistant", "content": text})
+        self._emit_message(text)
+        return text
 
     def _maybe_inject_closer(self, turn: int, closer_ceilings: set[int]) -> None:
         ceiling = int(self._config.max_turns or 0)
