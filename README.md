@@ -29,7 +29,7 @@ socket is a dataclass with a `type` field.
   - [Events](#events-engine--client)
   - [Snapshots and reconnection](#snapshots-and-reconnection)
 - [The agent loop](#the-agent-loop)
-  - [Verify, review, fix up](#verify-review-fix-up)
+  - [Verify and review](#verify-and-review)
   - [What a pull request says](#what-a-pull-request-says)
 - [Tools](#tools)
   - [Discovery and reload](#discovery-and-reload)
@@ -192,8 +192,7 @@ language servers, and unlinks the socket.
               │  researcher debugger │
               │  reviewer            │
               └────┬───────────┬────┬┘
-                   │           │    │ before a reviewer runs,
-                   │           │    │ and again after a nit slice
+                   │           │    │ before a reviewer runs
                    │           │  ┌─▼──────────────────────────┐
                    │           │  │ runtime/verify.py          │
                    │           │  │ detect cmd → run in the    │
@@ -348,10 +347,10 @@ A spawn is fire-and-forget. The personality tool returns immediately with `agent
 
 `coder` and `tester` run in a git worktree (`workspace/.engine/worktrees/<agent_id>` on branch `engine/<profile>/<agent_id>`) so two writers — or a writer and your dirty checkout — do not collide. `reviewer` joins that worktree so `git_diff` sees the writer's changes. When the writer finishes, uncommitted edits are committed on that branch, then the engine prompts to **merge**, **open a PR**, **keep**, or **discard**. Natural-language replies such as "please merge it" count. A `WorktreeSettled` event and an `engine` chat line report what happened. Empty worktrees (no unique commits and a clean tree) are removed without asking. After a keep — or if the prompt was missed — the orch must call `settle_worktree` rather than spawn another coder; writers cannot check out the user's branch. Leftover engine worktrees are recovered on session start so a later merge/PR still finds them. `ask`, `researcher`, and `debugger` use the main workspace. If the workspace is not a git repo, spawn still starts on the main tree.
 
-### Verify, review, fix up
+### Verify and review
 
-Three stages sit between a writer finishing and a pull request opening. All
-three are run by the harness, not asked of an agent.
+Two stages sit between a writer finishing and a pull request opening. Both
+are run by the harness, not asked of an agent.
 
 **Harness verify** (`runtime/verify.py`). Before a reviewer gets its first
 turn, the engine runs the project's verify command in that worktree and puts
@@ -361,8 +360,10 @@ reviewer's brief. The command is chosen in order: `ENGINE_VERIFY_CMD` /
 && go test ./...` for a `go.mod`, `pytest -q` for a Python project, `npm test`
 when `package.json` has a real test script); then the last command the writer
 itself ran successfully. If verification fails the reviewer is never given a
-turn: the failure goes back to the *same* coder as a capped continue slice in
-the same worktree. If no command can be determined at all, the reviewer is
+turn: its report comes back as `status=blocked` with the verify output and the
+id of the still-open worktree, and the orchestrator decides what to do. No coder
+is started automatically — that was tried and removed, because a failure that
+predates the change pulled the coder into unrelated work. If no command can be determined at all, the reviewer is
 started with a brief that says the change is unverified.
 
 The reviewer's one command is `run_verify`, which re-runs that same command in
@@ -382,15 +383,6 @@ counts) or `skipped`, a conditional instruction with no disposition, or no
 table at all all become `request_changes`. A `block` is never downgraded. The
 coder's own finish report likewise has to give a disposition for every
 instruction, including the soft ones.
-
-**Nit fix-up.** When the reviewer approves with non-blocking remarks it tags
-each `trivial` or `followup` in a `=== NITS ===` table. All trivial nits go
-back to the same coder as one capped continue slice
-(`EngineConfig.nit_fixup_turns`, default 4, `ENGINE_NIT_FIXUP_TURNS`). Harness
-verify runs again afterwards; if it now fails, every edit that slice journalled
-is reverted through the undo journal and the pre-nit state is what settles — a
-nit never breaks a passing build. `followup` nits go into a **Follow-ups**
-section of the pull request body.
 
 ### What a pull request says
 
@@ -850,8 +842,7 @@ current disk hash does not match the hash stored with the note.
 | `ENGINE_EXEC_TIMEOUT_S` | `120` | Default `run_command` timeout. |
 | `ENGINE_EXEC_FILE_LIMIT_MB` | `2048` | `ulimit -f` cap (POSIX 512-byte blocks). |
 | `ENGINE_CONTEXT_BUDGET` | `120000` | Compaction trigger budget. |
-| `ENGINE_VERIFY_CMD` | (unset; detected) | Explicit harness verify command, run in a writer's worktree before the reviewer and again after a nit fix-up. Unset means detect it (`go.mod` → build+vet+test, Python → `pytest -q`, `package.json` with a real test script → `npm test`), then fall back to the last command the writer ran successfully. |
-| `ENGINE_NIT_FIXUP_TURNS` | `4` | Turn budget for a verify-failure or trivial-nit fix-up slice in an existing worktree. |
+| `ENGINE_VERIFY_CMD` | (unset; detected) | Explicit harness verify command, run in a writer's worktree before the reviewer . Unset means detect it (`go.mod` → build+vet+test, Python → `pytest -q`, `package.json` with a real test script → `npm test`), then fall back to the last command the writer ran successfully. |
 | `ENGINE_PUSHGATEWAY_URL` | (unset) | Prometheus Pushgateway base URL. Unset disables pushes; metrics still accumulate in-process. |
 | `ENGINE_METRICS_JOB` | `engine` | Pushgateway job name. Grouping key `instance` is the session id unless overridden. |
 | `ENGINE_METRICS_INSTANCE` | (session id) | Pushgateway grouping key `instance`. Set to a stable name (e.g. `baseline`) when comparing runs. |
@@ -1109,8 +1100,8 @@ request, and on pushes to `main` it regenerates `coverage.svg` and commits it
 back to the repo with `[skip ci]` so the badge stays current without
 retriggering the workflow.
 
-90 test modules under `tests/` (plus 4 live calibration fixtures in
-`tests/live/`, marked `judge`), 1622 tests in the default run. The table below
+88 test modules under `tests/` (plus 4 live calibration fixtures in
+`tests/live/`, marked `judge`), 1599 tests in the default run. The table below
 is the core set rather than the whole list — the original write-path suite,
 the runtime foundation (config, streaming, turns, stats, shell, prompts,
 compaction), and the pipeline-handoff stages:
@@ -1138,11 +1129,9 @@ compaction), and the pipeline-handoff stages:
 | `test_runners.py` | Structured pytest / `go test` / build verdicts, and head+tail truncation keeping a runner's summary line (real subprocesses) |
 | `test_verify.py` | Verify-command choice, the reviewer brief carrying the result, a failing verify blocking the reviewer and starting a capped coder slice, settle refusing, `run_verify` unable to touch the real worktree |
 | `test_review_verdict.py` | The reviewer brief keeping the original task, requirements-table parsing, and every verdict-enforcement rule |
-| `test_nit_fixup.py` | Trivial vs followup nits, the fix-up slice, `revert_since_sync` over real funnel writes, rollback when a fix-up breaks verify |
 | `test_write_gate_scope.py` | The gate judging only this edit's hunk, and decisions journalled with an edit id |
 | `test_pr_fields.py` | PR title word-boundary cut, body coverage against `git diff --stat`, two-child settle (real worktrees, real bare remote) |
 | `test_lsp_unsupported_ext.py` | LSP tools answering unsupported extensions without reaching a language server |
-| `test_profile_prompt_rules.py` | The mock-at-the-boundary rules present in each profile's rendered system prompt |
 
 The `conftest.py` `ctx` fixture builds a `ToolContext` over `tmp_path` with a
 real SQLite journal and a fresh `FileTracker`. The `seed()` helper writes a file
@@ -1195,7 +1184,7 @@ runtime/
   store/
     sqlite.py             sessions table: init, save, load, list
     state.py              SessionState in-memory model
-    edits.py              edits table: record, recent, last_batch, batches_after, max_edit_id
+    edits.py              edits table: record, recent, last_batch
     judgements.py         judgements table: record (with edit_id), recent, all_for_session
     memory.py             structured workspace memory (files + decisions)
   tools/                implementation layer — no LLM schemas here
@@ -1233,7 +1222,7 @@ agents/
   subagent.py           personality instance
   profile.py            AgentProfile, ProfileRegistry, discover_profiles, tool groups
   profiles/             ask, coder, tester, reviewer, researcher, debugger
-  review_verdict.py     reviewer brief, requirements table, nit table, verdict enforcement
+  review_verdict.py     reviewer brief, requirements table, verdict enforcement
   hooks.py              AgentHooks callbacks
   compactor.py          mid-loop compact + compress_for_parent
 
@@ -1265,7 +1254,6 @@ describe those implementations to a model. The suite exercises
 |---|---|---|
 | NDJSON line | 8 MiB | `protocol/codec.py` |
 | Agent tool turns | orch 16, children 32; cap is a continue/handoff/stop checkpoint (slice 16, max 3 continues) | `EngineConfig.max_turns` / `turn_slice` / `max_continues` / `AgentProfile.max_turns` |
-| Fix-up slice turns | 4 — a verify-failure or trivial-nit slice in an existing worktree | `EngineConfig.nit_fixup_turns` / `ENGINE_NIT_FIXUP_TURNS` |
 | Harness verify | 600s per command; stops at the first non-zero exit | `runtime/verify.py::VERIFY_TIMEOUT_S` / `ENGINE_VERIFY_CMD` |
 | Command output to the model | first 1500 chars + last 2500, with the elided count named | `runtime/tools/shell.py::MODEL_HEAD_CHARS` / `MODEL_TAIL_CHARS` |
 | PR title | first sentence of the orchestrator's closing summary, word-boundary cut to 72 chars | `runtime/tools/git.py::PR_TITLE_MAX` |
