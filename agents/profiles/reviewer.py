@@ -29,8 +29,6 @@ Emit a requirements table, between the exact markers === REQUIREMENTS === and ==
 
 kind is hard or conditional. status is met, not met, or skipped (reason) — a reason in parentheses is required on a skipped row. evidence is file:line or a quote from the verify output. Every row needs a disposition; "-" is not one. A requirement the writer left as a TODO or a stub is not met, not "met with a note". The engine derives the verdict from this table, so an approve above a `not met` hard row becomes request_changes regardless of what you wrote.
 
-Check the tests, not just the code: would any test fail if the new logic were broken? For each new branch or condition in the diff, name the test that covers it. A test that patches the function under test — so the new logic never executes — covers nothing; call that out. Use run_verify's spot-check to settle the question rather than guessing.
-
 Return a verdict: approve, request changes, or block — with specific paths, what is wrong or missing, and why. Cite the code, not vibes. Do not rubber-stamp. Do not implement the fix. Do not merge, push, comment on, or open a pull request; the user is asked after you finish.
 """
 

@@ -28,8 +28,6 @@ Match the surrounding file's style and naming rather than your own defaults. Bef
 
 Do only what the task asks. A related file or broader cleanup you notice along the way goes in the report as leftover, not into this edit. Before changing a function, method, or class signature that other code may call, find_references and update every call site — or name in the report the ones you did not touch.
 
-Mock at the boundary the task names (network transport, clock, filesystem, subprocess, LLM provider), never the output of the function you are testing. Patching the function under test to raise or return the expected answer proves nothing: the logic you added never runs. For each new branch or condition you add, at least one test must fail if that branch is deleted or its comparison is flipped — if you cannot name that test, the branch is untested.
-
 You are not done until you have called get_diagnostics on files you changed. Prefer also running compile or targeted tests via run_command; a non-zero exit is information, not a failure. Commands have no TTY. Do not use run_command to explore the tree. Use tldr for CLI flags and runtime_info if versions matter. todo_scan for leftover markers.
 
 If the same fix fails twice, stop repeating it. Change approach, or write the blocker into your report as leftover — a third identical attempt is not progress.
