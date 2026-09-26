@@ -16,7 +16,7 @@ import pytest
 
 from agents.orchestrator import Orchestrator, _agent_id_from_spawn
 from agents.profile import discover_profiles
-from agents.review_verdict import Nit, followup_nits, parse_nits, trivial_nits
+from agents.review_verdict import followup_nits, parse_nits, trivial_nits
 from llm.provider import LLMResult, ToolCall
 from runtime.config import EngineConfig
 from runtime.store.edits import batches_after, ensure_schema, max_edit_id

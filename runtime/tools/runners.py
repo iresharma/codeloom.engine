@@ -136,9 +136,7 @@ def _runner_for_leg(leg: str) -> str | None:
         return "pytest"
     if rest.startswith("go test"):
         return "go test"
-    if rest.startswith("npm test") or rest.startswith("npm run test"):
-        return "npm test"
-    if rest.startswith("yarn test") or rest.startswith("pnpm test"):
+    if rest.startswith(("npm test", "npm run test", "yarn test", "pnpm test")):
         return "npm test"
     for prefix, name in _EXIT_ONLY_PREFIXES:
         if rest == prefix or rest.startswith(prefix + " "):

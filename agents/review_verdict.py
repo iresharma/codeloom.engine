@@ -286,7 +286,7 @@ def _normalize_status(cell: str) -> tuple[str, str]:
         return _SKIPPED, reason
     if lowered in {"not met", "unmet", "notmet", "no", "missing", "fail", "failed"}:
         return _NOT_MET, reason
-    if lowered.startswith("not met") or lowered.startswith("partially"):
+    if lowered.startswith(("not met", "partially")):
         return _NOT_MET, reason or value
     if lowered in {"met", "yes", "done", "ok", "pass", "passed"}:
         return _MET, reason
@@ -322,7 +322,7 @@ def stated_verdict(text: str) -> str:
     line = ""
     for candidate in body.splitlines():
         stripped = candidate.strip().lower()
-        if stripped.startswith("verdict:") or stripped.startswith("verdict ="):
+        if stripped.startswith(("verdict:", "verdict =")):
             line = candidate
             break
     haystack = line or body

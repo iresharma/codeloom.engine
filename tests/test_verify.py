@@ -502,3 +502,33 @@ def test_reviewer_has_run_verify_but_no_shell():
     assert profile.write_globs == []
     edit_tools = {"str_replace", "create_file", "apply_patch", "replace_lines"}
     assert not edit_tools & set(profile.tool_names)
+
+
+def test_detects_python_from_setup_cfg(tmp_path):
+    (tmp_path / "setup.cfg").write_text("[tool:pytest]\ntestpaths = tests\n")
+    assert detect_verify_commands(tmp_path, config=EngineConfig()).commands == [
+        "pytest -q"
+    ]
+
+
+def test_setup_cfg_without_a_pytest_section_is_not_python(tmp_path):
+    (tmp_path / "setup.cfg").write_text("[metadata]\nname = x\n")
+    assert detect_verify_commands(tmp_path, config=EngineConfig()).commands == []
+
+
+def test_detects_python_from_pyproject_only_when_it_mentions_pytest(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    assert detect_verify_commands(tmp_path, config=EngineConfig()).commands == []
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'x'\n[tool.pytest.ini_options]\naddopts = '-q'\n"
+    )
+    assert detect_verify_commands(tmp_path, config=EngineConfig()).commands == [
+        "pytest -q"
+    ]
+
+
+def test_detects_python_from_tox_ini(tmp_path):
+    (tmp_path / "tox.ini").write_text("[tox]\n")
+    assert detect_verify_commands(tmp_path, config=EngineConfig()).commands == [
+        "pytest -q"
+    ]

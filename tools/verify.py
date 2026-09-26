@@ -10,13 +10,10 @@ The copy is deleted afterwards; the real worktree is never touched.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
-from runtime.verify import (
-    DisposableWorktree,
-    VerifyPlan,
-    format_verify_block,
-    run_verify as run_verify_impl,
-)
+from runtime.verify import DisposableWorktree, VerifyPlan, format_verify_block
+from runtime.verify import run_verify as run_verify_impl
 from tools.base import ToolContext, tool
 
 MUTATION_MAX = 4000
@@ -107,11 +104,9 @@ async def run_verify(
     return header + format_verify_block(result)
 
 
-def _mutate(copy_root, path: str, old: str, new: str) -> str:
+def _mutate(copy_root: Path, path: str, old: str, new: str) -> str:
     """Apply the one substitution inside the copy. Never touches the real
     worktree: `copy_root` is a tempdir and the path must stay inside it."""
-    from pathlib import Path
-
     candidate = Path(path)
     if candidate.is_absolute():
         return "error: mutate_path must be workspace-relative"

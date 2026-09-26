@@ -146,21 +146,21 @@ def _detect(workspace: Path) -> list[str]:
     return []
 
 
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
 def _is_python(workspace: Path, names: set[str]) -> bool:
     if "pytest.ini" in names or "tox.ini" in names:
         return True
-    if "pyproject.toml" in names:
-        try:
-            text = (workspace / "pyproject.toml").read_text(errors="replace")
-        except OSError:
-            text = ""
-        if "pytest" in text:
-            return True
+    if "pyproject.toml" in names and "pytest" in _read(workspace / "pyproject.toml"):
+        return True
     if "setup.cfg" in names and "[tool:pytest]" in _read(workspace / "setup.cfg"):
         return True
-    if "tests" in names and (workspace / "tests").is_dir():
-        return True
-    return False
+    return "tests" in names and (workspace / "tests").is_dir()
 
 
 def _npm_test_script(workspace: Path, names: set[str]) -> str:
