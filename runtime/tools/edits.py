@@ -1102,6 +1102,54 @@ def undo_last_sync(ctx: ToolContext) -> ApplyResult:
     batch = journal.last_batch(db, _session_id(ctx))
     if not batch:
         return ApplyResult(ok=False, message="error: no edits to undo")
+    return _undo_batch_sync(ctx, db, batch)
+
+
+def revert_since_sync(ctx: ToolContext, after_edit_id: int) -> ApplyResult:
+    """Await-free undo of every batch journalled after `after_edit_id`.
+
+    Newest batch first, so each file walks back through its own history in
+    order. Used to roll back a reviewer-nit fix-up slice that broke a build
+    that was passing before it (item 6) -- `undo_last_sync` cannot be looped
+    for that, because the undo it journals becomes the next "last batch" and
+    a second call would simply re-apply what the first undid.
+
+    The same guarantees as a single undo: every record's `after_sha` is
+    checked against what is on disk before anything is written, nothing is
+    written if any check fails, and each write is atomic and journalled.
+    """
+    if ctx.journal is None:
+        return ApplyResult(ok=False, message="error: edit journal is not available")
+    db = Path(ctx.journal)
+    batches = journal.batches_after(db, _session_id(ctx), after_edit_id)
+    if not batches:
+        return ApplyResult(ok=True, message="", rel="", diff="")
+    diffs: list[str] = []
+    last_id = None
+    last_rel = ""
+    for batch in reversed(batches):
+        result = _undo_batch_sync(ctx, db, batch)
+        if not result.ok:
+            return ApplyResult(
+                ok=False,
+                message=(
+                    f"error: rolled back {len(diffs)} of {len(batches)} batches, "
+                    f"then stopped: {result.message}"
+                ),
+                rel=last_rel,
+                diff="\n".join(diffs),
+                edit_id=last_id,
+            )
+        if result.diff:
+            diffs.append(result.diff)
+        last_id = result.edit_id or last_id
+        last_rel = result.rel or last_rel
+    return ApplyResult(
+        ok=True, message="", rel=last_rel, diff="\n".join(diffs), edit_id=last_id
+    )
+
+
+def _undo_batch_sync(ctx: ToolContext, db: Path, batch: list) -> ApplyResult:
     for rec in reversed(batch):
         target = ctx.workspace / rec.path
         current_sha = sha256_bytes(target.read_bytes()) if target.is_file() else None

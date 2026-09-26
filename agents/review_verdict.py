@@ -22,18 +22,29 @@ import re
 from dataclasses import dataclass
 
 __all__ = [
+    "NITS_END",
+    "NITS_START",
     "REQUIREMENTS_END",
     "REQUIREMENTS_START",
+    "Nit",
     "RequirementRow",
     "ReviewVerdict",
     "build_reviewer_brief",
     "enforce_verdict",
+    "followup_nits",
+    "parse_nits",
     "parse_requirements_table",
     "stated_verdict",
+    "trivial_nits",
 ]
 
 REQUIREMENTS_START = "=== REQUIREMENTS ==="
 REQUIREMENTS_END = "=== END REQUIREMENTS ==="
+NITS_START = "=== NITS ==="
+NITS_END = "=== END NITS ==="
+
+TRIVIAL = "trivial"
+FOLLOWUP = "followup"
 
 TASK_LABEL = "=== ORIGINAL USER TASK (verbatim — this is the requirement) ==="
 TASK_END = "=== END ORIGINAL USER TASK ==="
@@ -86,6 +97,71 @@ class RequirementRow:
 
 
 @dataclass
+class Nit:
+    """A non-blocking review remark, classified by who should act on it.
+
+    `trivial` -- a few lines, no design decision: the same coder fixes it in
+    a capped slice before the PR opens. `followup` -- anything that needs a
+    decision or more than a few lines: it goes in the PR body so it is not
+    lost, and nobody pretends it was handled.
+    """
+
+    text: str
+    kind: str  # trivial | followup
+    evidence: str = ""
+
+    @property
+    def is_trivial(self) -> bool:
+        return self.kind == TRIVIAL
+
+
+def parse_nits(text: str) -> list[Nit]:
+    """Nits between the NITS markers. An unclassified nit is a followup --
+    the safe direction is to leave it for a human rather than hand an
+    unbounded change to a capped fix-up slice."""
+    body = text or ""
+    if NITS_START not in body:
+        return []
+    body = body.split(NITS_START, 1)[1]
+    if NITS_END in body:
+        body = body.split(NITS_END, 1)[0]
+    out: list[Nit] = []
+    for line in body.splitlines():
+        raw = line.strip()
+        if not raw or _SEPARATOR.match(raw):
+            continue
+        if "|" in raw:
+            cells = [cell.strip() for cell in raw.strip("|").split("|")]
+        else:
+            cells = [part.strip() for part in raw.lstrip("-*+ ").split(" -- ", 1)]
+        if not cells or not cells[0]:
+            continue
+        if {cell.lower() for cell in cells[:3]} <= {"nit", "class", "kind", "evidence"}:
+            continue
+        kind = _normalize_nit_kind(cells[1] if len(cells) > 1 else "")
+        evidence = cells[2] if len(cells) > 2 else ""
+        if evidence.lower() in _EMPTY_CELLS:
+            evidence = ""
+        out.append(Nit(text=cells[0], kind=kind, evidence=evidence))
+    return out
+
+
+def _normalize_nit_kind(cell: str) -> str:
+    value = (cell or "").strip().lower()
+    if value.startswith("trivial") or value in {"quick", "nit", "小"}:
+        return TRIVIAL
+    return FOLLOWUP
+
+
+def trivial_nits(text: str) -> list[Nit]:
+    return [nit for nit in parse_nits(text) if nit.is_trivial]
+
+
+def followup_nits(text: str) -> list[Nit]:
+    return [nit for nit in parse_nits(text) if not nit.is_trivial]
+
+
+@dataclass
 class ReviewVerdict:
     verdict: str
     reason: str
@@ -124,7 +200,14 @@ def build_reviewer_brief(
         "skipped (reason). evidence is file:line or the verify output. "
         "Every row needs a disposition; a conditional instruction you did not "
         "follow must say skipped and why. A documented TODO is not met, not "
-        "met-with-a-note."
+        "met-with-a-note.\n\n"
+        f"If you approve with non-blocking remarks, list them between "
+        f"{NITS_START} and {NITS_END}, one per line:\n"
+        "| nit | class | evidence |\n"
+        "class is trivial (a few lines, no design decision — the same coder "
+        "fixes it before the PR opens) or followup (needs a decision, or more "
+        "than a few lines — it goes in the PR body). Do not leave a remark out "
+        "of the table because it is small; that is how a dead branch ships."
     )
     return "\n\n".join(parts)
 

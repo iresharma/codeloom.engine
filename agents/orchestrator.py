@@ -11,7 +11,12 @@ from agents.agent_loop import AgentLoop
 from agents.compactor import AgentResult
 from agents.hooks import AgentHooks
 from agents.profile import MEMORY, SKILLS, ProfileRegistry
-from agents.review_verdict import build_reviewer_brief, enforce_verdict
+from agents.review_verdict import (
+    build_reviewer_brief,
+    enforce_verdict,
+    followup_nits,
+    trivial_nits,
+)
 from agents.subagent import Subagent
 from runtime.config import CHILD_COMPACT_TRIGGER, CHILD_KEEP_FULL_TOOLS
 from runtime.prompts import PromptTimeout
@@ -85,6 +90,15 @@ If a child returns status=incomplete, respawn once with a tighter task or tell t
 
 Do not call write tools or run_command. You do not have them.
 """
+
+
+@dataclass
+class _NitSlice:
+    """A running trivial-nit fix-up slice, and how to undo it."""
+
+    dest: Path
+    marker: int  # highest journalled edit id before the slice started
+    nits: list[str]
 
 
 @dataclass
@@ -231,6 +245,11 @@ class Orchestrator(AgentLoop):
         # clamps that one child's turn budget.
         self._fix_slice_turns = 0
         self._fix_slice_reason = ""
+        # Item 6: nits. `_followups_by_tree` feeds the PR body's Follow-ups
+        # section; `_nit_slices` tracks a running fix-up slice so its edits
+        # can be rolled back if it breaks a verify that was passing.
+        self._followups_by_tree: dict[str, list[str]] = {}
+        self._nit_slices: dict[str, _NitSlice] = {}
         self._skills = kwargs.get("skills")
         self._on_skill_activated = kwargs.get("on_skill_activated")
         self._finished_transcripts: dict[str, dict] = {}
@@ -528,6 +547,9 @@ class Orchestrator(AgentLoop):
         """The orchestrator's own last reply -- what settle titles a PR from."""
         return self._closing_summary
 
+    def _followups_for(self, dest: Path) -> list[str]:
+        return list(self._followups_by_tree.get(str(Path(dest).resolve()), []))
+
     def _pr_fields(
         self, dest: Path, summary: str, followups: list[str] | None = None
     ) -> tuple[str, str]:
@@ -553,7 +575,7 @@ class Orchestrator(AgentLoop):
             task=task or (summary or ""),
             stat_text=stat_text,
             changed_paths=changed,
-            followups=followups,
+            followups=followups if followups is not None else self._followups_for(dest),
         )
         return title, body
 
@@ -772,6 +794,10 @@ class Orchestrator(AgentLoop):
             last_ok = (getattr(child._ctx, "last_command_ok", "") or "").strip()
             if last_ok:
                 self._last_writer_command[str(Path(worktree).resolve())] = last_ok
+        slice_note = await self._close_nit_slice(agent_id, child)
+        if slice_note:
+            result.outcome = f"{result.outcome}\n\n{slice_note}".strip()
+            result.summary = f"{result.summary}\n{slice_note}".strip()
         self._shutdown_child_lsp(agent_id)
         owns_worktree = agent_id in self._worktrees
         should_settle = owns_worktree and status != "aborted" and not self._aborting_all
@@ -785,6 +811,9 @@ class Orchestrator(AgentLoop):
                     )
         if profile.name == "reviewer":
             self._enforce_review_verdict(result)
+            nit_note = await self._route_review_nits(result, worktree)
+            if nit_note:
+                result.outcome = f"{result.outcome}\n\n{nit_note}".strip()
         merged_text = None
         if self._on_agent_result is not None and not self._aborting_all:
             # Merge-gate judge call while the child is still listed live so
@@ -849,6 +878,120 @@ class Orchestrator(AgentLoop):
                 verdict.reason,
             ]
         return result
+
+    # ----------------------------------------------------------------
+    # Item 6: reviewer nits
+
+    async def _route_review_nits(self, result: AgentResult, worktree: str) -> str:
+        """Send trivial nits back to the same coder; park followups for the PR.
+
+        Only on an approve: a request_changes already sends the work back, and
+        stacking a nit slice on top of that would race the real fix.
+        """
+        text = result.as_text()
+        followups = [nit.text for nit in followup_nits(text)]
+        trivial = trivial_nits(text)
+        if worktree:
+            key = str(Path(worktree).resolve())
+            if followups:
+                parked = self._followups_by_tree.setdefault(key, [])
+                for item in followups:
+                    if item not in parked:
+                        parked.append(item)
+        if result.review_verdict != "approve" or not trivial or not worktree:
+            if followups:
+                return f"engine: {len(followups)} follow-up nit(s) parked for the PR body"
+            return ""
+        owner = self._continue_target(worktree)
+        if not owner:
+            return (
+                "engine: trivial nits were not fixed up -- no open writer "
+                "worktree to continue"
+            )
+        listed = "\n".join(
+            f"- {nit.text}" + (f"  ({nit.evidence})" if nit.evidence else "")
+            for nit in trivial
+        )
+        marker = await asyncio.to_thread(self._edit_marker)
+        started = await self._start_fix_slice(
+            owner,
+            (
+                "The reviewer approved and left these trivial nits. Fix exactly "
+                "these, nothing else. Each is a few lines and needs no design "
+                "decision. Do not refactor, do not rename, do not touch "
+                "anything the list does not name.\n\n"
+                f"{listed}"
+            ),
+            reason="nits",
+        )
+        new_owner = _agent_id_from_spawn(started)
+        if new_owner:
+            self._nit_slices[new_owner] = _NitSlice(
+                dest=Path(worktree),
+                marker=marker,
+                nits=[nit.text for nit in trivial],
+            )
+        note = f"engine: fix-up slice for {len(trivial)} trivial nit(s): {started}"
+        if followups:
+            note += f"; {len(followups)} follow-up(s) parked for the PR body"
+        return note
+
+    def _edit_marker(self) -> int:
+        """Highest journalled edit id right now -- the rollback point."""
+        journal = self._ctx.journal
+        if journal is None:
+            return 0
+        from runtime.store.edits import max_edit_id
+
+        try:
+            return max_edit_id(Path(journal), self._ctx.session_id or "")
+        except Exception:  # noqa: BLE001 - a marker we cannot read means no rollback
+            return 0
+
+    async def _close_nit_slice(self, agent_id: str, child: Subagent) -> str:
+        """Re-verify after a nit fix-up, and undo it if it broke the build.
+
+        Nits must never break a passing build: if verify fails after the
+        slice, every edit journalled since the marker is reverted through the
+        undo journal and the pre-nit state is what settles.
+        """
+        item = self._nit_slices.pop(agent_id, None)
+        if item is None:
+            return ""
+        result = await run_verify(
+            item.dest,
+            await asyncio.to_thread(
+                detect_verify_commands,
+                item.dest,
+                config=self._config,
+                last_command=self._last_writer_command.get(
+                    str(item.dest.resolve()), ""
+                ),
+            ),
+        )
+        if result.ok or not result.command:
+            self._verify_by_tree[str(item.dest.resolve())] = result
+            return f"engine: nit fix-up verified ({result.command or 'nothing to run'})"
+        from runtime.tools.edits import revert_since_sync
+
+        reverted = await asyncio.to_thread(revert_since_sync, child._ctx, item.marker)
+        if not reverted.ok:
+            # The rollback itself failed: do NOT restore the pre-nit verify
+            # result, or settle would open a PR on a tree in an unknown state.
+            self._verify_by_tree[str(item.dest.resolve())] = result
+            return (
+                "engine: the nit fix-up broke verify and the rollback failed: "
+                f"{reverted.message}"
+            )
+        # Back at the pre-nit state, which had already verified clean.
+        before = self._verify_by_tree.get(str(item.dest.resolve()))
+        if before is None or not before.ok:
+            self._verify_by_tree[str(item.dest.resolve())] = result
+        return (
+            f"engine: the nit fix-up broke verify (`{result.command}` exited "
+            f"{result.exit_code}); its edits were reverted via the undo "
+            "journal and the pre-nit state is what settles"
+        )
 
     # ----------------------------------------------------------------
     # Item 3: harness verify
@@ -1183,6 +1326,14 @@ def _commit_message(profile: str, summary: str) -> str:
     boundary rather than sliced at 72 characters."""
     head = pr_title_from_summary(summary) or "worktree"
     return f"engine({profile}): {head}"
+
+
+def _agent_id_from_spawn(reply: str) -> str:
+    """The agent_id out of `spawn`'s "started agent_id=... profile=..." reply."""
+    for token in str(reply or "").split():
+        if token.startswith("agent_id="):
+            return token[len("agent_id=") :]
+    return ""
 
 
 def _is_engine_report(task: str) -> bool:
