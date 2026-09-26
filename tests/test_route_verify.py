@@ -344,6 +344,28 @@ def test_tester_and_reviewer_task_copy_handoff():
     assert "user asked for FLAG" in reviewer
 
 
+def test_reviewer_task_clips_long_handoff():
+    from agents.orchestrator import _REVIEW_CLIP
+
+    blob = "X" * (_REVIEW_CLIP + 200)
+    reviewer = _reviewer_task(blob, blob, "flag.py", blob)
+    assert reviewer.count("... (truncated)") == 3
+    assert blob not in reviewer
+
+
+def test_reviewer_is_diff_first_not_a_survey():
+    assert REVIEWER.max_turns == 12
+    assert REVIEWER.required_tools == ["git_diff"]
+    names = set(REVIEWER.tool_names)
+    assert "git_diff" in names
+    assert "read_file" in names
+    assert "list_files" not in names
+    assert "search" not in names
+    assert "github_repo" not in names
+    assert "github_tree" not in names
+    assert "github_search_code" not in names
+
+
 def test_verify_owner_without_worktree_errors(tmp_path):
     async def run():
         _init_repo_with_tests(tmp_path)

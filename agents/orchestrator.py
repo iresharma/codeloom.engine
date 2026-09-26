@@ -1143,13 +1143,16 @@ _SURVEY_ONCE = frozenset({"ask", "researcher"})
 _VERIFY_AFTER = frozenset({"coder"})
 _VERIFIERS = frozenset({"tester", "reviewer"})
 _TASK_CLIP = 6000
+# Reviewer sees this string on every turn. The verdict comes from git_diff,
+# not from a second copy of the coder brief.
+_REVIEW_CLIP = 1500
 
 
-def _clip_task(text: str) -> str:
+def _clip_task(text: str, limit: int = _TASK_CLIP) -> str:
     text = (text or "").strip()
-    if len(text) <= _TASK_CLIP:
+    if len(text) <= limit:
         return text
-    return text[:_TASK_CLIP].rstrip() + "\n... (truncated)"
+    return text[:limit].rstrip() + "\n... (truncated)"
 
 
 def _tester_task(user_task: str, coder_task: str, files: str, test_plan: str) -> str:
@@ -1173,17 +1176,17 @@ def _tester_task(user_task: str, coder_task: str, files: str, test_plan: str) ->
 
 
 def _reviewer_task(user_task: str, coder_task: str, files: str, reasoning: str) -> str:
-    why = reasoning.strip() or "(the coder gave none; infer it from the diff)"
+    why = _clip_task(
+        reasoning.strip() or "(the coder gave none; infer it from the diff)",
+        _REVIEW_CLIP,
+    )
     return (
-        "Review the coder's diff in this worktree against the user's task.\n\n"
-        f"User task:\n{_clip_task(user_task)}\n\n"
-        f"Coder brief:\n{_clip_task(coder_task)}\n\n"
+        "Review the coder's diff in this worktree against the user's task. "
+        "Call git_diff first, then verdict.\n\n"
+        f"User task:\n{_clip_task(user_task, _REVIEW_CLIP)}\n\n"
+        f"Coder brief:\n{_clip_task(coder_task, _REVIEW_CLIP)}\n\n"
         f"Files the coder changed: {files}\n\n"
-        f"Coder's reasoning:\n{why}\n\n"
-        "Start with git_diff. Check that each part of the user task is done, "
-        "that the reasoning matches what the code does, and that types, "
-        "return shapes, and failure paths are right. Return approve, request "
-        "changes, or block, with paths, lines, and why."
+        f"Coder's reasoning:\n{why}"
     )
 
 

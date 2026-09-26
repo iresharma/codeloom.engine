@@ -76,9 +76,12 @@ def test_orch_and_profile_allowlists():
     assert "gh_pr_view" not in coder.names()
     assert "gh_pr_create" not in coder.names()
     reviewer = tools.subset(profiles.get("reviewer").tool_names)
+    assert "git_diff" in reviewer.names()
     assert "gh_pr_view" in reviewer.names()
-    assert "github_repo" in reviewer.names()
-    assert "github_tree" in reviewer.names()
+    assert "github_repo" not in reviewer.names()
+    assert "github_tree" not in reviewer.names()
+    assert "list_files" not in reviewer.names()
+    assert "search" not in reviewer.names()
     assert "gh_pr_create" not in reviewer.names()
     assert "gh_pr_comment" not in reviewer.names()
     researcher = tools.subset(profiles.get("researcher").tool_names)
@@ -131,7 +134,8 @@ def test_orch_and_profile_allowlists():
     assert profiles.get("coder").max_turns == 32
     assert profiles.get("tester").max_turns == 32
     assert profiles.get("debugger").max_turns == 32
-    assert profiles.get("reviewer").max_turns == 32
+    assert profiles.get("reviewer").max_turns == 12
+    assert profiles.get("reviewer").required_tools == ["git_diff"]
     assert profiles.get("researcher").max_turns == 32
     assert profiles.get("ask").model is None
     assert profiles.get("tester").model == "anthropic/claude-haiku-4.5"
