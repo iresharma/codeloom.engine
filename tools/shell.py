@@ -68,7 +68,11 @@ def _exec_questions() -> dict:
             },
             "cwd": {
                 "type": "string",
-                "description": "Optional workspace-relative working directory.",
+                "description": (
+                    "Optional workspace-relative working directory. Commands "
+                    "already start at the repository root; do not cd to an "
+                    "absolute path or search the filesystem for the repo."
+                ),
             },
             "timeout": {
                 "type": "integer",

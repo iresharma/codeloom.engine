@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
-from llm.provider import LLMResult
+from llm.provider import LLMResult, ToolCall
 from protocol.commands import AnswerPrompt, SubmitUserMessage
 from protocol.events import UserPromptRequested, WorktreeSettled
 from tests.fakes import FakeProvider
@@ -21,6 +21,7 @@ from runtime.tools.git import (
 )
 from tests.test_orchestrator import (
     _HangChild,
+    _tool_names,
     _bind,
     _diagnostics_first,
     _init_git,
@@ -231,6 +232,12 @@ class _HangEachChild(FakeProvider):
             hang = asyncio.Event()
             self.hangs.append(hang)
             await hang.wait()
+            if _tool_names(tools) >= {"git_diff"} and "str_replace" not in _tool_names(tools):
+                # The reviewer must call git_diff before its verdict.
+                return LLMResult(
+                    text="",
+                    tool_calls=[ToolCall(id="diff", name="git_diff", arguments_json="{}")],
+                )
         return _diagnostics_first(messages, tools) or LLMResult(text="child")
 
 

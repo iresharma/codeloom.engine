@@ -10,7 +10,7 @@ from uuid import uuid4
 from agents.agent_loop import AgentLoop
 from agents.compactor import AgentResult
 from agents.hooks import AgentHooks
-from agents.profile import MEMORY, SKILLS, ProfileRegistry
+from agents.profile import MEMORY, SKILLS, ProfileRegistry, repo_has_tests
 from agents.subagent import Subagent
 from runtime.config import CHILD_COMPACT_TRIGGER, CHILD_KEEP_FULL_TOOLS
 from runtime.prompts import PromptTimeout
@@ -50,6 +50,8 @@ A debug route that ends in a clear fix becomes a code route on the next turn. Co
 After a coder finishes with files touched, the engine starts tester and reviewer on that same worktree and holds settle until both finish. Do not spawn those two for that change, and do not call settle_worktree while they run. If the reviewer wants changes or a test fails, spawn coder with continue_from=<that coder's agent_id> and put the failing command or the review points in the task.
 
 You have no filesystem tools. ask is the only reader, after you check workspace memory. coder still reads a path before editing it; that is verification, not discovery. Your job is to put the paths and facts into the coder task so it does not search the tree.
+
+A coder brief carries answers, not questions. Copy ask's facts into it: the signatures, the snippets, the names, which handler receives which id. Do not replace them with a "files to read first" list. Do not hand the coder "determine whether", "verify that", or "check the exact string". If ask's report leaves open a question that decides the design, make the decision yourself and write it as a stated assumption with its reason. Never state a fact the report did not give you.
 
 Spawn returns at once with agent_id (and worktree/branch for writers). Do not wait in this turn. Spawn more than one personality in a turn only when the work is independent. Tell the user you started them. Do not say the work is done until a child report arrives.
 
@@ -918,8 +920,13 @@ class Orchestrator(AgentLoop):
         files = ", ".join(result.files_touched)
         started: list[str] = []
         failed: list[str] = []
+        # Checked on the user's checkout, so tests the coder just added do not
+        # count as the repo already having a suite.
+        has_tests = await asyncio.to_thread(repo_has_tests, self._ctx.workspace)
         tasks = {
-            "tester": _tester_task(user_task, coder_task, files, result.test_plan),
+            "tester": _tester_task(
+                user_task, coder_task, files, result.test_plan, has_tests=has_tests
+            ),
             "reviewer": _reviewer_task(user_task, coder_task, files, result.reasoning),
         }
         for name, text in tasks.items():
@@ -1155,10 +1162,30 @@ def _clip_task(text: str, limit: int = _TASK_CLIP) -> str:
     return text[:limit].rstrip() + "\n... (truncated)"
 
 
-def _tester_task(user_task: str, coder_task: str, files: str, test_plan: str) -> str:
+def _tester_task(
+    user_task: str,
+    coder_task: str,
+    files: str,
+    test_plan: str,
+    *,
+    has_tests: bool = True,
+) -> str:
     plan = test_plan.strip() or (
         "(the coder gave none; derive one from the user task and the diff)"
     )
+    if has_tests:
+        missing = (
+            "If a test for the change is missing, add it under a test path, in "
+            "the style of the existing tests, and make it call the code under "
+            "test. A test that copies the logic into itself proves nothing. "
+        )
+    else:
+        missing = (
+            "This repo has no tests. Do not add test files or a test framework "
+            "unless the user task asks for them. Prove the change with the "
+            "build, the linters, and any command in the test plan, and put the "
+            "untested behavior in leftover. "
+        )
     return (
         "Test the coder's change in this worktree. It is the change on this "
         "branch, not a fresh checkout.\n\n"
@@ -1168,8 +1195,9 @@ def _tester_task(user_task: str, coder_task: str, files: str, test_plan: str) ->
         f"Coder's test plan:\n{plan}\n\n"
         "Run the repo's own test command and every check in the test plan. "
         "Check the behavior the user asked for, including at least one edge "
-        "case the plan does not cover. If a test for the change is missing, "
-        "add it under a test path. Do not edit production code and do not "
+        "case the plan does not cover. "
+        f"{missing}"
+        "Do not edit production code and do not "
         "weaken an assertion to make it pass. Report each command, pass or "
         "fail, and the failure output."
     )

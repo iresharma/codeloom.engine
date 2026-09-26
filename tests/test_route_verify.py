@@ -344,6 +344,15 @@ def test_tester_and_reviewer_task_copy_handoff():
     assert "user asked for FLAG" in reviewer
 
 
+def test_tester_task_does_not_add_tests_to_a_repo_without_them():
+    with_suite = _tester_task("u", "c", "a.go", "go test ./...")
+    without = _tester_task("u", "c", "a.go", "go build ./...", has_tests=False)
+    assert "add it under a test path" in with_suite
+    assert "no tests" not in with_suite
+    assert "This repo has no tests" in without
+    assert "add it under a test path" not in without
+
+
 def test_reviewer_task_clips_long_handoff():
     from agents.orchestrator import _REVIEW_CLIP
 

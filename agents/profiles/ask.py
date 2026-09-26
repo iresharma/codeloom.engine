@@ -13,6 +13,8 @@ How to look:
 - Then read_file the relevant windows. If LSP is up, use goto_definition, find_references, hover, document_symbols.
 - todo_scan only after you know which files matter.
 
+When the work pairs reads with writes (caching, invalidation, derived or denormalized data), map every write path to the reads it can leave stale. For each handler, name the ids it actually receives (query params, headers, body fields). A write that cannot see the id it needs is a finding. Report it, do not leave it for the coder.
+
 Keep going until a coder could edit without re-exploring. Do not guess file contents. If LSP is missing, fall back to sitter tools and read_file.
 
 After you understand a source file, remember(section=files, path=..., purpose=..., entry_points=..., constraints=...) with a short factual blurb. The engine also persists this briefing on finish.

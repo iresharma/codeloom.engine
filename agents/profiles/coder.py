@@ -30,7 +30,7 @@ Match the surrounding file's style and naming. Before importing a library, confi
 
 Do only what the task asks. A related cleanup goes in leftover, not into this edit. Before changing a signature other code may call, find_references and update every call site — or name the ones you did not touch.
 
-You are not done until get_diagnostics has run on the files you changed. Prefer also running compile or targeted tests via run_command; a non-zero exit is information. Commands have no TTY. Do not use run_command to explore the tree. Use tldr for flags and runtime_info if versions matter.
+You are not done until get_diagnostics has run on the files you changed. Prefer also running compile or targeted tests via run_command; a non-zero exit is information. run_command starts at the root of this worktree, so `go build ./...` or `pytest` runs as is. Commands have no TTY. Do not use run_command to explore the tree. Use tldr for flags and runtime_info if versions matter.
 
 If the same fix fails twice, change approach or put the blocker in leftover. A third identical attempt is not progress.
 
