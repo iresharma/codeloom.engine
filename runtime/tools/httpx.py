@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
+import random
 import socket
+import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,8 +23,23 @@ BLOCKED_HOSTS = {
     "169.254.169.254",
 }
 
+# Explicit redirect cap so loops/too-many-redirects fail predictably and fast
+# instead of relying on urllib's default (10 total, 4 repeats of one URL).
+MAX_REDIRECTS = 5
+
+# Retry/backoff tuning for transient failures (timeouts, DNS, resets, 5xx).
+# Kept small so a single tool call stays bounded (worst case a few seconds).
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 0.5
+RETRY_BACKOFF_FACTOR = 2.0
+RETRY_BACKOFF_CAP = 4.0
+# Only retry methods that are safe to repeat; POST/PATCH are never retried.
+IDEMPOTENT_METHODS = {"GET", "HEAD", "PUT", "DELETE", "OPTIONS"}
+
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirections = MAX_REDIRECTS
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         parsed = urllib.parse.urlparse(newurl)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -33,6 +52,12 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
 def urlopen(request, timeout=20.0):
     opener = urllib.request.build_opener(_SafeRedirect)
     return opener.open(request, timeout=timeout)
+
+
+def _retry_delay(attempt: int) -> float:
+    """Exponential backoff with jitter, capped at RETRY_BACKOFF_CAP."""
+    delay = min(RETRY_BACKOFF_BASE * (RETRY_BACKOFF_FACTOR**attempt), RETRY_BACKOFF_CAP)
+    return delay + random.uniform(0, delay * 0.25)
 
 
 def blocked_host(netloc: str) -> bool:
@@ -69,6 +94,37 @@ def _ip_blocked(ip: ipaddress._BaseAddress) -> bool:
     return bool(ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved)
 
 
+def _redirect_loop_error(exc: urllib.error.HTTPError) -> bool:
+    """True if this HTTPError is urllib's redirect-loop/too-many-redirects
+    pseudo-error rather than a real 3xx response from the server."""
+    return exc.code in (301, 302, 303, 307, 308) and "infinite loop" in str(exc.reason)
+
+
+def _classify_urlerror(exc: urllib.error.URLError, url: str, host: str, timeout: float) -> str:
+    """Turn a URLError (possibly wrapping a lower-level exception in
+    .reason) into a clear error string."""
+    reason = exc.reason
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return f"error: TLS certificate verification failed for {host}: {reason}"
+    if isinstance(reason, ssl.SSLError):
+        return f"error: TLS error for {host}: {reason}"
+    if isinstance(reason, socket.gaierror):
+        return f"error: could not resolve host {host}"
+    if isinstance(reason, TimeoutError):
+        return f"error: fetch timed out for {url} after {timeout}s"
+    if isinstance(reason, (ConnectionResetError, http.client.RemoteDisconnected)):
+        return "error: connection reset by peer"
+    return f"error: {reason}"
+
+
+def _is_retryable_error(err: str) -> bool:
+    """True for transport-level failures worth retrying (timeouts, DNS,
+    resets). TLS/scheme/blocked-host/redirect-loop errors are not transient."""
+    return err.startswith(
+        ("error: fetch timed out", "error: could not resolve host", "error: connection reset")
+    )
+
+
 def raw_request(
     method: str,
     url: str,
@@ -78,7 +134,15 @@ def raw_request(
     timeout: float = 20.0,
     cap: int = MAX_FETCH,
 ) -> tuple[int, dict[str, str], str, str]:
-    """Return (status, headers, text, error). error is set on failure."""
+    """Return (status, headers, text, error). error is set on failure.
+
+    Idempotent methods (see IDEMPOTENT_METHODS) are retried with capped
+    exponential backoff on transient transport failures and on 5xx
+    responses. Non-idempotent methods (POST, PATCH) and 4xx responses are
+    never retried. A final 5xx is still returned as (status, headers,
+    text, "") — retries are an internal detail, not a change to the
+    status>=400 contract that get_json/post_json/fetch_text rely on.
+    """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return 0, {}, "", "error: url must be http or https"
@@ -90,34 +154,76 @@ def raw_request(
     hdrs = {"User-Agent": USER_AGENT}
     if headers:
         hdrs.update(headers)
-    request = urllib.request.Request(url, data=body, headers=hdrs, method=method)
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            status = int(getattr(response, "status", 200) or 200)
-            resp_headers = {k: v for k, v in response.headers.items()}
-            raw = b"" if method == "HEAD" else response.read(cap + 1)
-    except urllib.error.HTTPError as exc:
+    host = parsed.hostname or _hostname(parsed.netloc)
+    retryable_method = method in IDEMPOTENT_METHODS
+    max_attempts = (MAX_RETRIES + 1) if retryable_method else 1
+
+    for attempt in range(max_attempts):
+        last_attempt = attempt == max_attempts - 1
+        request = urllib.request.Request(url, data=body, headers=hdrs, method=method)
         try:
-            raw = exc.read(cap + 1) if method != "HEAD" else b""
-        except OSError:
-            raw = b""
-        status = int(exc.code)
-        resp_headers = {k: v for k, v in (exc.headers.items() if exc.headers else [])}
-        text = _decode(raw[:cap])
-        if len(raw) > cap:
-            text += "\n...[truncated]"
-        return status, resp_headers, text, ""
-    except urllib.error.URLError as exc:
-        return 0, {}, "", f"error: {exc.reason}"
-    except TimeoutError:
-        return 0, {}, "", "error: fetch timed out"
-    except OSError as exc:
-        return 0, {}, "", f"error: {exc}"
-    truncated = len(raw) > cap
-    text = _decode(raw[:cap])
-    if truncated:
-        text += "\n...[truncated]"
-    return status, resp_headers, text, ""
+            with urlopen(request, timeout=timeout) as response:
+                status = int(getattr(response, "status", 200) or 200)
+                resp_headers = {k: v for k, v in response.headers.items()}
+                raw = b"" if method == "HEAD" else response.read(cap + 1)
+        except urllib.error.HTTPError as exc:
+            if _redirect_loop_error(exc):
+                return 0, {}, "", f"error: too many redirects for {url}"
+            try:
+                raw = exc.read(cap + 1) if method != "HEAD" else b""
+            except OSError:
+                raw = b""
+            status = int(exc.code)
+            resp_headers = {k: v for k, v in (exc.headers.items() if exc.headers else [])}
+            text = _decode(raw[:cap])
+            if len(raw) > cap:
+                text += "\n...[truncated]"
+            if 500 <= status < 600 and retryable_method and not last_attempt:
+                time.sleep(_retry_delay(attempt))
+                continue
+            return status, resp_headers, text, ""
+        except ssl.SSLCertVerificationError as exc:
+            return 0, {}, "", f"error: TLS certificate verification failed for {host}: {exc}"
+        except ssl.SSLError as exc:
+            return 0, {}, "", f"error: TLS error for {host}: {exc}"
+        except socket.gaierror:
+            err = f"error: could not resolve host {host}"
+            if retryable_method and not last_attempt:
+                time.sleep(_retry_delay(attempt))
+                continue
+            return 0, {}, "", err
+        except (ConnectionResetError, http.client.RemoteDisconnected):
+            err = "error: connection reset by peer"
+            if retryable_method and not last_attempt:
+                time.sleep(_retry_delay(attempt))
+                continue
+            return 0, {}, "", err
+        except TimeoutError:
+            err = f"error: fetch timed out for {url} after {timeout}s"
+            if retryable_method and not last_attempt:
+                time.sleep(_retry_delay(attempt))
+                continue
+            return 0, {}, "", err
+        except urllib.error.URLError as exc:
+            err = _classify_urlerror(exc, url, host, timeout)
+            if _is_retryable_error(err) and retryable_method and not last_attempt:
+                time.sleep(_retry_delay(attempt))
+                continue
+            return 0, {}, "", err
+        except OSError as exc:
+            return 0, {}, "", f"error: {exc}"
+        else:
+            truncated = len(raw) > cap
+            text = _decode(raw[:cap])
+            if truncated:
+                text += "\n...[truncated]"
+            if 500 <= status < 600 and retryable_method and not last_attempt:
+                time.sleep(_retry_delay(attempt))
+                continue
+            return status, resp_headers, text, ""
+    # Unreachable: the loop always returns or continues, and the last
+    # iteration never continues.
+    return 0, {}, "", "error: request failed"
 
 
 def get_json(url: str, *, timeout: float = 20.0, headers: dict[str, str] | None = None):

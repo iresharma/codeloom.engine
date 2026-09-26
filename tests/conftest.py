@@ -32,6 +32,14 @@ def _isolate_secrets_and_close_sessions(request, monkeypatch):
         for name in _SECRET_ENV:
             monkeypatch.delenv(name, raising=False)
 
+    # ENGINE_TRACE_CALLS (and other ENGINE_* behavioural toggles) leaking in
+    # from the developer/CI shell would silently change EngineConfig
+    # defaults out from under tests that assume the documented off-by-
+    # default behaviour (e.g. test_session_trace.py's disabled-tracing
+    # case). Tests that want tracing enabled do so explicitly via
+    # session._config.trace_calls, so always isolate this one.
+    monkeypatch.delenv("ENGINE_TRACE_CALLS", raising=False)
+
     from runtime.session import EngineSession
 
     created: list = []
