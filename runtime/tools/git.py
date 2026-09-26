@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -262,6 +263,32 @@ def pr_summary_from_reply(reply: str) -> str:
     if _asks_user(text):
         return ""
     return text
+
+
+def parse_generated_pr(text: str, *, limit: int = PR_TITLE_MAX) -> tuple[str, str] | None:
+    """(title, body) from a model's reply, or None if it is not usable.
+
+    The model is asked for a JSON object, but replies wrap it in fences or a
+    sentence often enough that this looks for the first object rather than
+    demanding the reply be bare JSON. Rejected: missing fields, and a body
+    that asks the user something (the failure this whole path exists to
+    avoid). An over-long title is cut on a word boundary, not rejected.
+    """
+    raw = (text or "").strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    title = pr_title_from_summary(str(data.get("title") or ""), limit=limit)
+    body = str(data.get("body") or "").strip()
+    if not title or not body or _asks_user(body):
+        return None
+    return title, body
 
 
 def _asks_user(text: str) -> bool:

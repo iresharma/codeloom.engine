@@ -563,3 +563,198 @@ async def test_pr_uses_the_extracted_summary_end_to_end(tmp_path):
     assert len(title) <= PR_TITLE_MAX
     assert "PyInstaller" in body
     assert "Would you like" not in body
+
+
+# --------------------------------------------------------------------------
+# generated PR text: one model call writes title and body from the facts
+
+from runtime.tools.git import parse_generated_pr  # noqa: E402
+
+
+def test_parse_generated_accepts_bare_json():
+    out = parse_generated_pr('{"title": "Cap redirects at five hops", "body": "Adds a cap."}')
+    assert out == ("Cap redirects at five hops", "Adds a cap.")
+
+
+def test_parse_generated_accepts_fenced_json_and_a_wrapping_sentence():
+    fenced = 'Here you go:\n```json\n{"title": "Add auth", "body": "Basic auth."}\n```'
+    assert parse_generated_pr(fenced) == ("Add auth", "Basic auth.")
+
+
+def test_parse_generated_cuts_a_long_title_on_a_word_boundary():
+    title = "Add a redirect-loop cap to the HTTP client and pin pyinstaller so the packaging is reproducible"
+    out = parse_generated_pr(json.dumps({"title": title, "body": "Body."}))
+    assert out is not None
+    assert len(out[0]) <= PR_TITLE_MAX
+    assert title.startswith(out[0])
+    assert out[0].endswith("the")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "",
+        "no json here",
+        "{not json}",
+        '{"title": "T"}',
+        '{"body": "B"}',
+        '{"title": "", "body": "B"}',
+        '["title", "body"]',
+        '{"title": "T", "body": "Would you like me to merge this?"}',
+        '{"title": "T", "body": "Done.\\n\\nShould I open the PR?"}',
+    ],
+)
+def test_parse_generated_rejects_unusable_replies(reply):
+    assert parse_generated_pr(reply) is None
+
+
+import json  # noqa: E402
+
+
+class _PRWriter(FakeProvider):
+    """Answers the PR-text call, and records what it was shown."""
+
+    def __init__(self, reply: str | Exception):
+        super().__init__()
+        self._reply = reply
+        self.prompts: list[list[dict]] = []
+
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
+        from llm.provider import LLMResult
+
+        self.calls += 1
+        self.prompts.append(messages)
+        if isinstance(self._reply, Exception):
+            raise self._reply
+        return LLMResult(text=self._reply)
+
+
+def _settled_repo(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True, capture_output=True
+    )
+    record = tmp_path / "gh.json"
+    _gh_shim(tmp_path / "bin", record)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("ENGINE_METRICS_INSTANCE", raising=False)
+    return repo, record
+
+
+def _tree(repo: Path, orch: Orchestrator, agent_id: str) -> Path:
+    dest, branch, err = add_agent_worktree(repo, agent_id, "coder")
+    assert not err, err
+    work = Path(dest)
+    (work / "tools").mkdir()
+    (work / "tools" / "http.py").write_text("cap = 5\n")
+    (work / "scripts").mkdir()
+    (work / "scripts" / "build.sh").write_text("pyinstaller==6.6.0\n")
+    commit_if_dirty(work, "both parts")
+    orch._remember_worktree(agent_id, work, branch, "coder", "batch")
+    _seed_passing_verify(orch, work)
+    return work
+
+
+def _gh_args(record: Path) -> tuple[str, str]:
+    args = json.loads(record.read_text())
+    return args[args.index("--title") + 1], args[args.index("--body") + 1]
+
+
+@pytest.mark.asyncio
+async def test_settle_uses_the_generated_title_and_body(tmp_path, monkeypatch):
+    repo, record = _settled_repo(tmp_path, monkeypatch)
+    writer = _PRWriter(
+        json.dumps(
+            {
+                "title": "Cap HTTP redirects and pin the packaging toolchain",
+                "body": "Caps redirects at five hops in tools/http.py and pins "
+                "pyinstaller in scripts/build.sh so the build is reproducible.",
+            }
+        )
+    )
+    orch = Orchestrator(
+        writer, all_tools=discover_tools(), profiles=discover_profiles(),
+        workspace=repo, config=EngineConfig(),
+    )
+    work = _tree(repo, orch, "p1")
+    orch._user_task = "Harden the HTTP client and make packaging reproducible."
+    # The orchestrator's own reply is chatter that asks a question: unusable.
+    orch._closing_summary = ""
+    orch._writer_reports[str(work.resolve())] = ["coder (ok): capped redirects; pinned pyinstaller"]
+
+    reply = await orch.apply_named_worktree("pr", agent_id="p1")
+    assert reply.startswith("ok pr "), reply
+    title, body = _gh_args(record)
+    assert title == "Cap HTTP redirects and pin the packaging toolchain"
+    assert "Caps redirects at five hops" in body
+    assert "Would you like" not in body
+
+
+@pytest.mark.asyncio
+async def test_the_generation_prompt_carries_the_facts(tmp_path, monkeypatch):
+    repo, record = _settled_repo(tmp_path, monkeypatch)
+    writer = _PRWriter('{"title": "T", "body": "B"}')
+    orch = Orchestrator(
+        writer, all_tools=discover_tools(), profiles=discover_profiles(),
+        workspace=repo, config=EngineConfig(),
+    )
+    work = _tree(repo, orch, "p2")
+    orch._user_task = "Harden the HTTP client. Also make packaging reproducible."
+    orch._writer_reports[str(work.resolve())] = ["coder (ok): capped redirects"]
+    await orch.apply_named_worktree("pr", agent_id="p2")
+
+    assert len(writer.prompts) == 1
+    system, user = writer.prompts[0][0]["content"], writer.prompts[0][1]["content"]
+    assert "no questions" in system
+    assert "Harden the HTTP client. Also make packaging reproducible." in user
+    assert "tools/http.py" in user and "scripts/build.sh" in user  # the diff stat
+    assert "coder (ok): capped redirects" in user
+    assert "`pytest -q` passed" in user
+
+
+@pytest.mark.asyncio
+async def test_a_generated_body_that_omits_a_changed_path_still_gets_files_changed(
+    tmp_path, monkeypatch
+):
+    repo, record = _settled_repo(tmp_path, monkeypatch)
+    writer = _PRWriter('{"title": "Cap redirects", "body": "Caps redirects in tools/http.py."}')
+    orch = Orchestrator(
+        writer, all_tools=discover_tools(), profiles=discover_profiles(),
+        workspace=repo, config=EngineConfig(),
+    )
+    _tree(repo, orch, "p3")
+    await orch.apply_named_worktree("pr", agent_id="p3")
+    _title, body = _gh_args(record)
+    assert "## Files changed" in body
+    assert "scripts" in body.split("## Files changed", 1)[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        RuntimeError("provider down"),
+        "sorry, I cannot do that",
+        '{"title": "T", "body": "Would you like me to open the PR?"}',
+    ],
+)
+async def test_a_failed_or_unusable_generation_falls_back_to_the_deterministic_text(
+    tmp_path, monkeypatch, reply
+):
+    repo, record = _settled_repo(tmp_path, monkeypatch)
+    orch = Orchestrator(
+        _PRWriter(reply), all_tools=discover_tools(), profiles=discover_profiles(),
+        workspace=repo, config=EngineConfig(),
+    )
+    _tree(repo, orch, "p4")
+    orch._user_task = "Harden the HTTP client and make packaging reproducible."
+    orch._closing_summary = ""
+
+    result = await orch.apply_named_worktree("pr", agent_id="p4")
+    assert result.startswith("ok pr "), result  # a bad reply never fails a settle
+    title, body = _gh_args(record)
+    assert title == "Harden the HTTP client and make packaging reproducible"
+    assert "Task:" in body and "tools/http.py" in body

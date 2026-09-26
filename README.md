@@ -393,20 +393,23 @@ instruction, including the soft ones.
 
 ### What a pull request says
 
-`settle_worktree pr` takes its title and body from the **orchestrator's closing
-summary** — never from whichever child happened to finish last. A headless run
-can't answer the orchestrator, so its last reply is usually a conversation turn
-(preamble, the summary, then "would you like me to merge?"). Only a summary set
-apart in that reply counts: a block between `---` rules or a `>` blockquote, or
-the whole reply if it never addresses you. A reply that asks you something and
-has no such block leaves no summary. The title is a standalone `**Title**` or
-`# Title` first line if there is one, else the first sentence, cut on a word
-boundary to 72 characters.
-The body is checked against `git diff --stat`: any changed top-level path the
-summary does not mention gets a deterministic **Files changed** section built
-from the stat, with no second call to the model. With no usable summary the
-fallback is the original task prompt plus the stat. Settle refuses to open a
-pull request unless the latest harness verify exited 0 (or failed only on failures the base commit already had) — unless the task
+`settle_worktree pr` writes its title and body with **one extra model call**,
+made at settle time from the facts rather than from chat: the original task
+prompt verbatim, `git diff --stat` against the merge base, what each writer
+reported, and the harness verify result. The model returns
+`{"title", "body"}`; the title is at most 72 characters, cut on a word boundary
+if longer. A reply that is not JSON, is missing a field, or whose body asks you
+something is rejected, and so is a failed call — a bad reply never fails a
+settle.
+
+The fallback is deterministic. It uses a summary set apart in the
+orchestrator's last reply (a block between `---` rules or a `>` blockquote,
+provided it never asks you anything), else the original task prompt plus the
+stat. Either way the body is checked against the stat: any changed top-level
+path it doesn't mention gets a **Files changed** section built from the stat,
+with no model involved, so the call can't quietly drop part of the diff.
+Settle refuses to open a pull request unless the latest harness verify exited 0
+(or failed only on failures the base commit already had) — unless the task
 explicitly says there are no tests, and even then a failing build still blocks.
 
 You can keep talking to the orch while children run: a second `SubmitUserMessage` is queued if the orch is mid-reply, then played when that reply finishes. `AbortAgent` with no id cancels only the orch's current reply; with `agent_id` it cancels that child. Session shutdown still aborts every child and removes live worktrees.

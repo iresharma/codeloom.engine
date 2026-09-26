@@ -25,6 +25,7 @@ from runtime.tools.git import (
     drop_empty_worktree,
     list_engine_worktrees,
     normalize_settle_action,
+    parse_generated_pr,
     pr_summary_from_reply,
     pr_title_from_summary,
     remove_agent_worktree,
@@ -227,6 +228,8 @@ class Orchestrator(AgentLoop):
         # path rather than agent_id -- `continue_from` transfers a tree to a
         # new agent_id, and the verify result belongs to the tree.
         self._verify_by_tree: dict[str, VerifyResult] = {}
+        # What each writer said it did, per worktree, for the PR-text call.
+        self._writer_reports: dict[str, list[str]] = {}
         # The last command each writer ran successfully, the third choice in
         # `detect_verify_commands`.
         self._last_writer_command: dict[str, str] = {}
@@ -406,7 +409,7 @@ class Orchestrator(AgentLoop):
             refusal = self._pr_verify_refusal(dest)
             if refusal:
                 return f"error: {refusal}"
-            title, body = await asyncio.to_thread(self._pr_fields, dest, summary)
+            title, body = await self._compose_pr(dest, summary)
         ok, detail, pr_url = await asyncio.to_thread(
             apply_worktree,
             self._ctx.workspace,
@@ -528,8 +531,86 @@ class Orchestrator(AgentLoop):
         """The orchestrator's own last reply -- what settle titles a PR from."""
         return self._closing_summary
 
+    async def _compose_pr(self, dest: Path, summary: str) -> tuple[str, str]:
+        """Title and body for a pull request.
+
+        One model call writes them from the facts -- the original task, the
+        diff stat, what each writer reported, the harness verify result --
+        rather than lifting a sentence out of a chat reply. The call can fail
+        or return something unusable; `_pr_fields` is then the deterministic
+        fallback, and the Files-changed coverage check applies to either.
+        """
+        stat_text, changed = await asyncio.to_thread(
+            worktree_diff_stat, self._ctx.workspace, dest
+        )
+        generated = await self._generate_pr_text(dest, stat_text)
+        return await asyncio.to_thread(
+            self._pr_fields, dest, summary, None, generated
+        )
+
+    async def _generate_pr_text(
+        self, dest: Path, stat_text: str
+    ) -> tuple[str, str] | None:
+        key = str(Path(dest).resolve())
+        verify = self._verify_by_tree.get(key)
+        if verify is None or not verify.command:
+            verify_line = "not run"
+        elif verify.ok:
+            verify_line = f"`{verify.command}` passed"
+        elif verify.preexisting:
+            verify_line = (
+                f"`{verify.command}` fails, but only on failures that already "
+                "fail on the base commit"
+            )
+        else:
+            verify_line = f"`{verify.command}` failed"
+        reports = "\n\n".join(self._writer_reports.get(key, [])) or "(none)"
+        closing = (self._closing_summary or "").strip() or "(none)"
+        task = (self._user_task or "").strip() or "(none)"
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "You write pull request descriptions. Reply with one JSON "
+                    'object and nothing else: {"title": "...", "body": "..."}.\n'
+                    "title: at most 72 characters, imperative mood, no prefix, "
+                    "no trailing period.\n"
+                    "body: markdown. Say what changed and why, grouped by "
+                    "concern, and name the files that matter. Say plainly what "
+                    "was NOT done or is left as follow-up. Every claim must be "
+                    "supported by the diff stat or the writer reports below; do "
+                    "not claim tests, builds or reviews beyond the verification "
+                    "line. Where the task has several parts, cover every part. "
+                    "It is a description of the change: no greeting, no "
+                    "questions, no offers, no mention of agents, worktrees or "
+                    "branches."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"ORIGINAL TASK:\n{task}\n\n"
+                    f"DIFF STAT:\n{stat_text or '(unavailable)'}\n\n"
+                    f"WRITER REPORTS:\n{reports}\n\n"
+                    f"VERIFICATION: {verify_line}\n\n"
+                    f"ORCHESTRATOR'S OWN SUMMARY (may be empty):\n{closing}"
+                ),
+            },
+        ]
+        try:
+            result = await self._llm_complete(prompt)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - PR text must never fail a settle
+            return None
+        return parse_generated_pr(getattr(result, "text", "") or "")
+
     def _pr_fields(
-        self, dest: Path, summary: str, followups: list[str] | None = None
+        self,
+        dest: Path,
+        summary: str,
+        followups: list[str] | None = None,
+        generated: tuple[str, str] | None = None,
     ) -> tuple[str, str]:
         """(title, body) for a pull request, from the orchestrator's closing
         summary rather than the last child's self-report.
@@ -546,6 +627,8 @@ class Orchestrator(AgentLoop):
         task = (self._user_task or "").strip()
         source = closing or ""
         title = pr_title_from_summary(source) or pr_title_from_summary(task)
+        if generated is not None:
+            title, source = generated
         if not title:
             title = pr_title_from_summary(summary) or "engine changes"
         body = build_pr_body(
@@ -768,6 +851,13 @@ class Orchestrator(AgentLoop):
             pass
         if getattr(self._ctx, "on_memory", None) is not None:
             self._ctx.on_memory()
+        if worktree and profile.needs_worktree:
+            report = (result.summary or result.outcome or "").strip()
+            if report:
+                key = str(Path(worktree).resolve())
+                self._writer_reports.setdefault(key, []).append(
+                    f"{profile.name} ({result.status}): {report[:1500]}"
+                )
         if worktree:
             last_ok = (getattr(child._ctx, "last_command_ok", "") or "").strip()
             if last_ok:
@@ -1071,7 +1161,7 @@ class Orchestrator(AgentLoop):
                 # closing summary, not from `summary` (this one writer's
                 # self-report). With two sequential coders the second
                 # report knows nothing about part A.
-                title, body = await asyncio.to_thread(self._pr_fields, dest, summary)
+                title, body = await self._compose_pr(dest, summary)
             ok, detail, pr_url = await asyncio.to_thread(
                 apply_worktree,
                 self._ctx.workspace,
