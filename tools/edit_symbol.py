@@ -9,9 +9,10 @@ from tools.base import ToolContext, tool
 @tool(
     description=(
         "Replace an entire function/class/type definition identified by name "
-        "using tree-sitter. The default edit for changing logic: write the "
-        "whole definition as it should read after the change. Read the file "
-        "first. new_body must be the full node text, signature included."
+        "using tree-sitter. Use it when rewriting most of a short "
+        "definition; for a local change, str_replace is cheaper and keeps "
+        "the diff small. Read the file first. new_body must be the full "
+        "node text, signature included."
     ),
     parameters={
         "type": "object",
