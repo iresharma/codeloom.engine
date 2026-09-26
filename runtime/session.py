@@ -805,7 +805,6 @@ class EngineSession:
         enforced: bool,
         latency_ms: int,
         agent_id: str = "",
-        edit_id: int | None = None,
     ) -> None:
         if self._metrics is not None:
             self._metrics.observe_judge_decision(tag, outcome, enforced)
@@ -822,7 +821,6 @@ class EngineSession:
                 enforced=enforced,
                 latency_ms=latency_ms,
                 agent_id=agent_id,
-                edit_id=edit_id,
             )
         except Exception:  # noqa: BLE001 — journal must never break a turn
             pass
@@ -835,7 +833,6 @@ class EngineSession:
                 enforced=enforced,
                 latency_ms=latency_ms,
                 agent_id=agent_id,
-                edit_id=edit_id,
             )
         )
 

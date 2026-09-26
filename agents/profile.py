@@ -42,9 +42,6 @@ GIT = [
     "git_range",
 ]
 SHELL = ["run_command"]
-# The reviewer's only command: the harness-chosen verify, in a disposable
-# copy of the worktree. Not a shell -- see tools/verify.py.
-VERIFY = ["run_verify"]
 WEB = ["web_search", "web_fetch"]
 BROWSER = [
     "browser_open",

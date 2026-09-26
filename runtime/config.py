@@ -73,9 +73,6 @@ class EngineConfig:
     metrics_instance: str = ""
     metrics_push_interval_s: float = 2.0
     trace_calls: bool = False
-    # Explicit verify command for the harness verify stage. Empty means
-    # "detect it" (runtime/verify.py::detect_verify_commands).
-    verify_command: str = ""
     warnings: list[str] = field(default_factory=list)
     typesafe_api_key: str = ""
     judge_mode: str = "advisory"
@@ -210,7 +207,6 @@ class EngineConfig:
                 _env_judge_site(f"ENGINE_JUDGE_{site.upper()}", warnings),
             )
         config.trace_calls = _env_bool("ENGINE_TRACE_CALLS", config.trace_calls, warnings)
-        config.verify_command = (os.environ.get("ENGINE_VERIFY_CMD") or "").strip()
 
         # An explicit-but-invalid value (a typo, a stale config) is not a
         # deliberate opt-out of the judged default -- it's treated the same

@@ -29,7 +29,6 @@ socket is a dataclass with a `type` field.
   - [Events](#events-engine--client)
   - [Snapshots and reconnection](#snapshots-and-reconnection)
 - [The agent loop](#the-agent-loop)
-  - [Verify and review](#verify-and-review)
   - [What a pull request says](#what-a-pull-request-says)
 - [Tools](#tools)
   - [Discovery and reload](#discovery-and-reload)
@@ -188,19 +187,10 @@ language servers, and unlinks the socket.
               ┌──────────▼──────────┐               │
               │ Orchestrator        │───────────────┘
               │  spawns personalities│
-              │  ask coder tester    │
-              │  researcher debugger │
-              │  reviewer            │
-              └────┬───────────┬────┬┘
-                   │           │    │ before a reviewer runs
-                   │           │  ┌─▼──────────────────────────┐
-                   │           │  │ runtime/verify.py          │
-                   │           │  │ detect cmd → run in the    │
-                   │           │  │ worktree → structured result│
-                   │           │  │ → reviewer brief / settle   │
-                   │           │  └────────────────────────────┘
+              └────┬───────────┬────┘
+                   │           │
       ┌────────────▼──┐   ┌────▼─────────────────────────────┐
-      │ OpenRouterLLM │   │ ToolRegistry  (tools/, 67 tools) │
+      │ OpenRouterLLM │   │ ToolRegistry  (tools/)           │
       └───────────────┘   └────┬─────────────────────────────┘
                                │ every write goes through one funnel
                           ┌────▼──────────────────────────────┐
@@ -343,77 +333,28 @@ The user talks only to the **orchestrator** (`agents/orchestrator.py`), which is
 
 A spawn is fire-and-forget. The personality tool returns immediately with `agent_id` (and `worktree` / `branch` for writers). The child runs in the background with a fresh history and an allowlisted tool set. When it finishes, `compress_for_parent` turns its transcript into an `AgentResult` (`status`, `summary`, `outcome`, `files_touched`, `leftover_questions`, `missing_checks`). `files_touched` is successful edits, not reads. `leftover_questions` is parsed from labeled `leftover:` / `leftover_questions:` lines in the LLM report (or the child's closer). That string is posted to the orch as an `engine` chat line and, if the orch is idle, starts a follow-up orch turn so it can brief the user or spawn the next step. Child tokens stream live as `ChatMessageStarted` / `ChatMessageDelta` / `ChatMessageAdded` with `agent_id` set; they never persist in orch chat history.
 
-`AgentLoop` is still an OpenAI-style tool-calling loop. The orch is capped at `EngineConfig.max_turns` (default 16). Each child uses its profile `max_turns` (default 32). Hitting the cap is a checkpoint, not a kill: the engine asks **continue** (same history, another `turn_slice` of 16, at most `max_continues` of 3), **handoff** (orch may spawn one writer with leftover), or **stop**. `ENGINE_TURN_CONTINUE=never` skips the prompt and hands off. Separately, the loop-control judge can stop an agent that is repeating itself; that stop is still `status=stopped`, but the agent first gets one tool-less turn to report what it found, what it checked, and what it did not verify, so a stopped reviewer's findings still reach the orchestrator. The orch may emit several personality calls in one model turn; those children run concurrently. A child's own tools stay sequential so read-before-write cannot race. `EngineConfig.max_spawns_per_turn` (default 8) caps how many children may be live at once.
+`AgentLoop` is still an OpenAI-style tool-calling loop. The orch is capped at `EngineConfig.max_turns` (default 16). Each child uses its profile `max_turns` (default 32). Hitting the cap is a checkpoint, not a kill: the engine asks **continue** (same history, another `turn_slice` of 16, at most `max_continues` of 3), **handoff** (orch may spawn one writer with leftover), or **stop**. `ENGINE_TURN_CONTINUE=never` skips the prompt and hands off. The orch may emit several personality calls in one model turn; those children run concurrently. A child's own tools stay sequential so read-before-write cannot race. `EngineConfig.max_spawns_per_turn` (default 8) caps how many children may be live at once.
 
 `coder` and `tester` run in a git worktree (`workspace/.engine/worktrees/<agent_id>` on branch `engine/<profile>/<agent_id>`) so two writers — or a writer and your dirty checkout — do not collide. `reviewer` joins that worktree so `git_diff` sees the writer's changes. When the writer finishes, uncommitted edits are committed on that branch, then the engine prompts to **merge**, **open a PR**, **keep**, or **discard**. Natural-language replies such as "please merge it" count. A `WorktreeSettled` event and an `engine` chat line report what happened. Empty worktrees (no unique commits and a clean tree) are removed without asking. After a keep — or if the prompt was missed — the orch must call `settle_worktree` rather than spawn another coder; writers cannot check out the user's branch. Leftover engine worktrees are recovered on session start so a later merge/PR still finds them. `ask`, `researcher`, and `debugger` use the main workspace. If the workspace is not a git repo, spawn still starts on the main tree.
-
-### Verify and review
-
-Two stages sit between a writer finishing and a pull request opening. Both
-are run by the harness, not asked of an agent.
-
-**Harness verify** (`runtime/verify.py`). Before a reviewer gets its first
-turn, the engine runs the project's verify command in that worktree and puts
-the structured result — exit code, runner, passed/failed/skipped — into the
-reviewer's brief. The command is chosen in order: `ENGINE_VERIFY_CMD` /
-`EngineConfig.verify_command`; then detection (`go build ./... && go vet ./...
-&& go test ./...` for a `go.mod`, `pytest -q` for a Python project, `npm test`
-when `package.json` has a real test script); then the last command the writer
-itself ran successfully. If verification fails, the engine first runs the same command on the commit the
-worktree branched from (a detached throwaway checkout, only after a failure). A
-failure the base already had — same pytest ids, go tests, or `go build`/`go vet`
-diagnostics with line numbers ignored — does not block the change; the reviewer
-is told which failures predate it and not to widen the scope. A failure the
-change introduced, or one whose output can't be compared, does block. The
-verify environment drops every `ENGINE_*` variable, so the engine's own
-controls never reach the project under test. If a blocking failure remains, the reviewer is never given a
-turn: its report comes back as `status=blocked` with the verify output and the
-id of the still-open worktree, and the orchestrator decides what to do. No coder
-is started automatically — that was tried and removed, because a failure that
-predates the change pulled the coder into unrelated work. If no command can be determined at all, the reviewer is
-started with a brief that says the change is unverified.
-
-The reviewer's one command is `run_verify`, which re-runs that same command in
-a throwaway copy of the worktree and can mutate one line of the copy first, so
-it can check that a test actually fails when the new logic is broken. It cannot
-choose the command and cannot touch the real worktree. On a plain run it applies
-the same base-commit comparison as the gate, so the tool and the gate agree about
-which failures predate the change; a mutation spot-check skips the comparison,
-since the mutation is meant to make verify fail.
-
-**Requirements table** (`agents/review_verdict.py`). The reviewer's brief
-carries the original user prompt verbatim, labelled as the requirement, with
-the orchestrator's brief labelled separately as an interpretation of it. The
-reviewer emits a table between `=== REQUIREMENTS ===` markers — one row per
-explicit requirement and per conditional instruction in the *original* task,
-each `met` / `not met` / `skipped (reason)` with file:line or verify output as
-evidence. The verdict the orchestrator reads is derived from that table, not
-from the reviewer's prose: a hard requirement `not met` (a documented TODO
-counts) or `skipped`, a conditional instruction with no disposition, or no
-table at all all become `request_changes`. A `block` is never downgraded. The
-coder's own finish report likewise has to give a disposition for every
-instruction, including the soft ones.
 
 ### What a pull request says
 
 `settle_worktree pr` writes its title and body with **one extra model call**,
 made at settle time from the facts rather than from chat: the original task
-prompt verbatim, `git diff --stat` against the merge base, what each writer
-reported, and the harness verify result. The model returns
-`{"title", "body"}`; the title is at most 72 characters, cut on a word boundary
-if longer. A reply that is not JSON, is missing a field, or whose body asks you
-something is rejected, and so is a failed call — a bad reply never fails a
-settle.
+prompt verbatim, `git diff --stat` against the merge base, and what each writer
+reported. The model returns `{"title", "body"}`; the title is at most 72
+characters, cut on a word boundary if longer. A reply that is not JSON, is
+missing a field, or whose body asks you something is rejected, and so is a
+failed call — a bad reply never fails a settle.
 
 The fallback is deterministic. It uses a summary set apart in the
 orchestrator's last reply (a block between `---` rules or a `>` blockquote,
 provided it never asks you anything), else the original task prompt plus the
-stat. Either way the body is checked against the stat: any changed top-level
-path it doesn't mention gets a **Files changed** section built from the stat,
-with no model involved, so the call can't quietly drop part of the diff.
-Settle refuses to open a pull request unless the latest harness verify exited 0
-(or failed only on failures the base commit already had) — unless the task
-explicitly says there are no tests, and even then a failing build still blocks.
+stat. It never uses a lone writer's report. Either way the body is checked
+against the stat: any changed top-level path it doesn't mention gets a
+**Files changed** section built from the stat, with no model involved, so the
+call can't quietly drop part of the diff. Commit subjects are cut on a word
+boundary too.
 
 You can keep talking to the orch while children run: a second `SubmitUserMessage` is queued if the orch is mid-reply, then played when that reply finishes. `AbortAgent` with no id cancels only the orch's current reply; with `agent_id` it cancels that child. Session shutdown still aborts every child and removes live worktrees.
 
@@ -457,7 +398,7 @@ can edit a tool and pick it up by restarting the session — no server restart.
 
 ### The full tool catalogue
 
-67 tools across navigation, tree-sitter, LSP, editing, execution, verification, git, GitHub, docs, HTTP, browser, and memory. Profiles get allowlisted subsets, not the whole catalogue (`agents/profile.py`).
+64 tools across navigation, tree-sitter, LSP, editing, execution, git, GitHub, docs, HTTP, browser, and memory.
 
 **Navigation** — no language server needed.
 
@@ -477,11 +418,7 @@ can edit a tool and pick it up by restarting the session — no server restart.
 | `query_tree` | A tree-sitter query. Presets: `imports`, `functions`, `classes`, `methods`, `calls`. Capped at 80 captures. |
 | `parse_file` | Compact nested syntax tree with line ranges. Capped at 200 nodes and depth 8. |
 
-**Language server** — real types, cross-file truth. Python, Go, and
-JavaScript/TypeScript only: for any other extension these six tools return
-immediately with what to use instead (`bash -n` for a shell script, a parser
-for JSON/YAML/TOML, nothing at all for prose) without starting or contacting a
-server.
+**Language server** — real types, cross-file truth.
 
 | Tool | Purpose |
 |---|---|
@@ -532,12 +469,6 @@ server.
 | `git_show` | One revision: metadata, stat, clipped patch. |
 | `git_blame` | Blame a file, optional 1-based line window. |
 | `git_range` | Commits and diffstat for `base...head`. |
-
-**Verification** — reviewer only.
-
-| Tool | Purpose |
-|---|---|
-| `run_verify` | Re-runs *this worktree's* harness-chosen verify command in a throwaway copy of the worktree, and reports the structured result. Optionally applies one single-string substitution to one file in the copy first, for a mutation spot-check. The agent cannot choose the command and cannot write to the real worktree. |
 
 **GitHub.** Requires `gh` (authenticated). Read tools go to reviewer/researcher/debugger. Writes ask the user. `gh_pr_create` exists but is not given to any profile — worktree settle still opens writer PRs.
 
@@ -860,7 +791,6 @@ current disk hash does not match the hash stored with the note.
 | `ENGINE_EXEC_TIMEOUT_S` | `120` | Default `run_command` timeout. |
 | `ENGINE_EXEC_FILE_LIMIT_MB` | `2048` | `ulimit -f` cap (POSIX 512-byte blocks). |
 | `ENGINE_CONTEXT_BUDGET` | `120000` | Compaction trigger budget. |
-| `ENGINE_VERIFY_CMD` | (unset; detected) | Explicit harness verify command, run in a writer's worktree before the reviewer . Unset means detect it (`go.mod` → build+vet+test, Python → `pytest -q`, `package.json` with a real test script → `npm test`), then fall back to the last command the writer ran successfully. |
 | `ENGINE_PUSHGATEWAY_URL` | (unset) | Prometheus Pushgateway base URL. Unset disables pushes; metrics still accumulate in-process. |
 | `ENGINE_METRICS_JOB` | `engine` | Pushgateway job name. Grouping key `instance` is the session id unless overridden. |
 | `ENGINE_METRICS_INSTANCE` | (session id) | Pushgateway grouping key `instance`. Set to a stable name (e.g. `baseline`) when comparing runs. |
@@ -1118,11 +1048,9 @@ request, and on pushes to `main` it regenerates `coverage.svg` and commits it
 back to the repo with `[skip ci]` so the badge stays current without
 retriggering the workflow.
 
-88 test modules under `tests/` (plus 4 live calibration fixtures in
-`tests/live/`, marked `judge`), 1633 tests in the default run. The table below
-is the core set rather than the whole list — the original write-path suite,
-the runtime foundation (config, streaming, turns, stats, shell, prompts,
-compaction), and the pipeline-handoff stages:
+Tests across 18 modules. The original write-path suite is unchanged; the new
+modules cover the runtime foundation (config, streaming, turns, stats, shell,
+prompts, compaction):
 
 | Module | Covers |
 |---|---|
@@ -1144,12 +1072,6 @@ compaction), and the pipeline-handoff stages:
 | `test_shell.py` | `run_command` executor: denials, approval, output caps |
 | `test_prompts.py` | `PromptBroker` ask/answer/cancel and confirm timeout |
 | `test_compaction.py` | Tool-result trim, history invariant, overflow markers |
-| `test_runners.py` | Structured pytest / `go test` / build verdicts, and head+tail truncation keeping a runner's summary line (real subprocesses) |
-| `test_verify.py` | Verify-command choice, the reviewer brief carrying the result, a failing verify blocking the reviewer and starting a capped coder slice, settle refusing, `run_verify` unable to touch the real worktree |
-| `test_review_verdict.py` | The reviewer brief keeping the original task, requirements-table parsing, and every verdict-enforcement rule |
-| `test_write_gate_scope.py` | The gate judging only this edit's hunk, and decisions journalled with an edit id |
-| `test_pr_fields.py` | PR title word-boundary cut, body coverage against `git diff --stat`, two-child settle (real worktrees, real bare remote) |
-| `test_lsp_unsupported_ext.py` | LSP tools answering unsupported extensions without reaching a language server |
 
 The `conftest.py` `ctx` fixture builds a `ToolContext` over `tmp_path` with a
 real SQLite journal and a fresh `FileTracker`. The `seed()` helper writes a file
@@ -1173,7 +1095,6 @@ app.py                  entry point: parse args, boot session + server, install 
 dummy_client.py         reference TUI client (command parser + entry)
 headless_client.py      unattended --message --auto driver
 scripts/bench_ab.py     clone main vs this branch and run the same prompt
-scripts/judge_precision.py  write-gate flag counts per heuristic per run, joined to edits
 client_tui.py           Textual 3-panel UI: chat, protocol, tools
 env.sh                  API key and model (gitignored)
 requirements.txt        runtime and test dependencies
@@ -1193,7 +1114,6 @@ runtime/
   subscriber.py         Bounded event queue with delta-drop policy
   prompts.py            PromptBroker: ask / answer / cancel_all
   language.py           workspace language detection
-  verify.py             harness verify: command detection, run, settle gate, disposable copy
   commands/             one handler per command, registered via @handles
     lifecycle.py          StartSession, ListSessions, SubmitUserMessage, RequestSnapshot, Shutdown
     files.py              OpenFile, CloseFile, UndoLastEdit
@@ -1203,7 +1123,6 @@ runtime/
     sqlite.py             sessions table: init, save, load, list
     state.py              SessionState in-memory model
     edits.py              edits table: record, recent, last_batch
-    judgements.py         judgements table: record (with edit_id), recent, all_for_session
     memory.py             structured workspace memory (files + decisions)
   tools/                implementation layer — no LLM schemas here
     edits.py              THE WRITE FUNNEL: primitives, patches, atomic writes, journal, undo
@@ -1218,19 +1137,17 @@ runtime/
     pkg.py docs.py osv.py registries, official docs, OSV advisories
     httpx.py              structured HTTP + OpenAPI list
     scan.py envinfo.py depwhy.py  TODOs, local versions, lockfile why
-    shell.py              asyncio subprocess executor for run_command (head+tail capture)
-    runners.py            structured pytest / go test / build verdicts from command output
+    shell.py              asyncio subprocess executor for run_command
     web.py                HTTP fetch and Brave search
     browser.py            Playwright headless browser (optional)
     writeglob.py          profile write-path globs
 
 tools/                  LLM-facing tool definitions — thin wrappers over runtime/tools
-  base.py               @tool decorator, ToolContext, schema inference, elide_middle
-  registry.py           ToolRegistry, discover_tools, subset, 80k head+tail result cap
+  base.py               @tool decorator, ToolContext, schema inference
+  registry.py           ToolRegistry, discover_tools, subset, 80k result cap
   read_file.py list_files.py search.py sitter.py lsp.py
   edit_file.py edit_symbol.py apply_patch.py undo.py
   shell.py              run_command
-  verify.py             run_verify — the reviewer's one allowlisted command
   git.py github.py web.py browser.py skills.py remember.py
   pkg.py docs.py osv.py http.py scan.py runtime_info.py dep_why.py
 
@@ -1238,9 +1155,8 @@ agents/
   agent_loop.py         shared tool-calling loop
   orchestrator.py       user-facing coordinator, spawn tools
   subagent.py           personality instance
-  profile.py            AgentProfile, ProfileRegistry, discover_profiles, tool groups
+  profile.py            AgentProfile, ProfileRegistry, discover_profiles
   profiles/             ask, coder, tester, reviewer, researcher, debugger
-  review_verdict.py     reviewer brief, requirements table, verdict enforcement
   hooks.py              AgentHooks callbacks
   compactor.py          mid-loop compact + compress_for_parent
 
@@ -1272,9 +1188,6 @@ describe those implementations to a model. The suite exercises
 |---|---|---|
 | NDJSON line | 8 MiB | `protocol/codec.py` |
 | Agent tool turns | orch 16, children 32; cap is a continue/handoff/stop checkpoint (slice 16, max 3 continues) | `EngineConfig.max_turns` / `turn_slice` / `max_continues` / `AgentProfile.max_turns` |
-| Harness verify | 600s per command; stops at the first non-zero exit | `runtime/verify.py::VERIFY_TIMEOUT_S` / `ENGINE_VERIFY_CMD` |
-| Command output to the model | first 1500 chars + last 2500, with the elided count named | `runtime/tools/shell.py::MODEL_HEAD_CHARS` / `MODEL_TAIL_CHARS` |
-| PR title | first sentence of the orchestrator's closing summary, word-boundary cut to 72 chars | `runtime/tools/git.py::PR_TITLE_MAX` |
 | Live subagents | 8 | `EngineConfig.max_spawns_per_turn` |
 | Subscriber buffer | 4096 items / 1 MiB | `runtime/subscriber.py` |
 | Per-event soft limit | 512 KiB | `EVENT_SOFT_LIMIT` |

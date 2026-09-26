@@ -312,9 +312,6 @@ class JudgementMade(ProtocolMessage):
     enforced: bool
     latency_ms: int
     agent_id: str = ""
-    # write_gate only: the edits-journal row this judgement was about, so a
-    # flag can later be joined with the outcome of that edit.
-    edit_id: int | None = None
 
 
 @event

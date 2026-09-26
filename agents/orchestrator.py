@@ -11,7 +11,6 @@ from agents.agent_loop import AgentLoop
 from agents.compactor import AgentResult
 from agents.hooks import AgentHooks
 from agents.profile import MEMORY, SKILLS, ProfileRegistry
-from agents.review_verdict import build_reviewer_brief, enforce_verdict
 from agents.subagent import Subagent
 from runtime.config import CHILD_COMPACT_TRIGGER, CHILD_KEEP_FULL_TOOLS
 from runtime.prompts import PromptTimeout
@@ -33,16 +32,6 @@ from runtime.tools.git import (
     worktree_has_changes,
 )
 from runtime.tools.tracker import FileTracker
-from runtime.verify import (
-    VerifyResult,
-    compare_to_baseline,
-    detect_verify_commands,
-    format_verify_block,
-    merge_base_of,
-    run_baseline,
-    run_verify,
-    settle_verify_refusal,
-)
 from tools.base import Tool, ToolContext
 from tools.registry import ToolRegistry
 
@@ -75,10 +64,6 @@ For edits, spawn coder. For verification, spawn tester. For a library, API, GitH
 
 A coder/tester task must include: concrete paths, the change or check required, and any facts already learned (quote fresh memory or ask's report; do not say "see above"). If you do not have those yet and memory does not cover them, spawn ask first instead of coder.
 
-Carry the user's requirements through unchanged. Put them in the coder task under a "Requirements (verbatim from the user)" heading, word for word: every explicit requirement and every conditional one ("if easy, sanity-check with a local run"). Do not soften a "must" into a "should", do not drop a requirement because it looks hard, and do not write "TODOs are fine" for something the user required. Your own analysis goes after that heading, not instead of it. The reviewer is given the user's original message separately, so a requirement you paraphrase away will be caught and sent back.
-
-If a change alters something other code depends on — an endpoint's auth or shape, a config key, an env var, a header, a schema — the consumers are part of the task. Make sure the survey lists every caller, including other binaries in the same repo (a client, agent or worker that talks to the thing being changed), and name them in the coder task. A survey that dismisses a consumer as unrelated has to say why.
-
 Answer directly when:
 - the reply is already in this conversation or workspace memory (fresh file notes or decision sections)
 - the user asked a meta question (status, what just happened, which agents exist)
@@ -92,38 +77,8 @@ At most one ask and one researcher per user message. leftover_questions: put the
 
 If a child returns status=incomplete, respawn once with a tighter task or tell the user. If a child returns status=max_turns, spawn one writer (coder or tester) with the leftover / paths / files_touched from the report — do not rediscover the repo. Do not respawn ask or researcher on max_turns; tell the user the leftover. If a child returns status=stopped, tell the user; do not respawn. If spawn returns "spawn budget exhausted", too many children are already live — stop spawning and report what is running.
 
-When a reviewer reports, read the whole report. If it says review_verdict: request_changes — the engine sets that when a hard requirement is unmet, whatever the reviewer's prose says — the verdict is binding. Send the findings to the same coder with continue_from and re-review only after a fix. Never brief a reviewer with the outcome you expect, and never tell it to confirm what a previous reviewer found. If a second round still ends in request_changes, stop and tell the user exactly what remains unmet; do not present the work as finished. A reviewer that returns status=stopped still leaves a report: use what it found. Never say a review gave "no verdict" if the report contains review_verdict or findings.
-
-A harness verify failure is either the change's or it is not. When the report says the same failures already fail on the base commit, they are not the change's: do not send a coder to fix them and do not widen the task to make a build pass. Say in your summary that they predate the change. Do not tell a coder that something "was already applied" or "was already done" unless a child's report or describe_worktrees shows it; check before you assert.
-
-Spawn only when you have the task text. Never spawn an agent with a placeholder task, or to "wait" for another. If you are waiting for a child, end your turn.
-
-Finishing. The engine, not you, asks the user whether to merge, open a pull request, keep or discard a finished worktree. Never end a message with a menu of options or a question about that. When the work is done, your final message is a description of what changed and why — what each part did, what was not done or is left as follow-up, and what was verified — written so it could be pasted into a pull request as is. If the user asked for a closing paragraph, that paragraph is your final message. Ask the user a question only when a decision is theirs to make, and only before you spawn.
-
 Do not call write tools or run_command. You do not have them.
 """
-
-
-@dataclass
-class _ReviewGate:
-    """Outcome of the harness verify that runs before a reviewer's turn."""
-
-    ok: bool
-    brief: str
-    result: VerifyResult | None = None
-
-    def failure_result(self) -> AgentResult:
-        detail = self.result
-        command = detail.command if detail else ""
-        code = detail.exit_code if detail else -1
-        summary = (
-            f"review not run: harness verify failed (`{command}` exited {code})"
-        )
-        return AgentResult(
-            status="blocked",
-            summary=summary,
-            outcome=f"{summary}\n\n{self.brief}",
-        )
 
 
 @dataclass
@@ -229,23 +184,14 @@ class Orchestrator(AgentLoop):
         self._batch_id = ""
         self._batch_name = ""
         self._recent_results: list[tuple[str, str]] = []
-        # Item 1: what settle actually puts in a PR. `_closing_summary` is
-        # this orchestrator's own last reply to the user (including the
-        # inbox turn that follows the final child, which is where a
-        # two-part summary lives); `_user_task` is the original user
-        # prompt, kept verbatim for the fallback body and for the
-        # reviewer brief (item 5). Neither is ever a child's self-report.
+        # What settle puts in a pull request. `_closing_summary` is a summary
+        # the orchestrator set apart in its own last reply (see
+        # `pr_summary_from_reply`), or "" when it wrote none; `_user_task` is
+        # the user's own prompt, verbatim; `_writer_reports` is what each writer
+        # said it did, per worktree, for the PR-text call.
         self._closing_summary = ""
         self._user_task = ""
-        # Item 3: the latest harness verify per worktree, keyed by resolved
-        # path rather than agent_id -- `continue_from` transfers a tree to a
-        # new agent_id, and the verify result belongs to the tree.
-        self._verify_by_tree: dict[str, VerifyResult] = {}
-        # What each writer said it did, per worktree, for the PR-text call.
         self._writer_reports: dict[str, list[str]] = {}
-        # The last command each writer ran successfully, the third choice in
-        # `detect_verify_commands`.
-        self._last_writer_command: dict[str, str] = {}
         self._skills = kwargs.get("skills")
         self._on_skill_activated = kwargs.get("on_skill_activated")
         self._finished_transcripts: dict[str, dict] = {}
@@ -419,9 +365,6 @@ class Orchestrator(AgentLoop):
         title = summary
         body = summary
         if normalized == "pr":
-            refusal = self._pr_verify_refusal(dest)
-            if refusal:
-                return f"error: {refusal}"
             title, body = await self._compose_pr(dest, summary)
         ok, detail, pr_url = await asyncio.to_thread(
             apply_worktree,
@@ -548,7 +491,7 @@ class Orchestrator(AgentLoop):
         """Title and body for a pull request.
 
         One model call writes them from the facts -- the original task, the
-        diff stat, what each writer reported, the harness verify result --
+        diff stat, what each writer reported --
         rather than lifting a sentence out of a chat reply. The call can fail
         or return something unusable; `_pr_fields` is then the deterministic
         fallback, and the Files-changed coverage check applies to either.
@@ -565,18 +508,6 @@ class Orchestrator(AgentLoop):
         self, dest: Path, stat_text: str
     ) -> tuple[str, str] | None:
         key = str(Path(dest).resolve())
-        verify = self._verify_by_tree.get(key)
-        if verify is None or not verify.command:
-            verify_line = "not run"
-        elif verify.ok:
-            verify_line = f"`{verify.command}` passed"
-        elif verify.preexisting:
-            verify_line = (
-                f"`{verify.command}` fails, but only on failures that already "
-                "fail on the base commit"
-            )
-        else:
-            verify_line = f"`{verify.command}` failed"
         reports = "\n\n".join(self._writer_reports.get(key, [])) or "(none)"
         closing = (self._closing_summary or "").strip() or "(none)"
         task = (self._user_task or "").strip() or "(none)"
@@ -592,8 +523,8 @@ class Orchestrator(AgentLoop):
                     "concern, and name the files that matter. Say plainly what "
                     "was NOT done or is left as follow-up. Every claim must be "
                     "supported by the diff stat or the writer reports below; do "
-                    "not claim tests, builds or reviews beyond the verification "
-                    "line. Where the task has several parts, cover every part. "
+                    "not claim tests, builds or reviews that no report mentions. "
+                    "Where the task has several parts, cover every part. "
                     "It is a description of the change: no greeting, no "
                     "questions, no offers, no mention of agents, worktrees or "
                     "branches."
@@ -605,7 +536,6 @@ class Orchestrator(AgentLoop):
                     f"ORIGINAL TASK:\n{task}\n\n"
                     f"DIFF STAT:\n{stat_text or '(unavailable)'}\n\n"
                     f"WRITER REPORTS:\n{reports}\n\n"
-                    f"VERIFICATION: {verify_line}\n\n"
                     f"ORCHESTRATOR'S OWN SUMMARY (may be empty):\n{closing}"
                 ),
             },
@@ -800,30 +730,6 @@ class Orchestrator(AgentLoop):
     ) -> None:
         status = "ok"
         outcome = ""
-        if profile.name == "reviewer":
-            verify_block = ""
-            if worktree:
-                # Item 3: the harness verifies before the reviewer gets a
-                # turn. This happens inside the child task, not inside
-                # spawn(), so spawn stays fire-and-forget -- but the reviewer
-                # loop never runs when verification fails, and never sees a
-                # brief without the structured verify result when it passes.
-                gate = await self._verify_before_review(Path(worktree), task)
-                if not gate.ok:
-                    await self._report_blocked_review(
-                        agent_id, profile, child, task, branch, worktree, gate
-                    )
-                    return
-                child._ctx.verify_command = gate.result.command if gate.result else ""
-                child._ctx.verify_base = await asyncio.to_thread(
-                    merge_base_of, self._ctx.workspace, Path(worktree)
-                )
-                verify_block = gate.brief
-            # Item 5: the original user prompt goes in verbatim and labelled
-            # as the authority; the orchestrator's `task` is labelled as an
-            # interpretation of it. A brief that downgraded a hard
-            # requirement can no longer be the only thing the reviewer sees.
-            task = build_reviewer_brief(self._user_task, task, verify_block)
         try:
             child.set_catalog_query(task)
             if resolution is not None and getattr(resolution, "complete", True):
@@ -874,10 +780,6 @@ class Orchestrator(AgentLoop):
                 self._writer_reports.setdefault(key, []).append(
                     f"{profile.name} ({result.status}): {report[:1500]}"
                 )
-        if worktree:
-            last_ok = (getattr(child._ctx, "last_command_ok", "") or "").strip()
-            if last_ok:
-                self._last_writer_command[str(Path(worktree).resolve())] = last_ok
         self._shutdown_child_lsp(agent_id)
         owns_worktree = agent_id in self._worktrees
         should_settle = owns_worktree and status != "aborted" and not self._aborting_all
@@ -889,8 +791,6 @@ class Orchestrator(AgentLoop):
                     await asyncio.to_thread(
                         remove_agent_worktree, self._ctx.workspace, wt
                     )
-        if profile.name == "reviewer":
-            self._enforce_review_verdict(result)
         merged_text = None
         if self._on_agent_result is not None and not self._aborting_all:
             # Merge-gate judge call while the child is still listed live so
@@ -926,142 +826,6 @@ class Orchestrator(AgentLoop):
                     branch=branch or self._worktree_branches.get(agent_id, ""),
                     summary=summary,
                 )
-
-    # ----------------------------------------------------------------
-    # Item 5: the verdict comes from the requirements table, not the prose
-
-    def _enforce_review_verdict(self, result: AgentResult) -> AgentResult:
-        """Rewrite a reviewer's result so the verdict the orchestrator reads
-        is the one the requirements table supports.
-
-        A hard requirement marked `not met` is request_changes even when the
-        reviewer wrote "approve" and even when the gap is documented with a
-        TODO. `block` is never downgraded.
-        """
-        text = result.as_text()
-        verdict = enforce_verdict(text)
-        result.review_verdict = verdict.verdict
-        if not verdict.overridden:
-            return result
-        note = (
-            f"engine: verdict forced to {verdict.verdict} "
-            f"(reviewer said {verdict.stated or 'nothing'}) — {verdict.reason}"
-        )
-        result.summary = f"{note}\n{result.summary}".strip()
-        result.outcome = f"{note}\n{result.outcome}".strip()
-        if verdict.reason:
-            result.leftover_questions = [
-                *(result.leftover_questions or []),
-                verdict.reason,
-            ]
-        return result
-
-    # ----------------------------------------------------------------
-    # Item 3: harness verify
-
-    async def _verify_before_review(self, dest: Path, task: str) -> _ReviewGate:
-        """Run the project's verify command in `dest` before the reviewer.
-
-        The harness chooses the command and runs it; no agent is asked to.
-        On failure the reviewer is not given a turn at all -- the failure
-        goes back to the coder as a capped continue slice instead.
-        """
-        key = str(dest.resolve())
-        plan = await asyncio.to_thread(
-            detect_verify_commands,
-            dest,
-            config=self._config,
-            last_command=self._last_writer_command.get(key, ""),
-        )
-        result = await run_verify(dest, plan)
-        if result.command and not result.ok:
-            # A failing verify is only the change's fault if the base commit
-            # did not already fail the same way. Two of three trial runs
-            # were derailed by a failure that predated the change.
-            result = compare_to_baseline(
-                result, await self._baseline_for(dest, plan)
-            )
-        self._verify_by_tree[key] = result
-        if not result.command:
-            # Nothing to run: the reviewer still gets told so, in the brief,
-            # and reviews an explicitly unverified change. Blocking here
-            # would stall every project the harness cannot detect.
-            return _ReviewGate(ok=True, brief=format_verify_block(result), result=result)
-        return _ReviewGate(
-            ok=result.passes_gate, brief=format_verify_block(result), result=result
-        )
-
-    async def _baseline_for(self, dest: Path, plan) -> VerifyResult | None:
-        """Verify result on the commit `dest` branched from, or None."""
-        try:
-            return await run_baseline(self._ctx.workspace, dest, plan)
-        except Exception:  # noqa: BLE001 - a baseline we cannot get means "unknown"
-            return None
-
-    def _pr_verify_refusal(self, dest: Path) -> str:
-        """Why this worktree must not become a pull request, or "".
-
-        Settle does not open a PR on an unverified tree. The only carve-out
-        is a task that explicitly says there are no tests -- and a build,
-        where the project has one, still has to have succeeded.
-        """
-        return settle_verify_refusal(
-            self.latest_verify(dest), task=self._user_task
-        )
-
-    def latest_verify(self, dest: Path | str) -> VerifyResult | None:
-        return self._verify_by_tree.get(str(Path(dest).resolve()))
-
-    async def _report_blocked_review(
-        self,
-        agent_id: str,
-        profile,
-        child: Subagent,
-        task: str,
-        branch: str,
-        worktree: str,
-        gate: _ReviewGate,
-    ) -> None:
-        """Hand the verify failure back as this reviewer's result.
-
-        No coder is started here. An automatic fix-up slice was tried and
-        derailed two of three trial runs: a failure that predates the change
-        pulled the coder into unrelated work, and the turn cap did not hold
-        once the client auto-answered "continue". The orchestrator decides
-        what to do with a blocked review; this only tells it which worktree
-        is still open so a `continue_from` spawn is one call.
-        """
-        result = gate.failure_result()
-        owner = self._continue_target(worktree)
-        if owner:
-            result.outcome = (
-                f"{result.outcome}\n\nworktree still open as agent_id={owner}; "
-                "if the failure is this change's own, spawn coder with "
-                f"continue_from={owner}. If it predates the change, say so "
-                "instead of widening the scope."
-            )
-        else:
-            result.leftover_questions = list(result.leftover_questions or []) + [
-                "no open writer worktree to continue; respawn a coder on this branch"
-            ]
-        self._shutdown_child_lsp(agent_id)
-        if self._on_agent_finished is not None:
-            self._on_agent_finished(
-                agent_id, profile.name, result.status, result.summary, usage=child._usage
-            )
-        if self._on_agent_result is not None and not self._aborting_all:
-            self._on_agent_result(agent_id, profile.name, result.as_text())
-        self._store_transcript(agent_id, child)
-        self._child_tasks.pop(agent_id, None)
-        self._children.pop(agent_id, None)
-
-    def _continue_target(self, worktree: str) -> str:
-        """The agent_id that currently owns `worktree`, if any."""
-        want = str(Path(worktree).resolve())
-        for agent_id, dest in self._worktrees.items():
-            if str(Path(dest).resolve()) == want:
-                return agent_id
-        return ""
 
     async def _apply_merge_gate(self, profile: str, task: str, result: AgentResult) -> str:
         """Phase 8 (scoped; see docs/impl-plans/jev-exp-1.md), the merge
@@ -1165,18 +929,6 @@ class Orchestrator(AgentLoop):
             title = message
             body = summary or message
             if action == "pr":
-                refusal = self._pr_verify_refusal(dest)
-                if refusal:
-                    if self._on_worktree_settled is not None and not self._aborting_all:
-                        self._on_worktree_settled(
-                            agent_id, profile, "keep", f"error: {refusal}",
-                            branch, "", False,
-                        )
-                    return
-                # The PR headline and body come from the orchestrator's
-                # closing summary, not from `summary` (this one writer's
-                # self-report). With two sequential coders the second
-                # report knows nothing about part A.
                 title, body = await self._compose_pr(dest, summary)
             ok, detail, pr_url = await asyncio.to_thread(
                 apply_worktree,
@@ -1209,10 +961,9 @@ class Orchestrator(AgentLoop):
     def _make_subagent(
         self, profile, agent_id: str, workspace: Path, isolated: bool
     ) -> Subagent:
-        max_turns = profile.max_turns or self._config.max_turns
         child_config = replace(
             self._config,
-            max_turns=max_turns,
+            max_turns=profile.max_turns or self._config.max_turns,
             compact_trigger=CHILD_COMPACT_TRIGGER,
             keep_full_tools=CHILD_KEEP_FULL_TOOLS,
         )
@@ -1275,9 +1026,8 @@ _SURVEY_ONCE = frozenset({"ask", "researcher"})
 
 
 def _commit_message(profile: str, summary: str) -> str:
-    """Commit subject for a writer worktree: the writer's own report is the
-    right source here (it describes that commit), but cut on a word
-    boundary rather than sliced at 72 characters."""
+    """Commit subject for a writer worktree, cut on a word boundary rather
+    than sliced at 72 characters."""
     head = pr_title_from_summary(summary) or "worktree"
     return f"engine({profile}): {head}"
 
