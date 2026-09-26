@@ -11,6 +11,7 @@ from agents.agent_loop import AgentLoop
 from agents.compactor import AgentResult
 from agents.hooks import AgentHooks
 from agents.profile import MEMORY, SKILLS, ProfileRegistry
+from agents.review_verdict import build_reviewer_brief, enforce_verdict
 from agents.subagent import Subagent
 from runtime.config import CHILD_COMPACT_TRIGGER, CHILD_KEEP_FULL_TOOLS
 from runtime.prompts import PromptTimeout
@@ -703,20 +704,27 @@ class Orchestrator(AgentLoop):
     ) -> None:
         status = "ok"
         outcome = ""
-        if profile.name == "reviewer" and worktree:
-            # Item 3: the harness verifies before the reviewer gets a turn.
-            # This happens inside the child task, not inside spawn(), so
-            # spawn stays fire-and-forget -- but the reviewer loop never
-            # runs when verification fails, and never sees a brief without
-            # the structured verify result when it passes.
-            gate = await self._verify_before_review(Path(worktree), task)
-            if not gate.ok:
-                await self._report_blocked_review(
-                    agent_id, profile, child, task, branch, worktree, gate
-                )
-                return
-            child._ctx.verify_command = gate.result.command if gate.result else ""
-            task = f"{task}\n\n{gate.brief}"
+        if profile.name == "reviewer":
+            verify_block = ""
+            if worktree:
+                # Item 3: the harness verifies before the reviewer gets a
+                # turn. This happens inside the child task, not inside
+                # spawn(), so spawn stays fire-and-forget -- but the reviewer
+                # loop never runs when verification fails, and never sees a
+                # brief without the structured verify result when it passes.
+                gate = await self._verify_before_review(Path(worktree), task)
+                if not gate.ok:
+                    await self._report_blocked_review(
+                        agent_id, profile, child, task, branch, worktree, gate
+                    )
+                    return
+                child._ctx.verify_command = gate.result.command if gate.result else ""
+                verify_block = gate.brief
+            # Item 5: the original user prompt goes in verbatim and labelled
+            # as the authority; the orchestrator's `task` is labelled as an
+            # interpretation of it. A brief that downgraded a hard
+            # requirement can no longer be the only thing the reviewer sees.
+            task = build_reviewer_brief(self._user_task, task, verify_block)
         try:
             child.set_catalog_query(task)
             if resolution is not None and getattr(resolution, "complete", True):
@@ -775,6 +783,8 @@ class Orchestrator(AgentLoop):
                     await asyncio.to_thread(
                         remove_agent_worktree, self._ctx.workspace, wt
                     )
+        if profile.name == "reviewer":
+            self._enforce_review_verdict(result)
         merged_text = None
         if self._on_agent_result is not None and not self._aborting_all:
             # Merge-gate judge call while the child is still listed live so
@@ -810,6 +820,35 @@ class Orchestrator(AgentLoop):
                     branch=branch or self._worktree_branches.get(agent_id, ""),
                     summary=summary,
                 )
+
+    # ----------------------------------------------------------------
+    # Item 5: the verdict comes from the requirements table, not the prose
+
+    def _enforce_review_verdict(self, result: AgentResult) -> AgentResult:
+        """Rewrite a reviewer's result so the verdict the orchestrator reads
+        is the one the requirements table supports.
+
+        A hard requirement marked `not met` is request_changes even when the
+        reviewer wrote "approve" and even when the gap is documented with a
+        TODO. `block` is never downgraded.
+        """
+        text = result.as_text()
+        verdict = enforce_verdict(text)
+        result.review_verdict = verdict.verdict
+        if not verdict.overridden:
+            return result
+        note = (
+            f"engine: verdict forced to {verdict.verdict} "
+            f"(reviewer said {verdict.stated or 'nothing'}) — {verdict.reason}"
+        )
+        result.summary = f"{note}\n{result.summary}".strip()
+        result.outcome = f"{note}\n{result.outcome}".strip()
+        if verdict.reason:
+            result.leftover_questions = [
+                *(result.leftover_questions or []),
+                verdict.reason,
+            ]
+        return result
 
     # ----------------------------------------------------------------
     # Item 3: harness verify

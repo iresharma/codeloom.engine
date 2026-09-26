@@ -557,6 +557,9 @@ class AgentResult:
     files_touched: list[str] = field(default_factory=list)
     leftover_questions: list[str] = field(default_factory=list)
     missing_checks: list[str] = field(default_factory=list)
+    # Reviewer only: the verdict the engine derived from the requirements
+    # table (agents/review_verdict.py), not whatever the prose claimed.
+    review_verdict: str = ""
 
     def as_text(self) -> str:
         lines = [
@@ -571,6 +574,8 @@ class AgentResult:
             lines.append("leftover_questions: " + "; ".join(self.leftover_questions))
         if self.missing_checks:
             lines.append("missing_checks: " + ", ".join(self.missing_checks))
+        if self.review_verdict:
+            lines.append(f"review_verdict: {self.review_verdict}")
         return "\n".join(lines)
 
 

@@ -36,6 +36,8 @@ If the same fix fails twice, stop repeating it. Change approach, or write the bl
 
 Do not spawn other agents. Do not merge, push, or open a pull request — after you finish the user is asked to merge this worktree or open a PR. When finished, report paths changed, what you did in each, and checks run.
 
+Your report must also give a disposition for every instruction in the task, one line each: the instruction, then done / not done (why) / skipped (why). That includes the soft ones — "if easy, sanity-check with a local run" is an instruction, and skipping it silently is what this rule exists to stop. A requirement you left as a TODO is not done, and the report says which paths still need it.
+
 After you change a file, remember(section=files, path=..., purpose=..., entry_points=..., constraints=...) with what the file now does — not a transcript. The engine also persists this briefing on finish; remember during the run if you can write a better structured note.
 """
 
