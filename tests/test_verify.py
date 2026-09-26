@@ -264,7 +264,7 @@ async def test_reviewer_brief_carries_the_harness_verify_result(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_failing_verify_blocks_the_reviewer_and_goes_to_the_coder(tmp_path):
+async def test_failing_verify_blocks_the_reviewer_and_starts_no_coder(tmp_path):
     repo = tmp_path / "repo"
     _init_git(repo)
     provider = _ReviewerSpawn()
@@ -289,38 +289,12 @@ async def test_failing_verify_blocks_the_reviewer_and_goes_to_the_coder(tmp_path
     assert reviewer_reports, "no reviewer report was emitted"
     assert "harness verify failed" in reviewer_reports[0]
     assert "status: blocked" in reviewer_reports[0]
-    # And a coder slice was started in the same worktree to fix it.
-    assert "fix-up slice: started agent_id=" in reviewer_reports[0]
-    assert provider.coder_tasks, "no coder slice ran"
-    assert "Harness verification failed" in provider.coder_tasks[0]
-    assert "1 failed in 1.0s" in provider.coder_tasks[0]
-
-
-@pytest.mark.asyncio
-async def test_fix_up_slice_turn_budget_is_capped(tmp_path):
-    repo = tmp_path / "repo"
-    _init_git(repo)
-    orch = _orch(repo, nit_fixup_turns=4)
-    dest, branch, err = add_agent_worktree(repo, "w3", "coder")
-    assert not err, err
-    orch._remember_worktree("w3", Path(dest), branch, "coder", "b1")
-
-    captured: list[int] = []
-    real = orch._make_subagent
-
-    def spy(profile, agent_id, workspace, isolated):
-        child = real(profile, agent_id, workspace, isolated)
-        captured.append(child._config.max_turns)
-        return child
-
-    orch._make_subagent = spy
-    orch._llm = FakeProvider(results=[LLMResult(text="fixed")])
-    reply = await orch._start_fix_slice("w3", "fix the failing test", reason="test")
-    assert reply.startswith("started agent_id="), reply
-    await _wait_children(orch)
-    assert captured == [4], captured
-    # The clamp is per-slice: the next ordinary coder is back to normal.
-    assert orch._fix_slice_turns == 0
+    assert "1 failed in 1.0s" in reviewer_reports[0]
+    # No coder is started automatically: the orchestrator decides. The report
+    # names the still-open worktree so a continue_from spawn is one call.
+    assert provider.coder_tasks == [], "a coder was started without being asked"
+    assert "worktree still open as agent_id=w2" in reviewer_reports[0]
+    assert "continue_from=w2" in reviewer_reports[0]
 
 
 # --------------------------------------------------------------------------

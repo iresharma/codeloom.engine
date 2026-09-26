@@ -227,10 +227,6 @@ class Orchestrator(AgentLoop):
         # The last command each writer ran successfully, the third choice in
         # `detect_verify_commands`.
         self._last_writer_command: dict[str, str] = {}
-        # Set only while `_start_fix_slice` is spawning, so `_make_subagent`
-        # clamps that one child's turn budget.
-        self._fix_slice_turns = 0
-        self._fix_slice_reason = ""
         self._skills = kwargs.get("skills")
         self._on_skill_activated = kwargs.get("on_skill_activated")
         self._finished_transcripts: dict[str, dict] = {}
@@ -902,23 +898,24 @@ class Orchestrator(AgentLoop):
         worktree: str,
         gate: _ReviewGate,
     ) -> None:
-        """Hand the verify failure back as this reviewer's result, and start
-        one capped coder slice in the same worktree to fix it."""
+        """Hand the verify failure back as this reviewer's result.
+
+        No coder is started here. An automatic fix-up slice was tried and
+        derailed two of three trial runs: a failure that predates the change
+        pulled the coder into unrelated work, and the turn cap did not hold
+        once the client auto-answered "continue". The orchestrator decides
+        what to do with a blocked review; this only tells it which worktree
+        is still open so a `continue_from` spawn is one call.
+        """
         result = gate.failure_result()
         owner = self._continue_target(worktree)
-        started = ""
         if owner:
-            started = await self._start_fix_slice(
-                owner,
-                (
-                    "Harness verification failed in your worktree before the "
-                    "reviewer could run. Fix it. Do not change the tests to "
-                    "match broken behaviour.\n\n"
-                    f"{gate.brief}"
-                ),
-                reason="verify-failed",
+            result.outcome = (
+                f"{result.outcome}\n\nworktree still open as agent_id={owner}; "
+                "if the failure is this change's own, spawn coder with "
+                f"continue_from={owner}. If it predates the change, say so "
+                "instead of widening the scope."
             )
-            result.outcome = f"{result.outcome}\n\nfix-up slice: {started}"
         else:
             result.leftover_questions = list(result.leftover_questions or []) + [
                 "no open writer worktree to continue; respawn a coder on this branch"
@@ -941,23 +938,6 @@ class Orchestrator(AgentLoop):
             if str(Path(dest).resolve()) == want:
                 return agent_id
         return ""
-
-    async def _start_fix_slice(self, owner: str, task: str, *, reason: str) -> str:
-        """One capped coder continue slice in an existing worktree.
-
-        Reuses the turn-budget continue mechanism: the child is a coder in
-        the same worktree (`continue_from`), with `max_turns` clamped to
-        `config.nit_fixup_turns` so a fix-up cannot turn into a second
-        implementation pass.
-        """
-        budget = max(1, int(getattr(self._config, "nit_fixup_turns", 4) or 4))
-        self._fix_slice_turns = budget
-        self._fix_slice_reason = reason
-        try:
-            return await self.spawn("coder", task, continue_from=owner)
-        finally:
-            self._fix_slice_turns = 0
-            self._fix_slice_reason = ""
 
     async def _apply_merge_gate(self, profile: str, task: str, result: AgentResult) -> str:
         """Phase 8 (scoped; see docs/impl-plans/jev-exp-1.md), the merge
@@ -1106,13 +1086,6 @@ class Orchestrator(AgentLoop):
         self, profile, agent_id: str, workspace: Path, isolated: bool
     ) -> Subagent:
         max_turns = profile.max_turns or self._config.max_turns
-        if self._fix_slice_turns:
-            # A fix-up slice is capped: it exists to apply a known, small
-            # change, not to start a second implementation pass. The profile
-            # itself has to carry the clamp -- Subagent.__init__ re-applies
-            # `profile.max_turns` over whatever the config says.
-            max_turns = min(max_turns, self._fix_slice_turns)
-            profile = replace(profile, max_turns=max_turns)
         child_config = replace(
             self._config,
             max_turns=max_turns,
@@ -1188,7 +1161,7 @@ def _commit_message(profile: str, summary: str) -> str:
 def _is_engine_report(task: str) -> bool:
     """True for an internal "[agent ...]" / "[worktree ...]" handoff turn."""
     head = str(task or "").lstrip()
-    return head.startswith("[agent ") or head.startswith("[worktree ")
+    return head.startswith(("[agent ", "[worktree "))
 
 
 def batch_nickname(task: str, *, limit: int = 48) -> str:
