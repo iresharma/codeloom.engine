@@ -117,7 +117,7 @@ def test_submit_answers_pending_prompt(tmp_path):
 
 
 def test_plain_text_answers_outstanding_prompt():
-    import dummy_client
+    import clients.dummy as dummy_client
 
     dummy_client._LAST_PROMPT_ID = "p1"
     dummy_client._LAST_PROMPT_CHOICES = []
@@ -129,7 +129,7 @@ def test_plain_text_answers_outstanding_prompt():
 
 
 def test_plain_text_is_message_without_prompt():
-    import dummy_client
+    import clients.dummy as dummy_client
 
     dummy_client._LAST_PROMPT_ID = ""
     dummy_client._LAST_PROMPT_CHOICES = []
@@ -139,7 +139,7 @@ def test_plain_text_is_message_without_prompt():
 
 
 def test_settle_prompt_natural_language_is_merge():
-    import dummy_client
+    import clients.dummy as dummy_client
 
     dummy_client._LAST_PROMPT_ID = "p2"
     dummy_client._LAST_PROMPT_CHOICES = ["merge", "pr", "keep", "discard"]
@@ -149,7 +149,7 @@ def test_settle_prompt_natural_language_is_merge():
 
 
 def test_settle_prompt_unrelated_stays_chat():
-    import dummy_client
+    import clients.dummy as dummy_client
 
     dummy_client._LAST_PROMPT_ID = "p3"
     dummy_client._LAST_PROMPT_CHOICES = ["merge", "pr", "keep", "discard"]

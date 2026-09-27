@@ -16,7 +16,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, RichLog, Rule, Select, Static
 
-import dummy_client
+import clients.dummy as dummy_client
 from protocol.codec import STREAM_LIMIT, decode_event, encode
 from protocol.commands import RequestOrchContext, RequestSnapshot, StartSession
 from protocol.events import (

@@ -1,4 +1,4 @@
-"""Test coverage for runtime/tools/httpx.py - targeting 85%+ coverage."""
+"""Test coverage for runtime/tools/http.py - targeting 85%+ coverage."""
 from __future__ import annotations
 
 import json
@@ -8,8 +8,8 @@ from unittest import mock
 
 import pytest
 
-from runtime.tools import httpx as http_impl
-from runtime.tools.httpx import (
+from runtime.tools import http as http_impl
+from runtime.tools.http import (
     _decode,
     _hostname,
     _ip_blocked,

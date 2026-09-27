@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tools.base import ToolContext, tool
-from runtime.tools.depwhy import dep_why as dep_why_impl
+from runtime.tools.dep_why import dep_why as dep_why_impl
 
 
 @tool(

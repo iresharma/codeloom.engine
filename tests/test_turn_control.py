@@ -265,7 +265,7 @@ def test_added_reuses_stream_id(tmp_path):
 
 
 def test_client_skips_already_streamed_added():
-    import dummy_client
+    import clients.dummy as dummy_client
 
     dummy_client._STREAM_ID = ""
     dummy_client.format_event(ChatMessageDelta(id="m1", channel="text", text="hi"))

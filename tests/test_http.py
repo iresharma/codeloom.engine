@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from runtime.tools import httpx as http_impl
-from runtime.tools.httpx import blocked_host, http_request, openapi_ops
+from runtime.tools import http as http_impl
+from runtime.tools.http import blocked_host, http_request, openapi_ops
 from tools import http as http_tool
 from tools.http import http_request as http_request_tool
 

@@ -80,7 +80,7 @@ def web_fetch(url: str, *, timeout: float = 20.0) -> str:
     hint = github_fetch_hint(url)
     if hint:
         return hint
-    from runtime.tools.httpx import raw_request
+    from runtime.tools.http import raw_request
 
     status, headers, text, err = raw_request(
         "GET",
@@ -161,7 +161,7 @@ def web_search(query: str, *, count: int = 5) -> str:
         )
     count = max(1, min(int(count or 5), 10))
     params = urllib.parse.urlencode({"q": query, "count": str(count)})
-    from runtime.tools.httpx import raw_request
+    from runtime.tools.http import raw_request
 
     status, _headers, text, err = raw_request(
         "GET",

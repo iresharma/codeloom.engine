@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from headless_client import HeadlessError, auto_answer, drive_session, wait_until_idle
+from clients.headless import HeadlessError, auto_answer, drive_session, wait_until_idle
 from llm.provider import LLMResult, Usage
 from protocol.commands import AnswerPrompt
 from protocol.events import (

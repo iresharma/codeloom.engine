@@ -16,7 +16,7 @@ from tests.fakes import FakeApprover
 
 from runtime.mcp.tokens import apply_tokens, load_tokens, save_token, tokens_path
 from runtime.tools.browser import browser_console, browser_network, browser_open, browser_screenshot
-from runtime.tools.depwhy import dep_why
+from runtime.tools.dep_why import dep_why
 from runtime.tools.envinfo import runtime_info
 from runtime.tools.pkg import pkg_info
 from runtime.tools.scan import todo_scan
@@ -162,7 +162,7 @@ def test_runtime_info_no_tools(monkeypatch):
 
 
 # ============================================================================
-# Tests for runtime/tools/depwhy.py
+# Tests for runtime/tools/dep_why.py
 # ============================================================================
 
 def test_dep_why_invalid_ecosystem():
@@ -181,7 +181,7 @@ def test_dep_why_no_name():
 
 def test_dep_why_binary_not_found(monkeypatch):
     """Test dep_why when binary not found."""
-    monkeypatch.setattr("runtime.tools.depwhy.shutil.which", lambda x: None)
+    monkeypatch.setattr("runtime.tools.dep_why.shutil.which", lambda x: None)
     result = dep_why(Path.cwd(), "npm", "lodash")
     assert "error:" in result
     assert "not installed" in result

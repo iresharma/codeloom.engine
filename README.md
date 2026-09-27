@@ -149,7 +149,7 @@ In a second terminal, attach the reference client. It opens a three-panel
 TUI and starts a session on connect:
 
 ```bash
-python dummy_client.py /path/to/your/project
+python -m clients.dummy /path/to/your/project
 ```
 
 Type in the input bar at the bottom:
@@ -865,7 +865,7 @@ refusal. Set `ENGINE_JUDGE_WRITE=advisory` to opt back out under
 
 Every judged decision emits a `JudgementMade` event (`tag`, `subject`,
 `outcome`, `signals`, `enforced`, `latency_ms`) so a blocked or escalated
-action is never an inexplicable refusal — `dummy_client.py` renders it as
+action is never an inexplicable refusal — `clients/dummy.py` renders it as
 `judge <tag> -> <outcome> (advisory|enforced, <n>ms): <subject>`, pins a
 coloured card on the tools panel, and puts the last verdict in the status
 line. F7 filters the protocol log to `JudgementMade` only. The engine
@@ -891,13 +891,13 @@ the piece the plan calls more important than the dispatch anyway: the
 orchestrator's context, so a low-value result gets admitted as one line
 instead of its full transcript.
 
-To exercise the live call sites from `dummy_client.py`:
+To exercise the live call sites from `clients/dummy.py`:
 
 1. Put a real TypeSafe key in `env.sh` as `TYPESAFE_API_KEY` or
    `TYPESAFE_JEV_API_KEY`, and set `ENGINE_JUDGE=calibrated` (or
    `enforcing`; leave the default `advisory` if you only want events).
 2. `python app.py` — confirm the startup line is not `judge: off`.
-3. `python dummy_client.py` and send one of:
+3. `python -m clients.dummy` and send one of:
 
 | Prompt | Call site | What you should see |
 |---|---|---|
@@ -925,7 +925,7 @@ the `judge` marker, skipped automatically when `TYPESAFE_API_KEY` is unset.
 
 ## The reference client
 
-`dummy_client.py` launches a small Textual TUI (`client_tui.py`) that connects
+`clients/dummy.py` launches a small Textual TUI (`clients/tui.py`) that connects
 to the socket, starts a session, and splits the event stream into three
 panels. It is the executable specification of the protocol — worth reading
 before writing your own client.
@@ -973,9 +973,9 @@ before writing your own client.
   events are always pinned as coloured cards on the tools panel.
 
 ```bash
-python dummy_client.py [workspace]
-python dummy_client.py [workspace] --message "the task" --auto
-python dummy_client.py [workspace] --message "the task" --auto --timeout 1800
+python -m clients.dummy [workspace]
+python -m clients.dummy [workspace] --message "the task" --auto
+python -m clients.dummy [workspace] --message "the task" --auto --timeout 1800
 ```
 
 `--message --auto` is the headless driver: it starts a session, submits one user message, auto-answers prompts (exec/confirm `yes`, worktree settle `keep` unless `--settle pr|merge|discard`, MCP auth `no`, turn-cap `continue`), prints formatted events to stdout, and exits when the orchestrator has been idle for a second with no live children. `--timeout` is an optional wall-clock fuse (seconds); `0` or omitted waits until idle. `--auto` without `--message` is an error.
@@ -1090,9 +1090,10 @@ is committed.
 
 ```
 app.py                  entry point: parse args, boot session + server, install signal handlers
-dummy_client.py         reference TUI client (command parser + entry)
-headless_client.py      unattended --message --auto driver
-client_tui.py           Textual 3-panel UI: chat, protocol, tools
+clients/
+  dummy.py              reference client: command parser + entry (python -m clients.dummy)
+  headless.py           unattended --message --auto driver
+  tui.py                Textual 3-panel UI: chat, protocol, tools
 env.sh                  API key and model (gitignored)
 requirements.txt        runtime and test dependencies
 pytest.ini              pythonpath, testpaths, the lsp marker
@@ -1132,8 +1133,8 @@ runtime/
     git.py                git state, log/show/blame/range, tracked paths
     github.py             gh wrappers: PRs, issues, Actions, code search
     pkg.py docs.py osv.py registries, official docs, OSV advisories
-    httpx.py              structured HTTP + OpenAPI list
-    scan.py envinfo.py depwhy.py  TODOs, local versions, lockfile why
+    http.py               structured HTTP + OpenAPI list
+    scan.py envinfo.py dep_why.py  TODOs, local versions, lockfile why
     shell.py              asyncio subprocess executor for run_command
     web.py                HTTP fetch and Brave search
     browser.py            Playwright headless browser (optional)

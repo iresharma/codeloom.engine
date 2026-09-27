@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import urllib.parse
 
-from runtime.tools.httpx import get_json
+from runtime.tools.http import get_json
 
 ECOSYSTEMS = ("pypi", "npm", "crates", "go", "maven", "nuget", "rubygems")
 DESC_CAP = 800

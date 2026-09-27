@@ -1,7 +1,7 @@
 """Simple test to verify pytest works."""
 from __future__ import annotations
 
-from runtime.tools import httpx
+from runtime.tools import http as httpx
 
 
 def test_simple_hostname():

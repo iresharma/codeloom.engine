@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from runtime.tools.httpx import post_json
+from runtime.tools.http import post_json
 
 ECOSYSTEMS = {
     "pypi": "PyPI",

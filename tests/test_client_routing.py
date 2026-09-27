@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from dummy_client import (
+from clients.dummy import (
     command_from_line,
     drain_notes,
     format_command,
@@ -216,7 +216,7 @@ def test_help_and_usage_go_to_notes():
 
 
 def test_format_event_delta_returns_text_without_reprint():
-    import dummy_client
+    import clients.dummy as dummy_client
 
     dummy_client._STREAM_ID = ""
     assert (

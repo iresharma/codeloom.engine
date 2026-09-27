@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from tools.base import ToolContext, tool
 from runtime.tools.approve import require_approval
-from runtime.tools.httpx import SAFE_METHODS, http_request as http_request_impl
-from runtime.tools.httpx import openapi_ops as openapi_ops_impl
+from runtime.tools.http import SAFE_METHODS, http_request as http_request_impl
+from runtime.tools.http import openapi_ops as openapi_ops_impl
 
 
 @tool(

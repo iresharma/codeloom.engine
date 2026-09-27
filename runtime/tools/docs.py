@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import urllib.parse
 
-from runtime.tools.httpx import fetch_text, get_json
+from runtime.tools.http import fetch_text, get_json
 from runtime.tools.pkg import pkg_info
 from runtime.tools.web import web_fetch
 

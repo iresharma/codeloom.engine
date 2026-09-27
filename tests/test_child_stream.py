@@ -5,7 +5,7 @@ import asyncio
 from agents.hooks import AgentHooks
 from agents.profiles.ask import PROFILE
 from agents.subagent import Subagent
-from dummy_client import format_event, route_event
+from clients.dummy import format_event, route_event
 from llm.provider import LLMResult, ToolCall
 from protocol.events import (
     AgentFinished,
@@ -326,7 +326,7 @@ def test_client_routes_and_formats_child_chat():
     assert route_event(delta) == "agents"
     assert route_event(added) == "agents"
     assert format_event(started) == "agent aaaaaaaa streaming"
-    import dummy_client
+    import clients.dummy as dummy_client
 
     dummy_client._STREAM_ID = ""
     assert format_event(added) == "assistant [aaaaaaaa]: child"

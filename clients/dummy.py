@@ -539,7 +539,7 @@ def main() -> None:
         sys.exit(1)
 
     if args.message:
-        from headless_client import HeadlessError, run_once
+        from clients.headless import HeadlessError, run_once
 
         try:
             asyncio.run(
@@ -556,7 +556,7 @@ def main() -> None:
             sys.exit(1)
         return
 
-    from client_tui import DummyClientApp
+    from clients.tui import DummyClientApp
 
     DummyClientApp(workspace=workspace, socket_path=socket_path).run()
 

@@ -87,7 +87,7 @@ class JudgementMade:
     latency_ms: int
 ```
 
-Emit via `session._emit()`. Old clients fall back to raw JSON, so `dummy_client.py` needs only a small formatter. This event is what makes the whole system debuggable — without it, blocked actions look like inexplicable refusals.
+Emit via `session._emit()`. Old clients fall back to raw JSON, so `clients/dummy.py` needs only a small formatter. This event is what makes the whole system debuggable — without it, blocked actions look like inexplicable refusals.
 
 ### Test stub
 
@@ -595,7 +595,7 @@ Each phase ships behind `ENGINE_JUDGE=advisory` first. Promote to `enforcing` pe
 
 ### Observability
 
-Every call site logs `tag`, latency, token usage, cache hit, verdict summary and whether it was enforced. Emit `JudgementMade` for anything that changed behaviour. Add a `judgements` table to `.engine/session.db` mirroring the `edits` journal — without a persisted record, threshold tuning is guesswork. Give `dummy_client.py` a formatter for `JudgementMade`; it is the executable specification of the protocol and should show the new event legibly.
+Every call site logs `tag`, latency, token usage, cache hit, verdict summary and whether it was enforced. Emit `JudgementMade` for anything that changed behaviour. Add a `judgements` table to `.engine/session.db` mirroring the `edits` journal — without a persisted record, threshold tuning is guesswork. Give `clients/dummy.py` a formatter for `JudgementMade`; it is the executable specification of the protocol and should show the new event legibly.
 
 ### Budgets
 

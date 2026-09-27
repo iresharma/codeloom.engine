@@ -27,7 +27,7 @@ def test_github_url_does_not_fetch(monkeypatch):
     def boom(*_a, **_k):
         raise AssertionError("should not fetch github.com HTML")
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", boom)
+    monkeypatch.setattr("runtime.tools.http.raw_request", boom)
     text = web_fetch("https://github.com/acme/engine")
     assert text.startswith("error:")
     assert "github_repo" in text
@@ -94,7 +94,7 @@ def test_web_fetch_html_markdown(monkeypatch):
     def fake_request(method, url, **kwargs):
         return 200, {"Content-Type": "text/html"}, html, ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", fake_request)
+    monkeypatch.setattr("runtime.tools.http.raw_request", fake_request)
     text = web_fetch("https://example.com/docs")
     assert "title: Hello" in text
     assert "url: https://example.com/docs" in text
@@ -114,7 +114,7 @@ def test_web_fetch_spa_hint(monkeypatch):
     def fake_request(method, url, **kwargs):
         return 200, {"Content-Type": "text/html; charset=utf-8"}, html, ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", fake_request)
+    monkeypatch.setattr("runtime.tools.http.raw_request", fake_request)
     text = web_fetch("https://example.com/app")
     assert text.startswith("error:")
     assert "client-rendered" in text
@@ -127,7 +127,7 @@ def test_web_fetch_small_html_is_not_spa(monkeypatch):
     def fake_request(method, url, **kwargs):
         return 200, {"Content-Type": "text/html"}, html, ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", fake_request)
+    monkeypatch.setattr("runtime.tools.http.raw_request", fake_request)
     text = web_fetch("https://example.com/tiny")
     assert not text.startswith("error:")
     assert "hi" in text
@@ -142,7 +142,7 @@ def test_web_fetch_json_and_plain(monkeypatch):
             return 200, {"Content-Type": "application/json"}, '{"ok": true}', ""
         return 200, {"Content-Type": "text/plain"}, "hello world", ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", fake_request)
+    monkeypatch.setattr("runtime.tools.http.raw_request", fake_request)
     assert '{"ok": true}' in web_fetch("https://example.com/x.json")
     assert web_fetch("https://example.com/note.txt") == "hello world"
     headers = (calls[0].get("headers") or {})
@@ -152,7 +152,7 @@ def test_web_fetch_json_and_plain(monkeypatch):
 
 def test_web_fetch_http_error(monkeypatch):
     monkeypatch.setattr(
-        "runtime.tools.httpx.raw_request",
+        "runtime.tools.http.raw_request",
         lambda *a, **k: (404, {}, "missing", ""),
     )
     assert web_fetch("https://example.com/gone").startswith("error: HTTP 404")
@@ -171,7 +171,7 @@ def test_web_fetch_markdown_cap(monkeypatch):
     def fake_request(method, url, **kwargs):
         return 200, {"Content-Type": "text/plain"}, body, ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", fake_request)
+    monkeypatch.setattr("runtime.tools.http.raw_request", fake_request)
     text = web_fetch("https://example.com/big.txt")
     assert text.endswith("...[truncated]")
     assert len(text) < MARKDOWN_CAP + 30
@@ -195,7 +195,7 @@ def test_web_search_formats_results(monkeypatch):
     def fake_request(method, url, **kwargs):
         return 200, {"Content-Type": "application/json"}, json.dumps(payload), ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", fake_request)
+    monkeypatch.setattr("runtime.tools.http.raw_request", fake_request)
     text = web_search("python asyncio")
     assert "[1] Asyncio docs" in text
     assert "url: https://docs.python.org/3/library/asyncio.html" in text
@@ -209,13 +209,13 @@ def test_web_search_empty_and_http_error(monkeypatch):
     def empty(method, url, **kwargs):
         return 200, {}, json.dumps({"web": {"results": []}}), ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", empty)
+    monkeypatch.setattr("runtime.tools.http.raw_request", empty)
     assert web_search("nothing") == "(no results)"
 
     def boom(method, url, **kwargs):
         return 401, {}, json.dumps({"message": "invalid key"}), ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", boom)
+    monkeypatch.setattr("runtime.tools.http.raw_request", boom)
     text = web_search("python")
     assert text.startswith("error: HTTP 401")
     assert "invalid key" in text
@@ -227,17 +227,17 @@ def test_web_search_empty_or_non_object_body(monkeypatch):
     def blank(method, url, **kwargs):
         return 200, {}, "", ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", blank)
+    monkeypatch.setattr("runtime.tools.http.raw_request", blank)
     assert web_search("nothing") == "(no results)"
 
     def null_body(method, url, **kwargs):
         return 200, {}, "null", ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", null_body)
+    monkeypatch.setattr("runtime.tools.http.raw_request", null_body)
     assert web_search("nothing") == "(no results)"
 
     def array_body(method, url, **kwargs):
         return 200, {}, "[]", ""
 
-    monkeypatch.setattr("runtime.tools.httpx.raw_request", array_body)
+    monkeypatch.setattr("runtime.tools.http.raw_request", array_body)
     assert web_search("nothing") == "(no results)"

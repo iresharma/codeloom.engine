@@ -96,7 +96,7 @@ already knows how to route it to `rename_session` (via `HANDLERS`).
   so the type still exists for lookup/round-trip/handler dispatch.
 - Naming: the class name **is** the wire `"type"` value and doubles as the
   registry key. Don't rename a shipped command lightly — it's part of the
-  client/server contract (`dummy_client.py` and any real client match on these
+  client/server contract (`clients/dummy.py` and any real client match on these
   names).
 
 Round-trip test convention (see `tests/test_protocol.py`):
@@ -225,7 +225,7 @@ async def run():
 
 See `tests/test_protocol.py` for round-trip tests and
 `tests/test_turn_control.py`/`tests/test_concurrency.py` for handler-level
-tests that drive a real `EngineSession` end to end. `dummy_client.py` is also a
+tests that drive a real `EngineSession` end to end. `clients/dummy.py` is also a
 convenient manual smoke-test harness — it maps lowercase command names to
 classes via `COMMANDS` and can send any registered command from the TUI input.
 
