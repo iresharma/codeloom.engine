@@ -229,7 +229,6 @@ async def test_settle_pr_body_covers_both_children(tmp_path, monkeypatch):
     record = tmp_path / "gh_args.json"
     _gh_shim(tmp_path / "bin", record)
     monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.delenv("ENGINE_METRICS_INSTANCE", raising=False)
 
     orch = _orch(repo)
     dest, branch, err = add_agent_worktree(repo, "a1", "coder")
@@ -292,7 +291,6 @@ async def test_settle_pr_appends_files_changed_when_summary_omits_one(
     record = tmp_path / "gh_args.json"
     _gh_shim(tmp_path / "bin", record)
     monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.delenv("ENGINE_METRICS_INSTANCE", raising=False)
 
     orch = _orch(repo)
     dest, branch, err = add_agent_worktree(repo, "a2", "coder")
@@ -622,7 +620,6 @@ def _settled_repo(tmp_path, monkeypatch):
     record = tmp_path / "gh.json"
     _gh_shim(tmp_path / "bin", record)
     monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.delenv("ENGINE_METRICS_INSTANCE", raising=False)
     return repo, record
 
 

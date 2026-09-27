@@ -1,9 +1,8 @@
 """Optional full-fidelity JSONL trace of judge and tool calls.
 
-Off by default (`ENGINE_TRACE_CALLS=1` to enable, wired up by
-`scripts/bench_ab.py` for both sides of an A/B run). Written for offline
-analysis (`scripts/bench_flow.py`) -- the engine itself never reads this
-file back, so a write failure here must never affect a run.
+Off by default (`ENGINE_TRACE_CALLS=1` to enable). Written for offline
+debugging -- the engine itself never reads this file back, so a write
+failure here must never affect a run.
 """
 
 from __future__ import annotations

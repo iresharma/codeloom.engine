@@ -438,10 +438,6 @@ def apply_worktree(
             return False, (pushed.stderr or pushed.stdout or "git push failed").strip(), ""
         pr_title = title or message
         pr_body = body or message
-        instance = (os.environ.get("ENGINE_METRICS_INSTANCE") or "").strip()
-        if instance:
-            pr_title = f"[{instance}] {pr_title}"
-            pr_body = f"A/B side: {instance}\n\n{pr_body}"
         created = _exec(
             workspace,
             [
