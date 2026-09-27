@@ -924,11 +924,12 @@ class Orchestrator(AgentLoop):
         # count as the repo already having a suite.
         has_tests = await asyncio.to_thread(repo_has_tests, self._ctx.workspace)
         tasks = {
-            "tester": _tester_task(
-                user_task, coder_task, files, result.test_plan, has_tests=has_tests
-            ),
             "reviewer": _reviewer_task(user_task, coder_task, files, result.reasoning),
         }
+        if not _docs_only(result.files_touched):
+            tasks["tester"] = _tester_task(
+                user_task, coder_task, files, result.test_plan, has_tests=has_tests
+            )
         for name, text in tasks.items():
             if name not in self._profiles.names():
                 continue
@@ -1149,6 +1150,22 @@ class Orchestrator(AgentLoop):
 _SURVEY_ONCE = frozenset({"ask", "researcher"})
 _VERIFY_AFTER = frozenset({"coder"})
 _VERIFIERS = frozenset({"tester", "reviewer"})
+_DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
+_DOC_NAMES = frozenset({"license", "licence", "changelog", "authors", "copying"})
+
+
+def _docs_only(paths: list[str]) -> bool:
+    if not paths:
+        return False
+    for path in paths:
+        name = path.rsplit("/", 1)[-1].lower()
+        stem = name.rsplit(".", 1)[0]
+        if name.endswith(_DOC_SUFFIXES) or stem in _DOC_NAMES:
+            continue
+        return False
+    return True
+
+
 _TASK_CLIP = 6000
 # Reviewer sees this string on every turn. The verdict comes from git_diff,
 # not from a second copy of the coder brief.

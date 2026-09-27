@@ -649,7 +649,11 @@ class AgentLoop:
             return False
         enforced = site_mode == "enforcing"
         action = classify_loop(verdict)
-        extend = near_ceiling and should_extend_turns(verdict)
+        extend = (
+            near_ceiling
+            and should_extend_turns(verdict)
+            and self.profile != "tester"
+        )
         if action != "continue" or extend:
             outcome = action if action != "continue" else "extend"
             if self._ctx.on_judgement is not None:
