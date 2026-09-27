@@ -10,10 +10,8 @@ from __future__ import annotations
 import json
 import queue
 import threading
-from io import BytesIO
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch, call
-from unittest.mock import mock_open
+from unittest.mock import MagicMock, patch
 
 import pytest
 

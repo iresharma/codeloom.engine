@@ -14,6 +14,8 @@ from runtime.skills.catalog import SkillCatalog, rank_descriptions, render_catal
 from runtime.skills.discover import discover_skills, read_skill_file
 from tests.fakes import FakeProvider
 from tools.registry import discover_tools
+from unittest.mock import Mock
+from tools.skills import activate_skill, read_skill, _siblings
 
 
 def _write_skill(root: Path, name: str, description: str, body: str, *, disable: bool = False):
@@ -210,3 +212,55 @@ def test_skill_activated_event(tmp_path):
         await session.aclose()
 
     asyncio.run(run())
+
+
+# ============================================================================
+# Tests for tools/skills.py
+# ============================================================================
+
+def test_activate_skill_unavailable():
+    """Test activate_skill when skills unavailable."""
+    ctx = Mock()
+    ctx.activate_skill = None
+    ctx.skills = None
+    
+    result = activate_skill(ctx, "anyskill")
+    assert "not available" in result
+
+
+def test_activate_skill_unknown():
+    """Test activate_skill with unknown skill."""
+    ctx = Mock()
+    ctx.activate_skill = None
+    ctx.skills = {}
+    
+    result = activate_skill(ctx, "unknown")
+    assert "unknown skill" in result
+
+
+def test_read_skill_unavailable():
+    """Test read_skill when skills unavailable."""
+    ctx = Mock()
+    ctx.skills = None
+    
+    result = read_skill(ctx, "anyskill", "file.txt")
+    assert "not available" in result
+
+
+def test_read_skill_unknown():
+    """Test read_skill with unknown skill."""
+    ctx = Mock()
+    ctx.skills = {}
+    
+    result = read_skill(ctx, "unknown", "file.txt")
+    assert "unknown skill" in result
+
+
+def test_siblings_error():
+    """Test _siblings with error."""
+    skill = Mock()
+    skill.directory = Mock()
+    skill.directory.iterdir = Mock(side_effect=OSError("permission denied"))
+    
+    result = _siblings(skill)
+    assert result == []

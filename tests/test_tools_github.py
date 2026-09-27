@@ -1,12 +1,7 @@
-"""Test coverage for tools/github.py - targeting 90%+ coverage."""
+"""Tests."""
 from __future__ import annotations
-
 import asyncio
-import json
 from types import SimpleNamespace
-
-import pytest
-
 from runtime.tools import github as gh_impl
 from tools import github as github_tools
 from tools.github import (
@@ -28,6 +23,7 @@ from tools.github import (
     github_search_code,
     github_tree,
 )
+
 
 # Import the async tool functions
 gh_pr_comment = github_tools.gh_pr_comment

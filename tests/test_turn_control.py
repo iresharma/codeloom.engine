@@ -4,7 +4,7 @@ import asyncio
 import time
 
 from llm.provider import LLMResult, ToolCall
-from protocol.commands import AbortAgent, StartSession, SubmitUserMessage
+from protocol.commands import AbortAgent, StartSession
 from protocol.events import (
     AgentStateChanged,
     ChatMessageAdded,

@@ -1,9 +1,6 @@
-"""Comprehensive tests for runtime/tools/sitter.py to raise coverage from 41% to 80%+"""
+"""Tests."""
 from __future__ import annotations
-
-from pathlib import Path
 import pytest
-
 from runtime.tools.sitter import (
     language_for,
     parse_bytes,
@@ -18,9 +15,6 @@ from runtime.tools.sitter import (
     get_node_at,
     query_tree,
     parse_file,
-    PRESETS,
-    EXTENSION_TO_LANG,
-    SYMBOL_TYPES,
 )
 
 

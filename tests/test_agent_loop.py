@@ -1,11 +1,6 @@
-"""Coverage for agents/agent_loop.py"""
+"""Tests."""
 from __future__ import annotations
-
-from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
-
 from agents.agent_loop import (
     AgentLoop,
     DEFAULT_SYSTEM,

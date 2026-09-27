@@ -8,7 +8,7 @@ requiring a live language server or the @pytest.mark.lsp marker.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 try:
@@ -18,7 +18,6 @@ except ImportError:
     has_asyncio = False
 
 from runtime.store.edits import ensure_schema
-from runtime.tools.fileid import read_source
 from runtime.tools.tracker import FileTracker
 from tools.base import ToolContext
 from tools.lsp import (

@@ -1,18 +1,11 @@
-"""Comprehensive tests for runtime/tools/search.py to raise coverage from 16% to 85%+"""
+"""Tests."""
 from __future__ import annotations
-
 import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
-
 import pytest
-
-from runtime.tools import search as search_impl
 from runtime.tools.search import (
-    MAX_MATCHES,
-    DEFAULT_MAX_MATCHES,
     search,
     _rewrite_path,
 )

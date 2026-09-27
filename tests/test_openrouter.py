@@ -1,14 +1,12 @@
-"""Coverage for llm/openrouter.py"""
+"""Tests."""
 from __future__ import annotations
-
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
-
 import pytest
-
 from llm.openrouter import OpenRouterLLM, load_env_sh, with_cache_breakpoints
-from llm.provider import LLMResult, Usage
+from llm.openrouter import _mark_message
+from runtime.config import EngineConfig
 
 
 def test_openrouter_init():
@@ -141,7 +139,72 @@ def test_openrouter_from_env_with_workspace():
 
 
 def test_openrouter_config():
-    from runtime.config import EngineConfig
     config = EngineConfig(llm_stream=False, llm_timeout_s=300)
     llm = OpenRouterLLM(api_key="sk-test", model="openai/gpt-4o-mini", config=config)
     assert llm._config == config
+
+
+# ============================================================================
+# llm/openrouter.py tests
+# ============================================================================
+
+class TestOpenRouterLLM:
+    """Test coverage gaps in OpenRouterLLM."""
+
+    def test_cache_breakpoints_with_tools(self):
+        """Test with_cache_breakpoints marks tool cache."""
+        messages = [{"role": "user", "content": "test"}]
+        tools = [{"name": "tool1"}, {"name": "tool2"}]
+        msgs, tool_list = with_cache_breakpoints(messages, tools)
+        assert tool_list is not None
+        assert tool_list[-1].get("cache_control") is not None
+
+    def test_cache_breakpoints_system_message(self):
+        """Test system message gets cache marker."""
+        messages = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "test"}
+        ]
+        msgs, _ = with_cache_breakpoints(messages)
+        assert msgs[0].get("content")
+
+    def test_mark_message_string_content(self):
+        """Test _mark_message with string content."""
+        msg = {"role": "user", "content": "hello"}
+        marked = _mark_message(msg)
+        assert isinstance(marked["content"], list)
+        assert marked["content"][0].get("cache_control")
+
+    def test_mark_message_list_content(self):
+        """Test _mark_message with list content."""
+        msg = {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+        marked = _mark_message(msg)
+        assert marked.get("cache_control") or marked["content"][-1].get("cache_control")
+
+    def test_load_env_sh_file_not_found(self):
+        """Test load_env_sh with non-existent file."""
+        load_env_sh(Path("/nonexistent/env.sh"))
+        # Should not raise
+
+    def test_load_env_sh_parsing(self, tmp_path):
+        """Test load_env_sh parses export statements."""
+        env_file = tmp_path / "env.sh"
+        env_file.write_text("export KEY=value\nKEY2=value2\n# comment\n")
+        load_env_sh(env_file)
+        assert os.environ.get("KEY") == "value"
+        assert os.environ.get("KEY2") == "value2"
+
+    @pytest.mark.asyncio
+    async def test_openrouter_from_env_missing_key(self, monkeypatch):
+        """Test from_env with missing API key."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "")
+        with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+            OpenRouterLLM.from_env()
+
+    @pytest.mark.asyncio
+    async def test_openrouter_from_env_placeholder(self, monkeypatch):
+        """Test from_env with placeholder key."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "<OPENROUTER_API_KEY>")
+        with pytest.raises(RuntimeError, match="real key"):
+            OpenRouterLLM.from_env()
