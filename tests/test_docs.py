@@ -134,7 +134,7 @@ def test_tldr_success():
 def test_tldr_sanitizes_topic():
     with patch("runtime.tools.docs.fetch_text") as mock_fetch:
         mock_fetch.return_value = "# git\nVersion control"
-        result = tldr("GiT@#$%")
+        tldr("GiT@#$%")
         assert mock_fetch.called
 
 
@@ -177,14 +177,14 @@ def test_mdn_error():
 def test_go_with_slash():
     with patch("runtime.tools.docs.web_fetch") as mock_web:
         mock_web.return_value = "Go package docs"
-        result = _go("github.com/user/repo")
+        _go("github.com/user/repo")
         assert mock_web.called
 
 
 def test_go_without_slash():
     with patch("runtime.tools.docs.web_fetch") as mock_web:
         mock_web.return_value = "Go package docs"
-        result = _go("fmt")
+        _go("fmt")
         assert mock_web.called
 
 

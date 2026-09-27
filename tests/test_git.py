@@ -238,5 +238,5 @@ class TestGitTools:
         )
         
         # Blame with end_line < start_line
-        result = git_blame(tmp_path, "file.txt", start_line=2, end_line=1)
+        git_blame(tmp_path, "file.txt", start_line=2, end_line=1)
         # Should still work or return error

@@ -51,7 +51,7 @@ class TestPrList:
             return "ok"
         
         monkeypatch.setattr(gh_impl, "pr_list", fake_pr_list)
-        result = gh_pr_list(ctx, state="closed", limit=50, repo="owner/repo")
+        gh_pr_list(ctx, state="closed", limit=50, repo="owner/repo")
         assert seen["state"] == "closed"
         assert seen["limit"] == 50
         assert seen["repo"] == "owner/repo"
@@ -134,7 +134,7 @@ class TestIssueList:
             return "issues"
         
         monkeypatch.setattr(gh_impl, "issue_list", fake_issue_list)
-        result = gh_issue_list(ctx, state="closed")
+        gh_issue_list(ctx, state="closed")
         assert seen["state"] == "closed"
 
 
@@ -216,7 +216,7 @@ class TestReleaseView:
             return "release"
         
         monkeypatch.setattr(gh_impl, "release_view", fake_release_view)
-        result = gh_release_view(ctx, tag="v1.0")
+        gh_release_view(ctx, tag="v1.0")
         assert seen["tag"] == "v1.0"
 
 
@@ -242,7 +242,7 @@ class TestCompare:
             return "comparison"
         
         monkeypatch.setattr(gh_impl, "compare", fake_compare)
-        result = github_compare(ctx, "main", "feature", repo="owner/repo")
+        github_compare(ctx, "main", "feature", repo="owner/repo")
         assert seen["repo"] == "owner/repo"
 
 
@@ -268,7 +268,7 @@ class TestSearchCode:
             return "results"
         
         monkeypatch.setattr(gh_impl, "search_code", fake_search)
-        result = github_search_code(ctx, "query", this_repo=True)
+        github_search_code(ctx, "query", this_repo=True)
         assert seen["this_repo"] is True
 
 
@@ -300,7 +300,7 @@ class TestGithubFile:
             return "content"
         
         monkeypatch.setattr(gh_impl, "github_file", fake_github_file)
-        result = github_file(
+        github_file(
             ctx,
             "src/app.py",
             repo="owner/repo",
@@ -337,7 +337,7 @@ class TestGithubRepo:
             return "repo info"
         
         monkeypatch.setattr(gh_impl, "github_repo", fake_github_repo)
-        result = github_repo(ctx, repo="owner/repo")
+        github_repo(ctx, repo="owner/repo")
         assert seen["repo"] == "owner/repo"
 
 
@@ -363,7 +363,7 @@ class TestGithubTree:
             return "tree"
         
         monkeypatch.setattr(gh_impl, "github_tree", fake_github_tree)
-        result = github_tree(ctx, repo="owner/repo", path="src", ref="main", recursive=True)
+        github_tree(ctx, repo="owner/repo", path="src", ref="main", recursive=True)
         assert seen["recursive"] is True
 
     def test_github_tree_all_params(self, ctx, monkeypatch):
@@ -380,7 +380,7 @@ class TestGithubTree:
             return "tree"
         
         monkeypatch.setattr(gh_impl, "github_tree", fake_github_tree)
-        result = github_tree(
+        github_tree(
             ctx,
             repo="owner/repo",
             path="src",
@@ -477,7 +477,7 @@ class TestGhIssueCreate:
         async def run():
             return await gh_issue_create(ctx, "Title", body="Description")
         
-        result = asyncio.run(run())
+        asyncio.run(run())
         assert seen["body"] == "Description"
 
 
@@ -538,7 +538,7 @@ class TestGhPrCreate:
                 repo="owner/repo"
             )
         
-        result = asyncio.run(run())
+        asyncio.run(run())
         assert seen["title"] == "Add feature"
         assert seen["body"] == "Adds feature X"
         assert seen["base"] == "develop"

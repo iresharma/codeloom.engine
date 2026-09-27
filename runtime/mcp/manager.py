@@ -265,7 +265,6 @@ class McpManager:
         self.servers.clear()
 
     def clear_cooling(self) -> None:
-        now = self._clock()
         for state in self.servers.values():
             state.cool_until = 0.0
             if state.status == "error" and "cooling" in state.error:

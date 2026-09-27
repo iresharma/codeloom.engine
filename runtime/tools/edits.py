@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Write funnel. _prepare/_commit/_apply_sync must never await.
 
 On a single event loop any stretch without await is atomic. Adding an await
 inside those functions silently reintroduces races with no visible symptom
 until a file is corrupted.
 """
+
+from __future__ import annotations
 
 import asyncio
 import difflib

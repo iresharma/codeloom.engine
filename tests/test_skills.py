@@ -87,7 +87,7 @@ def test_disable_model_invocation_catalog(tmp_path):
 
 
 def test_catalog_names_and_sticky():
-    skills = [
+    [
         type("S", (), {"name": f"s{i}", "description": f"topic{i} extra", "auto": True})()
         for i in range(20)
     ]

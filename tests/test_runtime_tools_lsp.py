@@ -117,7 +117,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_read_message_empty(self, mock_popen):
         """Test reading empty message returns None."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         stream = MagicMock()
@@ -128,12 +128,12 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_read_message_with_content(self, mock_popen):
         """Test reading a complete LSP message."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
 
         body = json.dumps({"id": 1, "result": "ok"}).encode("utf-8")
-        header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+        f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
 
         stream = MagicMock()
         stream.readline.side_effect = [
@@ -172,7 +172,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_request_success(self, mock_popen):
         """Test LSP request method."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
 
@@ -187,7 +187,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_request_timeout(self, mock_popen):
         """Test LSP request times out."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
 
@@ -197,7 +197,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_request_not_alive(self, mock_popen):
         """Test request fails if client not alive."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         client._alive = False
@@ -208,7 +208,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_request_error_response(self, mock_popen):
         """Test request with error response."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
 
@@ -244,7 +244,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_get_notification(self, mock_popen):
         """Test get_notification method."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         client._notifications.put({"method": "test", "params": {}})
@@ -255,7 +255,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_get_notification_timeout(self, mock_popen):
         """Test get_notification times out."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         notif = client.get_notification(timeout=0.01)
@@ -264,7 +264,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_shutdown(self, mock_popen):
         """Test shutdown method."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
 
@@ -281,7 +281,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_shutdown_already_not_alive(self, mock_popen):
         """Test shutdown when already not alive."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         client._alive = False
@@ -290,7 +290,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_reader_loop_processes_responses(self, mock_popen):
         """Test reader loop processes response messages."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         # Simulate a response being placed in pending queue by reader loop
@@ -304,7 +304,7 @@ class TestLSPClient:
     @patch("runtime.tools.lsp.subprocess.Popen")
     def test_lspclient_reader_loop_processes_notifications(self, mock_popen):
         """Test reader loop processes notification messages."""
-        mock_proc = _mock_proc(mock_popen)
+        _mock_proc(mock_popen)
 
         client = LSPClient(["test"], cwd="/test")
         # Simulate notification being placed in queue by reader loop

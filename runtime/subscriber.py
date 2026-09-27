@@ -3,13 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import fields
-from typing import Any
 
 from protocol.events import (
     EVENTS,
     AgentFinished,
     AgentStarted,
-    AgentStateChanged,
     AgentsUpdated,
     OrchContext,
     McpAuthRequired,

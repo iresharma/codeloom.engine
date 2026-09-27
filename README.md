@@ -107,7 +107,7 @@ git clone <your-remote> engine
 cd engine
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt       # or requirements-dev.txt for tests and lint
 ```
 
 ### Configure
@@ -1081,8 +1081,8 @@ without a package fetch, keeping the suite fast and hermetic. Everything else
 runs offline with no external binaries — `test_concurrency.py` uses a `FakeLsp`
 stub rather than a real server.
 
-Linting has been run with ruff 0.16.5 using its defaults; no configuration file
-is committed.
+Lint with `ruff check .`; the rule set lives in `pyproject.toml` and CI runs it
+before the tests.
 
 ---
 
@@ -1095,7 +1095,9 @@ clients/
   headless.py           unattended --message --auto driver
   tui.py                Textual 3-panel UI: chat, protocol, tools
 env.sh                  API key and model (gitignored)
-requirements.txt        runtime and test dependencies
+requirements.txt        runtime dependencies
+requirements-dev.txt    test and lint dependencies
+pyproject.toml          ruff configuration
 pytest.ini              pythonpath, testpaths, the lsp marker
 
 protocol/               the wire contract — no engine logic

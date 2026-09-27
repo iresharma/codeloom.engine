@@ -41,7 +41,6 @@ from protocol.events import (
     McpAuthRequired,
     MemoryUpdated,
     McpServersUpdated,
-    PathChanged,
     SessionEnded,
     SkillActivated,
     SkillCatalogUpdated,
@@ -59,14 +58,13 @@ from protocol.snapshot import (
     ChatMessage,
     EngineSnapshot,
     GitState,
-    Stats,
 )
 from runtime.commands import HANDLERS
 from runtime.config import EngineConfig
 from runtime.metrics import EngineMetrics
 from runtime.language import LanguageInfo
 from runtime.language import detect as detect_language
-from runtime.prompts import PromptBroker, PromptTimeout
+from runtime.prompts import PromptBroker
 from runtime.store import SessionState
 from runtime.store.sqlite import init as init_store
 from runtime.store.sqlite import save as save_snapshot
@@ -82,6 +80,7 @@ from runtime.mcp.tokens import apply_tokens, load_tokens, save_token
 from runtime.skills.catalog import SkillCatalog
 from runtime.skills.discover import discover_skills
 from runtime.tools.tracker import FileTracker
+from tools.base import ToolContext
 from tools.registry import discover_tools
 
 _INBOX_REPORT_PREFIXES = ("[agent ", "[worktree ")
@@ -1297,8 +1296,6 @@ class EngineSession:
         )
 
     def tool_context(self) -> ToolContext:
-        from tools.base import ToolContext
-
         return ToolContext(
             workspace=self._workspace,
             language=self.language,

@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 try:
-    import pytest_asyncio
+    import pytest_asyncio  # noqa: F401
     has_asyncio = True
 except ImportError:
     has_asyncio = False

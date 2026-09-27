@@ -240,7 +240,7 @@ class TestRewritePath:
     def test_rewrite_path_unresolvable(self, tmp_path, monkeypatch):
         """Unresolvable paths return None."""
         # Create a line with a path-like string that will fail to resolve
-        line = f"/nonexistent/path/file.py:1:match"
+        line = "/nonexistent/path/file.py:1:match"
         result = _rewrite_path(tmp_path, line)
         # Should be None since path is outside workspace
         assert result is None

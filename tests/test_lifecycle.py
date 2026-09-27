@@ -570,7 +570,7 @@ class TestLifecycleCommands:
         cmd = SubmitUserMessage(text="hello")
         # _require_session will return False without _state
         # This tests the early return path
-        result = submit_user_message(session, cmd)
+        submit_user_message(session, cmd)
         # Should return early
 
     def test_request_context_no_session(self, tmp_path):
@@ -578,5 +578,5 @@ class TestLifecycleCommands:
         session = EngineSession(tmp_path, tmp_path / "db.sqlite")
         cmd = RequestContext()
         # _require_session will return False without _state
-        result = request_context(session, cmd)
+        request_context(session, cmd)
         # Should return early

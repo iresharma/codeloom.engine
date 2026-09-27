@@ -1,0 +1,7 @@
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+# pyflakes plus the syntax/statement pycodestyle checks; widen deliberately.
+select = ["E4", "E7", "E9", "F"]

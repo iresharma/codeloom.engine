@@ -318,7 +318,7 @@ class TestInsertAfterImportsInText:
         """Insert preserves proper newlines."""
         src = "import os\n\ndef foo():\n    pass\n"
         result = insert_after_imports_in_text("a.py", src, "import sys")
-        lines = result.split("\n")
+        result.split("\n")
         assert "import os" in result
         assert "import sys" in result
 

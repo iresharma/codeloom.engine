@@ -327,7 +327,7 @@ class TestRawRequest:
             )
             return exc
         
-        exc = urllib.error.HTTPError(
+        urllib.error.HTTPError(
             "https://example.com", 500, "Server Error", {}, BytesIO(b"error body")
         )
         monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)

@@ -750,7 +750,7 @@ async def test_mcp_manager_callbacks(tmp_path):
 
 
 async def test_mcp_manager_default_connect(tmp_path):
-    with patch("runtime.mcp.manager.connect_stdio") as mock_connect:
+    with patch("runtime.mcp.manager.connect_stdio"):
         manager = McpManager(tmp_path)
         # _default_connect should be called if connect not provided
         assert manager._connect is not None

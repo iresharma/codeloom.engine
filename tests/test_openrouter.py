@@ -69,7 +69,7 @@ async def test_openrouter_complete_stream():
         mock_stream.__anext__ = async_iter_chunks().__anext__
         mock_client.chat.send_async.return_value = mock_stream
         
-        llm = OpenRouterLLM(api_key="sk-test", model="openai/gpt-4o-mini")
+        OpenRouterLLM(api_key="sk-test", model="openai/gpt-4o-mini")
         
         # This will actually fail at stream parsing, but tests the client setup
         # For now just test the init
@@ -88,7 +88,7 @@ async def test_openrouter_complete_no_stream():
         )
         mock_client.chat.send_async = AsyncMock(return_value=mock_response)
         
-        llm = OpenRouterLLM(api_key="sk-test", model="openai/gpt-4o-mini")
+        OpenRouterLLM(api_key="sk-test", model="openai/gpt-4o-mini")
         # Test would require full mock setup
 
 

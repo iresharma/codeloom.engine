@@ -12,7 +12,6 @@ from protocol.snapshot import (
     McpServerRow,
     MemoryDecision,
     MemoryFileNote,
-    PendingPrompt,
     SessionSummary,
     SkillRow,
     Stats,

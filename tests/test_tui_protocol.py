@@ -104,7 +104,7 @@ def test_agent_transcript_replay(tmp_path):
         assert agent_id
         await session.handle(RequestAgentTranscript(agent_id=agent_id))
         events = _queued(queue)
-        added = [
+        [
             item
             for item in events
             if isinstance(item, ChatHistoryAdded) and item.agent_id == agent_id

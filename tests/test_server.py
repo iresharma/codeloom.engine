@@ -274,7 +274,7 @@ async def test_engine_server_read_commands_invalid(tmp_path):
     server = EngineServer(session, tmp_path / "test.sock")
     
     reader = AsyncMock()
-    writer = AsyncMock()
+    AsyncMock()
     
     # Invalid JSON
     reader.readline = AsyncMock(side_effect=[b"invalid json\n", b""])
@@ -297,7 +297,7 @@ async def test_engine_server_write_events(tmp_path):
     session = EngineSession(tmp_path, db)
     await session.start()
     
-    server = EngineServer(session, tmp_path / "test.sock")
+    EngineServer(session, tmp_path / "test.sock")
     writer = AsyncMock()
     
     # Create a queue with one event
@@ -308,7 +308,7 @@ async def test_engine_server_write_events(tmp_path):
     # Create write task that will process one event
     async def write_once():
         # Get one event and write it
-        event = await queue.get()
+        await queue.get()
         payload = b"test_payload"
         writer.write(payload)
         await writer.drain()
