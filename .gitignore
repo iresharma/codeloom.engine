@@ -6,3 +6,8 @@ htmlcov/
 __pycache__/
 *.py[cod]
 tmp/*
+
+# PyInstaller build artifacts (see scripts/build_binary.sh, docs/packaging.md)
+/build/
+/dist/
+*.spec

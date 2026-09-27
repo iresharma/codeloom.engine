@@ -3,6 +3,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
+import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +13,11 @@ from runtime.tools.web import MAX_FETCH, USER_AGENT
 
 METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
 SAFE_METHODS = {"GET", "HEAD"}
+# Idempotent methods are the only ones we auto-retry on transient failures.
+# POST and PATCH are never retried automatically even though they're in
+# METHODS, because retrying a non-idempotent request risks duplicate side
+# effects on the server. This is intentionally stricter than SAFE_METHODS.
+IDEMPOTENT_RETRY_METHODS = {"GET", "HEAD", "PUT", "DELETE"}
 OPENAPI_CAP = 80
 BODY_CAP = 50_000
 BLOCKED_HOSTS = {
@@ -19,8 +26,17 @@ BLOCKED_HOSTS = {
     "169.254.169.254",
 }
 
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 0.5
+RETRIABLE_STATUS = {500, 502, 503, 504}
+MAX_REDIRECTS = 10
+
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    # Named constant instead of relying on urllib's implicit default so the
+    # cap is discoverable and testable from this module.
+    max_redirections = MAX_REDIRECTS
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         parsed = urllib.parse.urlparse(newurl)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -69,6 +85,22 @@ def _ip_blocked(ip: ipaddress._BaseAddress) -> bool:
     return bool(ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved)
 
 
+def _is_redirect_loop(exc: urllib.error.HTTPError) -> bool:
+    """True if this HTTPError is urllib's "too many redirects" signal.
+
+    urllib.request.HTTPRedirectHandler (capped at MAX_REDIRECTS via
+    _SafeRedirect.max_redirections) raises an HTTPError carrying the
+    *original* redirect status code (e.g. 301/302/303) with a message that
+    mentions the infinite-loop/too-many-redirects condition, rather than a
+    dedicated status code. Some callers/mocks use 310 directly, so accept
+    that too.
+    """
+    if exc.code == 310:
+        return True
+    reason = str(exc.reason or "").lower()
+    return "redirect" in reason and ("infinite loop" in reason or "too many" in reason)
+
+
 def raw_request(
     method: str,
     url: str,
@@ -78,7 +110,19 @@ def raw_request(
     timeout: float = 20.0,
     cap: int = MAX_FETCH,
 ) -> tuple[int, dict[str, str], str, str]:
-    """Return (status, headers, text, error). error is set on failure."""
+    """Return (status, headers, text, error). error is set on failure.
+
+    Retry policy: idempotent methods (GET, HEAD, PUT, DELETE) are retried up
+    to MAX_RETRIES total attempts, with exponential backoff
+    (RETRY_BACKOFF_BASE * 2**attempt) between them, on transient failures:
+    timeouts, connection resets, DNS hiccups, generic URLErrors, and 5xx
+    HTTP responses (RETRIABLE_STATUS). POST and PATCH are never retried
+    regardless of failure type, since they are not idempotent. 4xx
+    responses, TLS/certificate errors, and redirect-loop errors are never
+    retried since they are not transient. HTTP error *responses* (4xx/5xx)
+    are not tool failures: once handled/retried they are returned as real
+    status/headers/text, not as an "error: ..." string.
+    """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return 0, {}, "", "error: url must be http or https"
@@ -91,28 +135,93 @@ def raw_request(
     if headers:
         hdrs.update(headers)
     request = urllib.request.Request(url, data=body, headers=hdrs, method=method)
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            status = int(getattr(response, "status", 200) or 200)
-            resp_headers = {k: v for k, v in response.headers.items()}
-            raw = b"" if method == "HEAD" else response.read(cap + 1)
-    except urllib.error.HTTPError as exc:
+    host = _hostname(parsed.netloc)
+    retryable = method in IDEMPOTENT_RETRY_METHODS
+
+    def _more_attempts(attempt: int) -> bool:
+        return retryable and attempt + 1 < MAX_RETRIES
+
+    def _backoff(attempt: int) -> None:
+        time.sleep(RETRY_BACKOFF_BASE * (2**attempt))
+
+    attempt = 0
+    while True:
         try:
-            raw = exc.read(cap + 1) if method != "HEAD" else b""
-        except OSError:
-            raw = b""
-        status = int(exc.code)
-        resp_headers = {k: v for k, v in (exc.headers.items() if exc.headers else [])}
-        text = _decode(raw[:cap])
-        if len(raw) > cap:
-            text += "\n...[truncated]"
-        return status, resp_headers, text, ""
-    except urllib.error.URLError as exc:
-        return 0, {}, "", f"error: {exc.reason}"
-    except TimeoutError:
-        return 0, {}, "", "error: fetch timed out"
-    except OSError as exc:
-        return 0, {}, "", f"error: {exc}"
+            with urlopen(request, timeout=timeout) as response:
+                status = int(getattr(response, "status", 200) or 200)
+                resp_headers = {k: v for k, v in response.headers.items()}
+                raw = b"" if method == "HEAD" else response.read(cap + 1)
+            break
+        except urllib.error.HTTPError as exc:
+            if _is_redirect_loop(exc):
+                return 0, {}, "", f"error: too many redirects for {url} (max {MAX_REDIRECTS})"
+            if exc.code in RETRIABLE_STATUS and _more_attempts(attempt):
+                _backoff(attempt)
+                attempt += 1
+                continue
+            try:
+                raw = exc.read(cap + 1) if method != "HEAD" else b""
+            except OSError:
+                raw = b""
+            status = int(exc.code)
+            resp_headers = {k: v for k, v in (exc.headers.items() if exc.headers else [])}
+            text = _decode(raw[:cap])
+            if len(raw) > cap:
+                text += "\n...[truncated]"
+            return status, resp_headers, text, ""
+        except ssl.SSLCertVerificationError as exc:
+            return 0, {}, "", f"error: TLS certificate verification failed for {host}: {exc}"
+        except ssl.SSLError as exc:
+            return 0, {}, "", f"error: TLS error for {host}: {exc}"
+        except (ConnectionResetError, ConnectionError) as exc:
+            if _more_attempts(attempt):
+                _backoff(attempt)
+                attempt += 1
+                continue
+            if attempt:
+                return 0, {}, "", (
+                    f"error: connection reset while requesting {url} "
+                    f"after {attempt + 1} attempts: {exc}"
+                )
+            return 0, {}, "", f"error: connection reset while requesting {url}: {exc}"
+        except urllib.error.URLError as exc:
+            reason = exc.reason
+            if isinstance(reason, ssl.SSLCertVerificationError):
+                return 0, {}, "", f"error: TLS certificate verification failed for {host}: {reason}"
+            if isinstance(reason, ssl.SSLError):
+                return 0, {}, "", f"error: TLS error for {host}: {reason}"
+            if isinstance(reason, socket.gaierror):
+                if _more_attempts(attempt):
+                    _backoff(attempt)
+                    attempt += 1
+                    continue
+                return 0, {}, "", f"error: DNS resolution failed for {host}: {reason}"
+            if _more_attempts(attempt):
+                _backoff(attempt)
+                attempt += 1
+                continue
+            if attempt:
+                return 0, {}, "", f"error: request failed after {attempt + 1} attempts: {reason}"
+            return 0, {}, "", f"error: {reason}"
+        except TimeoutError as exc:
+            if _more_attempts(attempt):
+                _backoff(attempt)
+                attempt += 1
+                continue
+            if attempt:
+                return 0, {}, "", f"error: request timed out after {MAX_RETRIES} attempts: {exc}"
+            return 0, {}, "", "error: fetch timed out"
+        except socket.gaierror as exc:
+            if _more_attempts(attempt):
+                _backoff(attempt)
+                attempt += 1
+                continue
+            return 0, {}, "", f"error: DNS resolution failed for {host}: {exc}"
+        except OSError as exc:
+            # Catch-all for OSError subclasses not covered above (e.g.
+            # permission errors). Not in the transient-failure list, so
+            # never retried regardless of method.
+            return 0, {}, "", f"error: {exc}"
     truncated = len(raw) > cap
     text = _decode(raw[:cap])
     if truncated:

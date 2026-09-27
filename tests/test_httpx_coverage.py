@@ -185,26 +185,46 @@ class TestRawRequest:
         assert err == ""
 
     def test_raw_request_timeout_error(self, monkeypatch):
-        """Test timeout error handling."""
+        """Test timeout error handling on a non-idempotent method (no retries)."""
         def fake_urlopen(*args, **kwargs):
             raise TimeoutError("timed out")
-        
+
         monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
-        status, hdrs, text, err = raw_request("GET", "https://example.com")
+        status, hdrs, text, err = raw_request("POST", "https://example.com")
         assert status == 0
         assert err == "error: fetch timed out"
 
     def test_raw_request_urlerror(self, monkeypatch):
-        """Test URLError handling."""
+        """Test URLError handling on a non-idempotent method (no retries)."""
         import urllib.error
-        
+
         def fake_urlopen(*args, **kwargs):
             raise urllib.error.URLError("connection refused")
-        
+
+        monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
+        # POST is not in IDEMPOTENT_RETRY_METHODS, so this fails on the
+        # first attempt with the original (non-retried) message.
+        status, hdrs, text, err = raw_request("POST", "https://example.com")
+        assert status == 0
+        assert err == "error: connection refused"
+
+    def test_raw_request_urlerror_get_retries_and_fails(self, monkeypatch):
+        """GET is idempotent: generic URLError is retried, then reported."""
+        import urllib.error
+
+        monkeypatch.setattr(http_impl.time, "sleep", lambda *_a, **_k: None)
+        calls = []
+
+        def fake_urlopen(*args, **kwargs):
+            calls.append(1)
+            raise urllib.error.URLError("connection refused")
+
         monkeypatch.setattr(http_impl, "urlopen", fake_urlopen)
         status, hdrs, text, err = raw_request("GET", "https://example.com")
         assert status == 0
-        assert err == "error: connection refused"
+        assert len(calls) == http_impl.MAX_RETRIES
+        assert "connection refused" in err
+        assert err.startswith("error:")
 
     def test_raw_request_oserror(self, monkeypatch):
         """Test OSError handling."""
