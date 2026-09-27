@@ -25,26 +25,11 @@ socket is a dataclass with a `type` field.
 - [Quick start](#quick-start)
 - [Architecture](#architecture)
 - [The protocol](#the-protocol)
-  - [Commands](#commands-client--engine)
-  - [Events](#events-engine--client)
-  - [Snapshots and reconnection](#snapshots-and-reconnection)
 - [The agent loop](#the-agent-loop)
   - [What a pull request says](#what-a-pull-request-says)
 - [Tools](#tools)
-  - [Discovery and reload](#discovery-and-reload)
-  - [The full tool catalogue](#the-full-tool-catalogue)
-  - [Writing a new tool](#writing-a-new-tool)
 - [The write funnel](#the-write-funnel)
-  - [Read-before-edit](#read-before-edit)
-  - [The write guard](#the-write-guard)
-  - [File identity preservation](#file-identity-preservation)
-  - [The syntax gate](#the-syntax-gate)
-  - [Atomic writes and the edit journal](#atomic-writes-and-the-edit-journal)
-  - [Undo](#undo)
 - [Language support](#language-support)
-  - [Detection](#detection)
-  - [Tree-sitter](#tree-sitter)
-  - [Language servers](#language-servers)
 - [Persistence](#persistence)
 - [Configuration](#configuration)
 - [TypeSafe judge](#typesafe-judge)
@@ -232,98 +217,7 @@ between the staleness check and the atomic replace.
 One JSON object per line, terminated by `\n`. Every message carries a `type`
 field naming its dataclass. `None` fields are omitted on the wire.
 
-The line limit is 8 MiB (`STREAM_LIMIT`), well above asyncio's 64 KiB default,
-because a snapshot of a large repository does not fit in 64 KiB. If an encoded
-event would exceed the limit, the engine substitutes an `ErrorOccurred`
-explaining the drop rather than corrupting the stream.
-
-Decoding is registry-driven. `@command` and `@event` decorators populate
-`COMMANDS` and `EVENTS` dicts keyed by class name, and `decode_command` /
-`decode_event` dispatch on the `type` field. Unknown types, non-object
-payloads, and malformed JSON all raise `ProtocolError`, which the server
-reports as an `ErrorOccurred` without dropping the connection.
-
-### Commands (client → engine)
-
-| Command | Fields | Effect |
-|---|---|---|
-| `StartSession` | `workspace`, `session_id?` | Starts a new session or resumes a stored one. Binds the agent loop, starts language servers, emits a snapshot. |
-| `ListSessions` | — | Returns stored sessions, most recently saved first. |
-| `SubmitUserMessage` | `text` | Runs an orchestrator turn. If the orch is already answering, the message is queued and played when that reply finishes. Children already running are not blocked. |
-| `RequestSnapshot` | `replay?` | Re-emits session state. Default `replay=true` also streams history, open files, and the file tree. `replay=false` is the base `SnapshotReady` only (no messages). |
-| `RequestOrchContext` | — | Returns the orch's current model context (system + notes + history). |
-| `OpenFile` | `path` | Adds a file to the open set and returns its contents. |
-| `CloseFile` | `path` | Removes a file from the open set. |
-| `RequestGit` | — | Returns current git state including diffs. |
-| `UndoLastEdit` | — | Reverts the most recent agent edit batch. |
-| `AbortAgent` | `agent_id?` | With no id, cancels the in-flight orchestrator reply only (children keep working). With `agent_id`, cancels that subagent. |
-| `AnswerPrompt` | `prompt_id`, `text` | Resolves a `UserPromptRequested` (command approval, etc.). |
-| `Shutdown` | — | Ends the session, persists it, stops language servers. |
-
-`StartSession` rejects a `workspace` that does not match the one the server was
-booted with — one process serves exactly one workspace.
-
-### Events (engine → client)
-
-| Event | Fields | Meaning |
-|---|---|---|
-| `SnapshotReady` | `snapshot` | Full session state, with chat history stripped and streamed separately. |
-| `ChatMessageAdded` | `id`, `role`, `text`, `ts`, `agent_id?` | A new message. `role` is `user`, `assistant`, `engine` (child report), or `tool`. Child assistant lines set `agent_id` and are not stored in orch history. |
-| `ChatHistoryAdded` | `id`, `role`, `text`, `ts`, `index`, `total` | One replayed historical message, so clients can show progress. |
-| `ChatHistoryComplete` | `count` | Replay finished. |
-| `SessionList` | `sessions` | Result of `ListSessions`. |
-| `FileContent` | `path`, `content` | Full contents of an opened or externally-changed file. |
-| `FileEdited` | `path`, `diff`, `tool`, `edit_id` | An agent edit landed, with its unified diff. |
-| `FileClosed` | `path` | A file left the open set. |
-| `FileTreeUpdated` | `file_tree` | Workspace tree. Arrives after `SnapshotReady` (which no longer packs the tree) and after creates/undos. |
-| `GitStateUpdated` | `git` | Branch, dirty flag, staged/unstaged/untracked lists, diffs. |
-| `ChatMessageStarted` | `id`, `role`, `ts`, `agent_id?` | An assistant message is about to stream. Empty `agent_id` is the orchestrator. |
-| `ChatMessageDelta` | `id`, `channel`, `text`, `agent_id?` | Incremental text or reasoning. The following `ChatMessageAdded` is canonical. |
-| `ToolCallStarted` / `ToolCallFinished` | `call_id`, `name`, … | A tool began or finished. Replaces `role=tool` chat lines. |
-| `CommandOutputChunk` | `call_id`, `stream`, `text` | Live stdout/stderr from `run_command`. |
-| `AgentStateChanged` | `state`, `turn`, `max_turns`, `agent_id?` | idle / thinking / calling_tool / waiting_for_user / aborting / compacting. Empty `agent_id` is the orchestrator. `waiting_for_user` means **this** agent's prompt is on screen; another child queued on PromptBroker still shows `calling_tool`. |
-| `AgentStarted` | `agent_id`, `profile`, `parent_id`, `task`, `worktree?`, `branch?`, `batch_id?`, `batch_name?` | A subagent began. Writers include the git worktree path and branch. Children spawned in the same orch reply share `batch_id` and a nickname from the user message. |
-| `AgentFinished` | `agent_id`, `profile`, `status`, `summary` | A subagent returned a compacted result. |
-| `AgentsUpdated` | `agents` | Full live agent list (`AgentRow`: id, profile, status, task, current_tool, batch_id, batch_name, worktree, branch). Emit after start, finish, or status/tool change. |
-| `OrchContext` | `text` | The orch's current model context, for the client's debug popup. |
-| `WorktreeSettled` | `agent_id`, `profile`, `action`, `detail`, `branch`, `pr_url?`, `ok` | The user chose merge / pr / keep / discard for a finished writer worktree. |
-| `StatsUpdated` | `stats` | Tokens, cost, elapsed time. |
-| `UserPromptRequested` | `prompt_id`, `question`, `kind`, `choices`, `agent_id?` | The engine is waiting on the user (command approval, etc.). |
-| `ContextCompacted` | `strategy`, counts, `summary` | History was trimmed or summarized. |
-| `ErrorOccurred` | `message` | Recoverable error. Never terminates the connection. |
-| `WarningOccurred` | `message` | Advisory, e.g. an unsupported project language. |
-| `JudgementMade` | `tag`, `subject`, `outcome`, `signals`, `enforced`, `latency_ms`, `agent_id?` | A TypeSafe verdict at a choke point (`exec_approval`, `call_verify`, `search_rerank`, `result_screen`). `enforced` is false in advisory mode. |
-| `SessionEnded` | `reason` | Session closed. |
-
-`tool` role messages are previews: the engine truncates tool output to 400
-characters before emitting, and the registry independently caps any tool result
-at 80,000 characters before it reaches the model.
-
-### Snapshots and reconnection
-
-`EngineSnapshot` is the reconnect payload: `session_id`, `workspace`,
-`messages`, `ended`, `open_files`, `file_tree`, `git`, `language`,
-`language_supported`, `message_count`, `agents` (live subagents with task,
-status, `current_tool`, and `batch_id`).
-
-Emitting it is a small dance designed to keep a large history from blocking the
-event loop:
-
-1. Open files that no longer exist on disk are dropped from the set.
-2. Any in-flight history replay is cancelled via a generation counter.
-3. `SnapshotReady` goes out with `messages` emptied and `message_count` set, so
-   the client can size its UI immediately.
-4. One `FileContent` per open file.
-5. History replays as individual `ChatHistoryAdded` events from a background
-   task that yields between messages, ending with `ChatHistoryComplete`.
-
-`RequestSnapshot(replay=false)` stops after step 3: just the base
-`SnapshotReady` (counts, git, agents, stats). No file contents, no history
-replay. The TUI snapshot button uses that and shows the summary in a popup.
-
-The generation counter matters: if a client requests a second snapshot while
-the first replay is still streaming, the stale task notices the bumped
-generation and stops rather than interleaving two histories.
+Full reference: [docs/protocol.md](docs/protocol.md).
 
 ---
 
@@ -382,210 +276,12 @@ call `undo_edit` when something goes wrong.
 
 ## Tools
 
-### Discovery and reload
-
 There is no registration list. `discover_tools()` walks the `tools/` package
 with `pkgutil`, imports and reloads every module except `base.py`,
 `registry.py`, and anything starting with `_`, then collects any object
 carrying an `_engine_tool` attribute.
 
-Import failures are captured as registry errors and surfaced to the client as
-`ErrorOccurred` rather than crashing the session, so one broken tool module
-does not take down the engine. Duplicate tool names are rejected the same way.
-
-Because discovery runs on every `StartSession` and uses `importlib.reload`, you
-can edit a tool and pick it up by restarting the session — no server restart.
-
-### The full tool catalogue
-
-64 tools across navigation, tree-sitter, LSP, editing, execution, git, GitHub, docs, HTTP, browser, and memory.
-
-**Navigation** — no language server needed.
-
-| Tool | Purpose |
-|---|---|
-| `list_files` | Every workspace-relative path, one per line. |
-| `read_file` | A numbered line window. Defaults to 200 lines from offset 1, capped at 400. Marks the file as read. |
-| `search` | ripgrep across the workspace. Returns `path:line:text`. Default 80 matches, hard cap 200. |
-
-**Tree-sitter** — instant, no server, works on partially broken files.
-
-| Tool | Purpose |
-|---|---|
-| `list_symbols` | Outline of functions, classes, methods, types, imports. |
-| `find_symbol` | One named definition's source plus the 1-based line/character of its name — the coordinate handoff into the LSP tools. |
-| `get_node_at` | The node at a position: type, name, parent, enclosing definition, named children. |
-| `query_tree` | A tree-sitter query. Presets: `imports`, `functions`, `classes`, `methods`, `calls`. Capped at 80 captures. |
-| `parse_file` | Compact nested syntax tree with line ranges. Capped at 200 nodes and depth 8. |
-
-**Language server** — real types, cross-file truth.
-
-| Tool | Purpose |
-|---|---|
-| `goto_definition` | Resolve a symbol at a position. Understands imports and types. Max 20 locations. |
-| `find_references` | Every usage across the indexed workspace. Max 50. |
-| `hover` | Type signature and documentation. |
-| `get_diagnostics` | Compiler and type-checker errors, warnings, hints. |
-| `document_symbols` | Server-side outline with `SymbolKind`, catching interfaces and enums tree-sitter may miss. Max 200. |
-| `rename_symbol` | Server-computed rename applied across every affected file as one undoable batch. |
-
-**Text editing.**
-
-| Tool | Purpose |
-|---|---|
-| `str_replace` | Replace one unique exact substring. Zero or multiple matches fail rather than guess. |
-| `replace_lines` | Replace an inclusive 1-based line range, mirroring the `read_file` window. |
-| `insert_at_line` | Insert before a 1-based line, or at `end+1` to append. |
-| `create_file` | Create a new file. Fails if the path exists. Creates parent directories. |
-
-**Structural editing.**
-
-| Tool | Purpose |
-|---|---|
-| `replace_symbol` | Replace a whole function/class/type by name via tree-sitter. Robust to whitespace differences. |
-| `insert_after_imports` | Insert after the last import block, or at the top if there are none. |
-| `apply_patch` | Apply a unified diff. Line-number drift up to 5 lines is tolerated; any failing hunk rejects the entire patch. |
-
-**Execution.**
-
-| Tool | Purpose |
-|---|---|
-| `run_command` | Shell command in the workspace. No TTY. Default 120s timeout. Non-zero exit is information. |
-
-**History.**
-
-| Tool | Purpose |
-|---|---|
-| `undo_edit` | Revert the last edit batch, including multi-file renames. |
-| `list_edits` | Recent edits in this session with their diffs. Default 20. |
-
-**Git (LLM-facing).** The TUI git panel still uses `RequestGit`; these are for agents.
-
-| Tool | Purpose |
-|---|---|
-| `git_status` | Branch, dirty flag, staged/unstaged/untracked paths. |
-| `git_diff` | Worktree or staged (cached) diff. |
-| `git_log` | Recent commits (`hash subject`). Optional path filter. |
-| `git_show` | One revision: metadata, stat, clipped patch. |
-| `git_blame` | Blame a file, optional 1-based line window. |
-| `git_range` | Commits and diffstat for `base...head`. |
-
-**GitHub.** Requires `gh` (authenticated). Read tools go to reviewer/researcher/debugger. Writes ask the user. `gh_pr_create` exists but is not given to any profile — worktree settle still opens writer PRs.
-
-| Tool | Purpose |
-|---|---|
-| `gh_pr_list` / `gh_pr_view` / `gh_pr_comments` / `gh_pr_checks` | PRs, conversation, CI. |
-| `gh_issue_list` / `gh_issue_view` | Issues. |
-| `gh_run_list` / `gh_run_view` | Actions runs plus a clipped failed log. |
-| `gh_release_list` / `gh_release_view` | Release notes / changelog. |
-| `github_compare` | Ahead/behind, commits, files between two refs. |
-| `github_search_code` | GitHub code search. `this_repo` scopes to the workspace remote. |
-| `github_file` | Raw file from `owner/name` @ ref. Default 12k char window (hard cap 50k); pass `offset` to page. Directories tell you to use `github_tree`. |
-| `github_repo` | Repo metadata: description, default branch, language, license, topics, stars. |
-| `github_tree` | Files and dirs at a path (optional recursive, capped). Skips vendor/cache dirs. |
-| `gh_pr_comment` / `gh_issue_create` | Approval-gated writes (researcher, debugger). |
-| `gh_pr_create` | Implemented, unassigned. Settle still owns writer PRs. |
-
-**Docs, packages, advisories.**
-
-| Tool | Purpose |
-|---|---|
-| `pkg_info` | Registry metadata: pypi, npm, crates, go, maven, nuget, rubygems. |
-| `docs_lookup` | Official docs: mdn, pypi, npm, crates, go. |
-| `tldr` | CLI cheat sheet from tldr-pages. |
-| `osv_query` | OSV.dev vulnerabilities for a package/version. |
-| `dep_why` | `npm ls` / `go mod why` / `pip show` / `cargo tree`. |
-
-**HTTP.**
-
-| Tool | Purpose |
-|---|---|
-| `http_request` | http/https only. GET/HEAD free; other methods ask the user. 50k cap. |
-| `openapi_ops` | List METHOD path — summary from a Swagger/OpenAPI URL. |
-
-**Repo hygiene.**
-
-| Tool | Purpose |
-|---|---|
-| `todo_scan` | TODO/FIXME/XXX/HACK as `path:line:text`. Skips `.git` / `node_modules`. |
-| `runtime_info` | Local python, node, go, git, gh, rg versions. |
-
-**Web.** Used by the `researcher` personality. Survey a GitHub repo with `github_repo` / `github_tree` / `github_file` — do not fetch GitHub HTML.
-
-| Tool | Purpose |
-|---|---|
-| `web_fetch` | HTTP GET. HTML becomes markdown (main/article, chrome dropped). `github.com` URLs are refused. SPA pages hint at debugger `browser_open`. |
-| `web_search` | Brave Search if `BRAVE_API_KEY` is set; otherwise an error. |
-
-**Memory.** Every personality (and the orch) can record lasting workspace facts. `remember` upserts a file note (`purpose` / `entry_points` / `constraints`) or a decision. Ask, coder, and researcher briefings are also ingested automatically on finish. Reads and edits only update `seen_sha` on files that already have a note. Stale file notes are flagged when the on-disk hash no longer matches.
-
-| Tool | Purpose |
-|---|---|
-| `remember` | Upsert a file blurb (`section=files` + `path`, optional `purpose` / `entry_points` / `constraints`) or append an engineering / product / CI/CD / other decision. |
-
-**Skills.** Every personality (and the orch) can load a `SKILL.md` body.
-
-| Tool | Purpose |
-|---|---|
-| `activate_skill` | Load one skill body into this agent. |
-| `read_skill` | Read a file inside that skill directory only. |
-
-**MCP.** Live tools from configured servers, namespaced `mcp_{server}_{tool}`.
-Default profiles: `researcher`, `debugger`. Also `mcp_list_resources` and
-`mcp_read_resource` (`file://` rejected).
-
-**Browser.** Used by the `debugger` personality. Requires Playwright; otherwise the tools return `error: browser tools unavailable`.
-
-| Tool | Purpose |
-|---|---|
-| `browser_open` | Headless Chromium, resets console/network logs. |
-| `browser_console` | Console messages since last open. |
-| `browser_screenshot` | PNG under `.engine/debug/`. |
-| `browser_network` | Failed and 4xx/5xx requests since last open. |
-
-### Writing a new tool
-
-Drop a module in `tools/` and decorate a function. Nothing else.
-
-```python
-from tools.base import ToolContext, tool
-
-
-@tool(description="Count lines in a workspace file.")
-def count_lines(ctx: ToolContext, path: str) -> str:
-    _rel, text = read_text(ctx.workspace, path)
-    return str(len(text.splitlines()))
-```
-
-The JSON schema is inferred from the signature. Type hints map to JSON types,
-`Optional[X]` unwraps to `X`, parameters without defaults become required, and
-`ctx` / `context` / `self` are excluded. Pass `parameters={...}` explicitly when
-you want richer descriptions per field, which every built-in tool does.
-
-At call time only arguments matching the signature are forwarded — a model
-hallucinating an extra keyword gets it dropped rather than causing a
-`TypeError`. Sync and async functions both work. A `None` return becomes an
-empty string, and exceptions become `error: {message}` strings so a tool crash
-becomes something the model can read and react to instead of an aborted turn.
-
-For anything that writes, do not touch the filesystem directly. Write a pure
-mutation and hand it to the funnel:
-
-```python
-from runtime.tools.edits import apply_edit
-
-
-@tool(description="Strip trailing whitespace from a file.")
-async def strip_trailing(ctx: ToolContext, path: str) -> str:
-    def mutate(src):
-        return "\n".join(line.rstrip() for line in src.text.splitlines())
-
-    return await apply_edit(ctx, path, mutate, "strip_trailing")
-```
-
-That single call buys the staleness check, the write guard, newline and
-encoding preservation, the syntax gate, an atomic replace, a journal entry, the
-`FileEdited` event, and undo support.
+Full reference: [docs/tools.md](docs/tools.md).
 
 ---
 
@@ -594,158 +290,17 @@ encoding preservation, the syntax gate, an atomic replace, a journal entry, the
 Every write in the engine goes through `runtime/tools/edits.py`. Tools supply
 a `str -> str` mutation; the funnel supplies the safety.
 
-### Read-before-edit
-
-`FileTracker` maps each workspace-relative path to the SHA-256 of the bytes
-last read or written. `read_file` marks a file; the funnel then enforces two
-rules:
-
-- No recorded SHA → `error: read {path} before editing it`. The agent cannot
-  edit a file it has not looked at.
-- Recorded SHA differs from disk → the file changed underneath the agent, so
-  the edit is refused rather than clobbering someone else's work.
-
-The tracker is recreated on every session bind, so a resumed session starts
-with no assumptions about what is on disk.
-
-### The write guard
-
-`guard_write_path()` refuses, before any bytes move:
-
-- Writes through symlinks.
-- Paths that resolve outside the workspace. Resolution happens first, then a
-  `relative_to(workspace)` check, so `../` traversal and symlink escapes both
-  fail.
-- Anything inside `.git`, `.engine`, `.cursor`, `__pycache__`, `node_modules`,
-  `.venv`, `venv`, `.ruff_cache`, and other cache/build dirs.
-- Lockfiles: `package-lock.json`, `uv.lock`, `poetry.lock`, `Cargo.lock`,
-  `go.sum`.
-- Secrets: `env.sh`, `.env`, and any `.env.*`.
-
-### File identity preservation
-
-`FileSource` captures how a file is actually written on disk — line ending
-(`\n`, `\r\n`, or `\r`), UTF-8 BOM, whether it ends with a trailing newline,
-and the dominant indent (tab, or 2/3/4/8 spaces). Mutations operate on
-normalized text; `render()` re-applies the original identity on the way out.
-
-A CRLF file stays CRLF. A file with no final newline keeps not having one. A
-BOM survives. New files inherit their identity from a sibling with the same
-extension, so a new `.py` next to CRLF Python files gets CRLF too.
-
-Non-UTF-8 files are rejected outright rather than silently mangled.
-
-### The syntax gate
-
-Before committing, the funnel parses the new text with tree-sitter and compares
-its `ERROR` and `MISSING` nodes against the old text's. An edit that introduces
-*new* syntax faults is rejected.
-
-The comparison is what makes this usable. A file that was already broken can
-still be edited — otherwise the agent could never fix a syntax error. Only
-newly introduced breakage is blocked.
-
-### Atomic writes and the edit journal
-
-Writes go to a temporary file, get `fsync`'d, then `os.replace` into position.
-Creates use a temp file plus a hard link so an existing path cannot be
-clobbered by a race. A reader never sees a half-written file.
-
-Each committed edit is journaled to the `edits` table:
-
-| Column | Contents |
-|---|---|
-| `id` | Autoincrement primary key |
-| `session_id` | Owning session |
-| `batch_id` | Groups multi-file edits such as a rename |
-| `path` | Workspace-relative path |
-| `tool` | Tool that produced the edit |
-| `before` / `after` | Full byte snapshots. `NULL` before means the file did not exist; `NULL` after means it was deleted |
-| `before_sha` / `after_sha` | SHA-256 of each side |
-| `diff` | Unified diff |
-| `created_dirs` | JSON array of directories created for this edit |
-| `applied_at` | ISO-8601 UTC timestamp |
-
-Storing full before/after bytes rather than diffs makes undo exact and
-independent of patch application.
-
-### Undo
-
-`undo_edit` loads the most recent batch and reverses it, newest record first:
-
-- A create becomes a delete, and any directories created for it are pruned.
-- A delete becomes a restore from `before`.
-- An edit restores the `before` bytes.
-
-Before touching anything, undo verifies that each file's current SHA still
-matches the recorded `after_sha`. If you edited a file by hand after the agent
-touched it, undo refuses rather than discarding your change.
-
-The undo itself is journaled with `tool="undo_edit"` and a fresh `batch_id`, so
-the history stays append-only. Multi-file batches are all-or-nothing: a partial
-failure rolls back the files already committed using their journal records.
+Full reference: [docs/write-funnel.md](docs/write-funnel.md).
 
 ---
 
 ## Language support
 
-### Detection
-
 At startup the engine identifies the workspace language. It prefers
 `git ls-files` for the file list and falls back to a filesystem walk capped at
 20,000 files, skipping the standard ignore directories.
 
-It then counts files by extension and looks for root markers — `go.mod`,
-`pyproject.toml`, `requirements.txt`, `package.json`, `tsconfig.json`,
-`yarn.lock`, and friends. A single unambiguous marker wins, unless another
-language has at least five files and more than twice the marked language's
-count, which catches the polyglot repo whose `package.json` is incidental.
-
-`python`, `go`, and `javascript` (TypeScript included) are supported. Fourteen
-other languages — Rust, Ruby, Java, Kotlin, Swift, C, C++, C#, PHP,
-Scala, Haskell, Elixir, Lua, Zig — are detected and named, but get no
-tree-sitter or LSP support. Unsupported projects still work; the engine emits a
-`WarningOccurred` and the agent falls back to `read_file` and `search`.
-
-### Tree-sitter
-
-Grammars for Python, Go, JavaScript, TypeScript, and TSX load lazily from the
-`tree-sitter-*` packages in `requirements.txt`. Tree-sitter powers the outline
-tools, the symbol-scoped edits, and the syntax gate. It is fast enough to run
-on every write and tolerant of broken files, which is exactly what a syntax
-gate needs.
-
-### Language servers
-
-| Language | Command | Language IDs |
-|---|---|---|
-| Python | `npx -y -p pyright pyright-langserver --stdio` | `python` |
-| TypeScript | `npx -y typescript-language-server --stdio` | `typescript`, `typescriptreact` |
-| JavaScript | `npx -y typescript-language-server --stdio` | `javascript`, `javascriptreact` |
-| Go | `gopls serve` | `go` |
-
-`LSPManager` keeps one client per distinct command, so JavaScript and
-TypeScript share a single `typescript-language-server` process. `LSPClient`
-speaks JSON-RPC over stdio with a background reader thread.
-
-Warm start runs on a daemon thread at session bind: it initializes the server,
-opens up to 500 workspace files so cross-file references resolve, and waits up
-to 20 seconds for the first diagnostics. The session never blocks on it.
-
-Timeouts: 30s for `initialize`, 15s for a normal request, 5s for `shutdown`
-and for the process to exit before it is killed, 20s for warm-start
-diagnostics, 5s for diagnostics after a change.
-
-Document sync is SHA-based. The manager records the SHA of the text last sent
-for each file, and `sync_if_stale()` pushes a `didChange` when disk has moved
-on. After every write the funnel asks for fresh diagnostics and reports any
-that are new, so the agent hears about the type error it just introduced in the
-same tool result.
-
-Rename is the one place the LSP writes. `textDocument/rename` returns a
-workspace edit, which is normalized and applied through
-`apply_workspace_edit()` as a single atomic, undoable batch. The engine never
-lets the server touch disk directly.
+Full reference: [docs/language-support.md](docs/language-support.md).
 
 ---
 
@@ -836,90 +391,7 @@ questions (`Noul` for yes/no, `Choice` for picking one of a closed set,
 question. It never generates an edit, a search query, or a file path;
 **the LLM generates, TypeSafe judges, code decides.**
 
-Every judge call degrades to "no opinion" on any failure — a missing key, a
-timeout, a rate limit, a 5xx, or the `typesafe-sdk` package not being
-installed. `runtime/judge.py`'s `JudgeManager` (owned by `EngineSession`,
-built at bind, closed on shutdown — the same lifecycle as `LSPManager`) never
-lets a judge failure reach a tool result, a protocol event, or the agent
-loop; callers that get `None` back fall through to their pre-existing,
-judge-less behaviour. Judgments may only add restriction or information —
-they can escalate `auto` to a prompt or a refusal, but they can never
-override `guard_write_path`, the syntax gate, the staleness check, or the
-write denylist.
-
-The write gate (Phase 7) is the highest-stakes call site, so it gets extra
-caution: it always runs its judge call *before* `_apply_sync`'s synchronous
-prepare-then-commit, never between the staleness check and the atomic
-replace, so a slow or concurrent judge call can never reopen the
-write-modify-write race (`tests/test_concurrency.py` exercises this with a
-judge that actively yields mid-call). It also never inherits a *blanket*
-`ENGINE_JUDGE=enforcing` set for other sites — only an explicit
-`ENGINE_JUDGE_WRITE=enforcing` lets it block there. The curated
-`ENGINE_JUDGE=calibrated` profile is the one exception: it sets write to
-enforcing itself, since the write gate can only ever block on a detected
-hardcoded secret — every other signal (scope creep, deletes unrelated
-code, a disabled test, a weak intent match) only ever adds a
-`[engine: judge flagged this diff -- ...]` note to the result, never a
-refusal. Set `ENGINE_JUDGE_WRITE=advisory` to opt back out under
-`calibrated`.
-
-Every judged decision emits a `JudgementMade` event (`tag`, `subject`,
-`outcome`, `signals`, `enforced`, `latency_ms`) so a blocked or escalated
-action is never an inexplicable refusal — `clients/dummy.py` renders it as
-`judge <tag> -> <outcome> (advisory|enforced, <n>ms): <subject>`, pins a
-coloured card on the tools panel, and puts the last verdict in the status
-line. F7 filters the protocol log to `JudgementMade` only. The engine
-process prints `judge: <mode> model=… exec=…` (or `judge: off`) at
-startup so you can see whether the key loaded before you attach a client.
-When `ENGINE_PUSHGATEWAY_URL` is set, the same session snapshot includes
-TypeSafe gauges: requests by tag/result (`ok` / `cache` / `error`),
-latency, tokens, reported cost, and decisions by tag/outcome/enforced.
-
-**Scope note on the plan's Phase 8.** The plan proposes TypeSafe as a
-subagent *dispatcher* — selecting, ordering, and admission-controlling a
-fixed catalogue of subagents in place of the LLM — on the premise that no
-subagent system exists yet. That premise doesn't hold here: the
-orchestrator/subagent system (`agents/orchestrator.py`, six profiles under
-`agents/profiles/`, worktree isolation, settle flows, a tested concurrent
-write lock) already works, and the orchestrator LLM already handles
-selection and ordering through normal tool calls. Replacing that would
-compete with a working system for uncertain benefit, and the plan itself
-leaves Phase 8's necessity as an open question. What does port cleanly is
-the piece the plan calls more important than the dispatch anyway: the
-**merge gate**, scoring a subagent's result (`accomplished_its_brief`,
-`worth_parent_context`, `contradicts_siblings`) before it re-enters the
-orchestrator's context, so a low-value result gets admitted as one line
-instead of its full transcript.
-
-To exercise the live call sites from `clients/dummy.py`:
-
-1. Put a real TypeSafe key in `env.sh` as `TYPESAFE_API_KEY` or
-   `TYPESAFE_JEV_API_KEY`, and set `ENGINE_JUDGE=calibrated` (or
-   `enforcing`; leave the default `advisory` if you only want events).
-2. `python app.py` — confirm the startup line is not `judge: off`.
-3. `python -m clients.dummy` and send one of:
-
-| Prompt | Call site | What you should see |
-|---|---|---|
-| `run ls in the workspace` | `exec_approval` | allow card; command runs |
-| `run git push --force origin main` | `exec_approval` | prompt or block card; a prompt or a refused tool result |
-| `where is the retry logic in this codebase?` | `search_rerank` | ranked card once ripgrep returns more than 10 hits |
-| `read docs/judge.md` | `result_screen` | flag/redact card only if the file is treated as agent-directed |
-| ask for an edit (`str_replace` / `apply_patch`) | `call_verify` | allow or block card before the write |
-
-A missing key, a timeout, or a 5xx degrades silently to today's path and
-emits one `WarningOccurred` for the first failure of the session.
-
-Ship a call site under `ENGINE_JUDGE=advisory` first to collect signal on
-real traffic, then promote it to `enforcing` with its own
-`ENGINE_JUDGE_<SITE>` override once the false-positive rate is measured.
-
-The offline test suite never calls the real API: `tests/conftest.py` provides
-a `FakeJudge`/`FakeVerdict` pair (mirroring `FakeLsp`) with a scripted
-`responses` table and a `calls` list, and every judge-backed code path has a
-test asserting that a `None` verdict reproduces pre-integration behaviour
-exactly. Tests that do call the real API live under `tests/live/` and carry
-the `judge` marker, skipped automatically when `TYPESAFE_API_KEY` is unset.
+Full reference: [docs/typesafe-judge.md](docs/typesafe-judge.md).
 
 ---
 
@@ -930,101 +402,11 @@ to the socket, starts a session, and splits the event stream into three
 panels. It is the executable specification of the protocol — worth reading
 before writing your own client.
 
-```
-+---------------------------+----------------------+
-|                           | Agents · N           |
-|                           | nickname / profile   |
-|  Agent chat               +----------------------+
-|                           | Protocol             |
-|                           | commands + events    |
-|                           +----------------------+
-|                           | Tools                |
-|                           | name / args / result |
-+---------------------------+----------------------+
-| > type a message or /command   [snapshot] [context]
-+--------------------------------------------------+
-```
-
-- **Chat** — user, assistant, and `engine` (child reports) messages, streamed
-  deltas, history replay, and outstanding prompts. Assistant and engine
-  replies render as markdown (headings, lists, code fences); user lines stay
-  literal. An unclosed ` ``` ` fence stays as source until it closes so the
-  rest of a stream is not swallowed as code.
-- **Agents** — live subagents grouped by batch nickname (`batch_name`) plus a
-  short `batch_id`: count, profile, task, status, current tool, worktree, and
-  streamed child tokens (`ChatMessageStarted` / `Delta` / `Added` with
-  `agent_id`). Fed by `AgentsUpdated`, `SnapshotReady`, and those chat events.
-- **Protocol** — every command this client sends, plus inbound events that are
-  not chat, tools, the agents panel, or an inspect popup (files, git, stats,
-  errors, `AgentStarted` / `AgentFinished`). `JudgementMade` is logged here
-  too; F7 filters the log to those events.
-- **Tools** — live tool cards with arguments, shell chunks, status, duration,
-  and the 400-char result preview. Cards tagged with `agent_id` when a child
-  is calling the tool. Each `JudgementMade` is pinned here as a coloured
-  judge card (`allow` / `prompt` / `block` / `ranked` / `flag`) so a
-  verdict is visible next to the tool it gated.
-- **Snapshot** — **snapshot** button / F5 / `snapshot` opens a popup of the
-  base `SnapshotReady` (session, language, git, stats, agents, message count).
-  It does not replay chat history.
-- **Context** — **context** button / F6 / `context` command opens a popup of
-  the orch's current model context (`OrchContext`: system prompt, workspace
-  notes, history).
-- **Judgements** — F7 filters the protocol log to `JudgementMade`. The same
-  events are always pinned as coloured cards on the tools panel.
-
-```bash
-python -m clients.dummy [workspace]
-python -m clients.dummy [workspace] --message "the task" --auto
-python -m clients.dummy [workspace] --message "the task" --auto --timeout 1800
-```
-
-`--message --auto` is the headless driver: it starts a session, submits one user message, auto-answers prompts (exec/confirm `yes`, worktree settle `keep` unless `--settle pr|merge|discard`, MCP auth `no`, turn-cap `continue`), prints formatted events to stdout, and exits when the orchestrator has been idle for a second with no live children. `--timeout` is an optional wall-clock fuse (seconds); `0` or omitted waits until idle. `--auto` without `--message` is an error.
-
-The input bar uses the same grammar as the old REPL:
-
-| Input | Sends |
-|---|---|
-| `help` | Command list, generated from the `COMMANDS` registry |
-| `start [session_id]` | `StartSession` — omit the id for a fresh session |
-| `listsessions` | `ListSessions` |
-| `requestsnapshot` / `snapshot` / `snap` | `RequestSnapshot(replay=false)` — **snapshot** button / F5 opens a popup of the base state (no history replay) |
-| `context` / `orchcontext` | `RequestOrchContext` — also the **context** button and F6 |
-| `openfile <path>` | `OpenFile` |
-| `closefile <path>` | `CloseFile` |
-| `requestgit` | `RequestGit` |
-| `undo` | `UndoLastEdit` |
-| `abort` | `AbortAgent` — orch reply only; children keep running |
-| `abort <agent_id>` | `AbortAgent` for one subagent |
-| `shutdown` | `Shutdown` |
-| `exit` / `quit` | Disconnects the client; the server keeps running |
-| *anything else* | `SubmitUserMessage` with the whole line as text |
-
-A leading `/` is optional and command names are case-insensitive, so `/start`,
-`start`, and `Start` are equivalent. Because unrecognized input becomes a chat
-message, you can just type `where is the retry logic?` and hit enter. The
-client sends `StartSession` on connect. Ctrl-C or `exit` disconnects.
-
-The client formats each event type for readability: snapshots collapse to a
-summary (including live `agents`), `AgentsUpdated` reprints the running set
-grouped by batch, file contents show the first 24 lines, and diffs show the
-first 80. Unknown event types fall back to pretty-printed JSON, so a client
-built against an older protocol version still shows you something useful.
-
-Writing your own client is three steps: open a Unix socket connection to
-`{workspace}/.engine/engine.sock` with an 8 MiB stream limit, write
-`json.dumps(command) + "\n"`, and read newline-delimited events in a loop. The
-`protocol/` package is importable standalone if your client is also Python.
+Full reference: [docs/reference-client.md](docs/reference-client.md).
 
 ---
 
 ## Testing
-
-```bash
-pytest                      # everything (judge and lsp live tests skip themselves)
-pytest -m "not lsp"         # skip tests that spawn a real language server
-pytest -m judge tests/live  # calibration fixtures against the real TypeSafe API
-pytest tests/test_apply.py  # one module
-```
 
 `pytest.ini` sets `pythonpath = .` and `testpaths = tests`, so no install step
 is needed. The default run is capped at 4 pytest-xdist workers (`-n logical
@@ -1033,56 +415,7 @@ loadscope`. Uncapped `-n auto` on a 12-core machine used to leave several
 multi-gigabyte Python processes behind after the suite (or after Ctrl-C).
 Pass `-n0` to disable workers entirely for a single-file debug run.
 
-To check coverage locally:
-
-```bash
-pytest --cov                       # coverage summary in the terminal
-coverage-badge -o coverage.svg -f  # regenerate the badge shown at the top of this README
-```
-
-`.coveragerc` scopes coverage to the source packages and excludes `tests/`.
-CI (`.github/workflows/tests.yml`) runs `pytest --cov` on every push and pull
-request, and on pushes to `main` it regenerates `coverage.svg` and commits it
-back to the repo with `[skip ci]` so the badge stays current without
-retriggering the workflow.
-
-Tests across 18 modules. The original write-path suite is unchanged; the new
-modules cover the runtime foundation (config, streaming, turns, stats, shell,
-prompts, compaction):
-
-| Module | Covers |
-|---|---|
-| `test_primitives.py` | `str_replace`, `replace_lines`, `insert_at_line`, diff formatting |
-| `test_syntax.py` | The syntax gate, including that already-broken files stay editable |
-| `test_patch.py` | Unified diff parsing, fuzz offsets, all-or-nothing multi-hunk application |
-| `test_identity_and_guard.py` | CRLF/BOM/trailing-newline round-trips, the write denylist, symlink refusal, sibling-inherited newlines |
-| `test_apply.py` | Staleness detection, create conflicts, undo round-trip, directory pruning, read-before-edit |
-| `test_symbols.py` | Tree-sitter symbol replacement and import insertion |
-| `test_concurrency.py` | Concurrent edits to the same and different files — no hangs, exactly one winner per conflicting file |
-| `test_tools_registry.py` | Tool discovery and workspace edits |
-| `test_protocol.py` | Codec round-trips, snapshot and history streaming |
-| `test_lsp_write.py` | Integration against real `gopls`: view refresh after writes, diagnostic resync, cross-file rename, undo batches |
-| `test_config.py` | `EngineConfig.from_env`, `env.sh` ordering, malformed knobs |
-| `test_llm_stream.py` | Streaming chunk assembly, idle timeout, usage extraction |
-| `test_subscriber.py` | Bounded queues, delta-drop policy, size-field coverage |
-| `test_turn_control.py` | Turn-as-task, queued submits, abort mid-complete and between tools |
-| `test_stats.py` | Usage accumulation and stats persistence |
-| `test_shell.py` | `run_command` executor: denials, approval, output caps |
-| `test_prompts.py` | `PromptBroker` ask/answer/cancel and confirm timeout |
-| `test_compaction.py` | Tool-result trim, history invariant, overflow markers |
-
-The `conftest.py` `ctx` fixture builds a `ToolContext` over `tmp_path` with a
-real SQLite journal and a fresh `FileTracker`. The `seed()` helper writes a file
-and marks it read, satisfying the read-before-edit guard.
-
-`test_lsp_write.py` is marked `lsp` and skipped when `gopls` is absent. `gopls`
-was chosen over the npx-based servers because it runs straight from `PATH`
-without a package fetch, keeping the suite fast and hermetic. Everything else
-runs offline with no external binaries — `test_concurrency.py` uses a `FakeLsp`
-stub rather than a real server.
-
-Lint with `ruff check .`; the rule set lives in `pyproject.toml` and CI runs it
-before the tests.
+Full reference: [docs/testing.md](docs/testing.md).
 
 ---
 
@@ -1171,6 +504,9 @@ tests/                  unit tests (write path, runtime, skills, MCP fakes)
 
 docs/
   adding-a-*.md         how to add a tool, command, profile, skill, MCP server
+  protocol.md tools.md write-funnel.md language-support.md
+  typesafe-judge.md reference-client.md testing.md
+                        reference sections split out of this README
   judge.md              judge design: the phased checks the judge runs
   archive/impl-plans/   historical design plans, in build order
 ```
@@ -1223,7 +559,7 @@ Ignored everywhere: `.git`, `.engine`, `.cursor`, `__pycache__`,
 ## Extending the engine
 
 **A new tool.** Drop a module in `tools/`, decorate with `@tool`, restart the
-session. See [Writing a new tool](#writing-a-new-tool).
+session. See [Writing a new tool](docs/tools.md#writing-a-new-tool).
 
 **A new subagent personality.** Drop a module in `agents/profiles/` that
 exports `PROFILE = AgentProfile(...)`. The orch sees it as a tool. See
