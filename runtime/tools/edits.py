@@ -659,7 +659,7 @@ def _lsp_after_diagnostics(ctx: ToolContext, result: ApplyResult, before: list) 
 async def _screen_diagnostics(
     ctx: ToolContext, diff: str, tool_name: str, diags: list
 ) -> tuple[list, int]:
-    """Phase 6b (docs/impl-plans/jev-exp-1.md): surface only diagnostics
+    """Phase 6b (docs/judge.md): surface only diagnostics
     that clear the bar. Never silently drops a count -- the caller always
     knows how many were suppressed, even under advisory mode where nothing
     is actually filtered."""

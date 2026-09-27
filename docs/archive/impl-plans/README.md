@@ -1,7 +1,8 @@
 # Implementation plans
 
 Historical design plans for this engine, in the order they were built.
-How-to guides for extending the running system live in `docs/` (`adding-a-*.md`).
+How-to guides for extending the running system live in `docs/` (`adding-a-*.md`),
+and the judge design that the code still cites is `docs/judge.md`.
 
 1. [Engine class design](engine-class-design.md) — core vs protocol vs transport
 2. [IPC, session, snapshot](ipc-session-slice.md) — NDJSON Unix socket, SQLite snapshot, dummy REPL

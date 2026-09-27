@@ -952,7 +952,7 @@ class Orchestrator(AgentLoop):
         return "\n".join(parts)
 
     async def _apply_merge_gate(self, profile: str, task: str, result: AgentResult) -> str:
-        """Phase 8 (scoped; see docs/impl-plans/jev-exp-1.md), the merge
+        """Phase 8 (scoped; see docs/judge.md), the merge
         gate: score a subagent's result before it re-enters the parent's
         context. `_recent_results` is a best-effort sibling window (the
         last few results finished by *this* orchestrator instance, not

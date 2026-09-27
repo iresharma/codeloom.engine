@@ -1,4 +1,4 @@
-"""Phase 6b (docs/impl-plans/jev-exp-1.md): diagnostics triage after a write.
+"""Phase 6b (docs/judge.md): diagnostics triage after a write.
 
 The post-write LSP diagnostics resync in runtime/tools/edits.py is real
 ground truth (the LSP told us the truth); the judge only decides what of

@@ -1,5 +1,5 @@
 """Coverage for tools/shell.py: the run_command tool wrapper, including
-ENGINE_EXEC_APPROVAL=judged gating (Phase 1 of docs/impl-plans/jev-exp-1.md).
+ENGINE_EXEC_APPROVAL=judged gating (Phase 1 of docs/judge.md).
 """
 
 from __future__ import annotations

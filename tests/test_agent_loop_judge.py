@@ -1,5 +1,5 @@
 """Phase 2 (tool-call verification) and Phase 4 (result screening) from
-docs/impl-plans/jev-exp-1.md, exercised directly against AgentLoop's private
+docs/judge.md, exercised directly against AgentLoop's private
 _verify_call / _screen_result hooks rather than driving a full LLM round trip.
 """
 

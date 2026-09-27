@@ -5,4 +5,3 @@ env.sh
 htmlcov/
 __pycache__/
 *.py[cod]
-tmp/*

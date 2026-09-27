@@ -362,7 +362,7 @@ def test_freeze_system_ignores_later_memory(tmp_path):
 
 
 # ---------------------------------------------------------------------
-# Phase 6a (docs/impl-plans/jev-exp-1.md): compaction by relevance
+# Phase 6a (docs/judge.md): compaction by relevance
 # ---------------------------------------------------------------------
 
 

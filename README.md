@@ -904,7 +904,7 @@ To exercise the live call sites from `dummy_client.py`:
 | `run ls in the workspace` | `exec_approval` | allow card; command runs |
 | `run git push --force origin main` | `exec_approval` | prompt or block card; a prompt or a refused tool result |
 | `where is the retry logic in this codebase?` | `search_rerank` | ranked card once ripgrep returns more than 10 hits |
-| `read docs/impl-plans/jev-exp-1.md` | `result_screen` | flag/redact card only if the file is treated as agent-directed |
+| `read docs/judge.md` | `result_screen` | flag/redact card only if the file is treated as agent-directed |
 | ask for an edit (`str_replace` / `apply_patch`) | `call_verify` | allow or block card before the write |
 
 A missing key, a timeout, or a 5xx degrades silently to today's path and
@@ -1168,7 +1168,8 @@ tests/                  unit tests (write path, runtime, skills, MCP fakes)
 
 docs/
   adding-a-*.md         how to add a tool, command, profile, skill, MCP server
-  impl-plans/           historical design plans, in build order
+  judge.md              judge design: the phased checks the judge runs
+  archive/impl-plans/   historical design plans, in build order
 ```
 
 The split between `runtime/tools/` and `tools/` is deliberate.
@@ -1258,7 +1259,7 @@ tool-calling API and pass it in place of `OpenRouterLLM`.
 ## Implementation plans
 
 Design notes for how the engine was built, in order, live in
-[docs/impl-plans/](docs/impl-plans/README.md). They are historical — the
+[docs/archive/impl-plans/](docs/archive/impl-plans/README.md). They are historical — the
 how-to guides above are the source of truth for extending the running
 system.
 

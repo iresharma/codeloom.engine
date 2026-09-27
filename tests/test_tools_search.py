@@ -1,4 +1,4 @@
-"""Phase 3 (search re-ranking) from docs/impl-plans/jev-exp-1.md, exercised
+"""Phase 3 (search re-ranking) from docs/judge.md, exercised
 against tools/search.py's run_command-style wrapper around ripgrep."""
 
 from __future__ import annotations

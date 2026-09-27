@@ -400,7 +400,7 @@ async def _drop_by_relevance(
     agent_id: str = "",
     trigger: float = TRIGGER_RATIO,
 ) -> tuple[list[dict], int]:
-    """Phase 6a (docs/impl-plans/jev-exp-1.md): evict lowest-relevance
+    """Phase 6a (docs/judge.md): evict lowest-relevance
     groups first instead of strictly oldest-first. Falls back to
     `_drop_oldest` whenever there is nothing useful to score with -- judge
     disabled, no verdict, or fewer than two droppable groups -- so a `None`

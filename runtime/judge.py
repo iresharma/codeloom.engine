@@ -1,7 +1,7 @@
 """TypeSafe judge integration.
 
 Engine infrastructure, not an LLM-facing tool — the model must never be able
-to invoke this directly (see docs/impl-plans/jev-exp-1.md). Modeled on
+to invoke this directly (see docs/judge.md). Modeled on
 `runtime.tools.lsp.LSPManager`: one instance owned by the session, built at
 bind time, closed on shutdown.
 

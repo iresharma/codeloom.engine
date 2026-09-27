@@ -72,7 +72,7 @@ async def search(
 
 
 async def _rerank(ctx: ToolContext, pattern: str, candidates: list[str]) -> list[str] | None:
-    """Phase 3 (docs/impl-plans/jev-exp-1.md): rank ripgrep's candidates
+    """Phase 3 (docs/judge.md): rank ripgrep's candidates
     against the current turn's plain-language query. Returns None whenever
     reranking should not change what the caller sees (judge unusable, below
     the floor, no verdict, or advisory mode) -- the caller then keeps

@@ -1,4 +1,4 @@
-"""Phase 8, scoped to the merge gate (docs/impl-plans/jev-exp-1.md):
+"""Phase 8, scoped to the merge gate (docs/judge.md):
 scoring a subagent's result before it re-enters the parent's context.
 
 Exercised directly against Orchestrator._apply_merge_gate on a session

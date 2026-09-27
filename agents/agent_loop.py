@@ -621,7 +621,7 @@ class AgentLoop:
         return "\n".join(parts)
 
     async def _maybe_judge_loop_progress(self, turn: int, goal: str) -> bool:
-        """Phase 6c (docs/impl-plans/jev-exp-1.md). May grant a few extra
+        """Phase 6c (docs/judge.md). May grant a few extra
         turns near the ceiling, or ask the user when the judge thinks only
         they can decide. It never ends a run: in the trial traces the early
         stop cut writers off mid-debug and the tree was published anyway.
@@ -902,7 +902,7 @@ class AgentLoop:
         return output
 
     async def _verify_call(self, name: str, arguments: dict) -> str | None:
-        """Phase 2 (docs/impl-plans/jev-exp-1.md): sanity-check a tool call
+        """Phase 2 (docs/judge.md): sanity-check a tool call
         against the model's own schema and recent history before it runs.
         Returns a corrective string to send back to the model instead of
         executing, or None to proceed unchanged."""
@@ -956,7 +956,7 @@ class AgentLoop:
         return None
 
     async def _screen_result(self, name: str, arguments: dict, output: str) -> str:
-        """Phase 4 (docs/impl-plans/jev-exp-1.md): screen a tool result for
+        """Phase 4 (docs/judge.md): screen a tool result for
         embedded agent-directed instructions before it reaches the model.
         Flags wrap the suspect region in a marker rather than stripping it;
         only a secret-disclosure request is redacted outright."""
