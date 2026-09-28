@@ -10,11 +10,19 @@ _SKIP_PARAMS = {"ctx", "context", "self"}
 _JSON_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean"}
 
 
+# JPEG bytes above this stay on disk and with the model, but are not put
+# on the client event. A viewport shot at quality 60 usually fits; a long
+# full-page capture is re-encoded smaller for the wire.
+WIRE_IMAGE_BYTES = 480_000
+
+
 @dataclass
 class ToolResult:
     text: str
     image: bytes | None = None
     image_mime: str = "image/jpeg"
+    # Smaller copy for the client when `image` itself is over WIRE_IMAGE_BYTES.
+    wire_image: bytes | None = None
 
 
 @dataclass

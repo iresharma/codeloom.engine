@@ -75,6 +75,7 @@ class ToolRegistry:
                     text=text[:MAX_RESULT] + "\n...[truncated]",
                     image=result.image,
                     image_mime=result.image_mime,
+                    wire_image=result.wire_image,
                 )
             return result
         if len(result) > MAX_RESULT:

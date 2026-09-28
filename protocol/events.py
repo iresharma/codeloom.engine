@@ -160,6 +160,9 @@ class ToolCallFinished(ProtocolMessage):
     ok: bool
     duration_ms: int
     agent_id: str = ""
+    # Base64 JPEG (or PNG) for the client. Omitted when the shot is too large.
+    image: str | None = None
+    image_mime: str | None = None
 
 
 @event

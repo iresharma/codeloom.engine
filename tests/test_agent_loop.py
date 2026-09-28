@@ -252,3 +252,60 @@ def test_screenshot_history_keeps_last_two_images(tmp_path):
     assert shots[1]["content"][1]["type"] == "image_url"
     assert isinstance(shots[2]["content"], list)
     assert "s2.jpg" in shots[2]["content"][0]["text"]
+
+
+def test_screenshot_on_tool_receives_image_bytes(tmp_path):
+    from tools.base import Tool, ToolResult
+    from tools.registry import ToolRegistry
+
+    seen: list[tuple] = []
+
+    def on_tool(call_id, name, arguments, result, reasoning="", image=None, image_mime=""):
+        seen.append((name, image, image_mime, result))
+
+    async def shot(ctx, name="shot.jpg"):
+        return ToolResult(
+            text=f"saved {name}",
+            image=b"jpeg-full",
+            image_mime="image/jpeg",
+            wire_image=b"jpeg-wire",
+        )
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="browser_screenshot",
+            description="shot",
+            parameters={"type": "object", "properties": {}},
+            fn=shot,
+        )
+    )
+    loop = AgentLoop(
+        llm=FakeProvider(
+            results=[
+                LLMResult(
+                    text="",
+                    tool_calls=[
+                        ToolCall(id="1", name="browser_screenshot", arguments_json="{}")
+                    ],
+                    usage=Usage(
+                        prompt_tokens=1, completion_tokens=1, total_tokens=2, requests=1
+                    ),
+                ),
+                LLMResult(
+                    text="done",
+                    usage=Usage(
+                        prompt_tokens=1, completion_tokens=1, total_tokens=2, requests=1
+                    ),
+                ),
+            ]
+        ),
+        workspace=tmp_path,
+        tools=registry,
+        on_tool=on_tool,
+    )
+    asyncio.run(loop.run("look"))
+    assert seen[0][0] == "browser_screenshot"
+    assert seen[0][1] == b"jpeg-wire"
+    assert seen[0][2] == "image/jpeg"
+    assert seen[0][3] == "saved shot.jpg"

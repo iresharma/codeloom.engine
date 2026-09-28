@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import json
 import threading
@@ -81,7 +82,7 @@ from runtime.mcp.tokens import apply_tokens, load_tokens, save_token
 from runtime.skills.catalog import SkillCatalog
 from runtime.skills.discover import discover_skills
 from runtime.tools.tracker import FileTracker
-from tools.base import ToolContext
+from tools.base import WIRE_IMAGE_BYTES, ToolContext
 from tools.registry import discover_tools
 
 _INBOX_REPORT_PREFIXES = ("[agent ", "[worktree ")
@@ -721,7 +722,7 @@ class EngineSession:
         if not profile:
             profile = "orchestrator" if not agent_id else "unknown"
         return AgentHooks(
-            on_tool=lambda call_id, name, arguments, result, reasoning="": self._on_tool(
+            on_tool=lambda call_id, name, arguments, result, reasoning="", image=None, image_mime="": self._on_tool(
                 call_id,
                 name,
                 arguments,
@@ -729,6 +730,8 @@ class EngineSession:
                 agent_id=agent_id,
                 profile=profile,
                 reasoning=reasoning,
+                image=image,
+                image_mime=image_mime,
             ),
             on_tool_start=lambda call_id, name, arguments: self._on_tool_start(
                 call_id, name, arguments, agent_id=agent_id
@@ -936,11 +939,18 @@ class EngineSession:
         agent_id: str = "",
         profile: str = "",
         reasoning: str = "",
+        image: bytes | None = None,
+        image_mime: str = "",
     ) -> None:
         preview = result if len(result) <= 400 else result[:400] + "…"
         started = self._tool_started.pop(call_id, 0)
         duration = int((time.monotonic() - started) * 1000) if started else 0
         ok = not str(result).startswith("error:")
+        encoded = None
+        mime = None
+        if image and len(image) <= WIRE_IMAGE_BYTES:
+            encoded = base64.b64encode(image).decode("ascii")
+            mime = image_mime or "image/jpeg"
         if self._trace is not None:
             self._trace.write(
                 "tool",
@@ -962,6 +972,8 @@ class EngineSession:
                 ok=ok,
                 duration_ms=duration,
                 agent_id=agent_id,
+                image=encoded,
+                image_mime=mime,
             )
         )
         self._state.stats.tool_calls += 1

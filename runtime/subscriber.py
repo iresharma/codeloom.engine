@@ -56,7 +56,7 @@ SIZE_FIELDS: dict[type, tuple[str, ...]] = {
     ErrorOccurred: ("message",),
     WarningOccurred: ("message",),
     ToolCallStarted: ("arguments_json",),
-    ToolCallFinished: ("preview",),
+    ToolCallFinished: ("preview", "image"),
     AgentStarted: ("task",),
     AgentFinished: ("summary",),
     AgentsUpdated: (),
@@ -102,6 +102,7 @@ SMALL_STRING_FIELDS = frozenset(
         "server",
         "tag",
         "outcome",
+        "image_mime",
     }
 )
 

@@ -29,7 +29,8 @@ async def browser_console(ctx: ToolContext) -> str:
 @tool(
     description=(
         "Screenshot the current page into .engine/debug/ and send the image "
-        "to the model. Viewport JPEG by default; set full_page for the whole page."
+        "to the model and the client. Viewport JPEG by default; set full_page "
+        "for the whole page."
     ),
     parameters={
         "type": "object",
@@ -51,8 +52,13 @@ async def browser_screenshot(
     result = await impl.browser_screenshot(
         ctx.workspace, name, full_page=full_page, agent_id=ctx.agent_id
     )
-    if result.image:
-        return ToolResult(text=result.text, image=result.image, image_mime="image/jpeg")
+    if result.image or result.wire:
+        return ToolResult(
+            text=result.text,
+            image=result.image,
+            image_mime="image/jpeg",
+            wire_image=result.wire,
+        )
     return result.text
 
 

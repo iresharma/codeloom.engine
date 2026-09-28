@@ -158,7 +158,7 @@ Default profiles: `researcher`, `debugger`. Also `mcp_list_resources` and
 |---|---|
 | `browser_open` | Headless Chromium, resets that agent's console/network logs. |
 | `browser_console` | Console messages since last open. |
-| `browser_screenshot` | Viewport JPEG under `.engine/debug/`; the image is sent to the model. |
+| `browser_screenshot` | Viewport JPEG under `.engine/debug/`; the image is sent to the model and the client. |
 | `browser_network` | Failed and 4xx/5xx requests since last open. |
 
 **Server.** Used by `coder`, `tester`, and `debugger` — not `reviewer`. Leaves a process running so `browser_open` and `http_request` can hit `http://127.0.0.1:<port>`.

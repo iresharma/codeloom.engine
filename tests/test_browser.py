@@ -116,3 +116,50 @@ async def test_browser_screenshot_unavailable(tmp_path):
         assert isinstance(result, ScreenshotResult)
         assert "unavailable" in result.text
         assert result.image is None
+        assert result.wire is None
+
+
+class _ShotPage:
+    def __init__(self, payloads: list[bytes]) -> None:
+        self.payloads = list(payloads)
+        self.kwargs: list[dict] = []
+
+    async def screenshot(self, **kwargs) -> bytes:
+        self.kwargs.append(kwargs)
+        return self.payloads.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_browser_screenshot_keeps_a_small_jpeg_for_the_client(tmp_path):
+    page = _ShotPage([b"jpeg-bytes"])
+
+    async def state_for(_agent_id: str):
+        return _PageState(page=page)
+
+    with patch("runtime.tools.browser._state_for", side_effect=state_for):
+        result = await browser_screenshot(tmp_path, name="shot.jpg")
+    assert result.text == "saved .engine/debug/shot.jpg"
+    assert result.image == b"jpeg-bytes"
+    assert result.wire == b"jpeg-bytes"
+    assert page.kwargs == [{"type": "jpeg", "quality": 60, "full_page": False}]
+    assert (tmp_path / ".engine" / "debug" / "shot.jpg").read_bytes() == b"jpeg-bytes"
+
+
+@pytest.mark.asyncio
+async def test_browser_screenshot_reencodes_when_the_jpeg_is_too_big(tmp_path):
+    from tools.base import WIRE_IMAGE_BYTES
+
+    big = b"a" * (WIRE_IMAGE_BYTES + 8)
+    small = b"b" * 24
+    page = _ShotPage([big, small])
+
+    async def state_for(_agent_id: str):
+        return _PageState(page=page)
+
+    with patch("runtime.tools.browser._state_for", side_effect=state_for):
+        result = await browser_screenshot(tmp_path, name="../page.jpg", full_page=True)
+    assert result.image == big
+    assert result.wire == small
+    assert (tmp_path / ".engine" / "debug" / "page.jpg").read_bytes() == big
+    assert page.kwargs[0]["quality"] == 60
+    assert page.kwargs[1] == {"type": "jpeg", "quality": 25, "full_page": True}

@@ -49,7 +49,7 @@ from runtime.judge_decisions import (
 from runtime.prompts import PromptTimeout
 from runtime.skills.catalog import render_catalog
 from runtime.store.memory import render_memory
-from tools.base import ToolContext, ToolResult
+from tools.base import WIRE_IMAGE_BYTES, ToolContext, ToolResult
 from tools.registry import ToolRegistry
 
 
@@ -57,6 +57,15 @@ def _tool_output_text(output: str | ToolResult) -> str:
     if isinstance(output, ToolResult):
         return output.text
     return output
+
+
+def _wire_image(output: str | ToolResult) -> tuple[bytes | None, str]:
+    if not isinstance(output, ToolResult):
+        return None, ""
+    blob = output.wire_image or output.image
+    if not blob or len(blob) > WIRE_IMAGE_BYTES:
+        return None, ""
+    return blob, output.image_mime or "image/jpeg"
 
 
 def _tool_history_message(call_id: str, output: str | ToolResult) -> dict:
@@ -990,6 +999,7 @@ class AgentLoop:
                     text=screened,
                     image=output.image,
                     image_mime=output.image_mime,
+                    wire_image=output.wire_image,
                 )
             else:
                 output = screened
@@ -999,12 +1009,18 @@ class AgentLoop:
             raise
         duration = int((time.monotonic() - started) * 1000)
         if self._hooks.on_tool is not None:
+            image, image_mime = _wire_image(output)
+            extra: dict = {}
+            if image:
+                extra["image"] = image
+                extra["image_mime"] = image_mime
             self._hooks.on_tool(
                 call.id,
                 call.name,
                 arguments,
                 _tool_output_text(output),
                 reasoning=reasoning,
+                **extra,
             )
         _ = duration
         return output

@@ -438,3 +438,68 @@ def test_mcp_and_skill_protocol_round_trip():
     )
     assert snap.mcp_servers == []
     assert snap.skills == []
+
+
+def test_tool_call_finished_carries_screenshot_bytes():
+    import base64
+
+    from protocol.events import ToolCallFinished
+    from runtime.subscriber import missing_size_fields
+
+    raw = b"\xff\xd8jpeg"
+    event = ToolCallFinished(
+        call_id="c1",
+        name="browser_screenshot",
+        preview="saved .engine/debug/shot.jpg",
+        ok=True,
+        duration_ms=12,
+        image=base64.b64encode(raw).decode("ascii"),
+        image_mime="image/jpeg",
+    )
+    parsed = decode_event(encode(event))
+    assert isinstance(parsed, ToolCallFinished)
+    assert parsed.image == event.image
+    assert parsed.image_mime == "image/jpeg"
+    bare = ToolCallFinished(
+        call_id="c2",
+        name="read_file",
+        preview="ok",
+        ok=True,
+        duration_ms=1,
+    )
+    assert "image" not in bare.to_json()
+    assert "ToolCallFinished.image" not in missing_size_fields()
+
+
+def test_session_puts_screenshot_on_the_wire(tmp_path):
+    import base64
+
+    from runtime.session import EngineSession
+    from tools.base import WIRE_IMAGE_BYTES
+
+    session = EngineSession(tmp_path, tmp_path / "session.db")
+    queue = session.subscribe()
+    jpeg = b"\xff\xd8" + b"x" * 16
+    session._on_tool(
+        "c1",
+        "browser_screenshot",
+        {"name": "shot.jpg"},
+        "saved .engine/debug/shot.jpg",
+        image=jpeg,
+        image_mime="image/jpeg",
+    )
+    event = queue.get_nowait()
+    assert event.name == "browser_screenshot"
+    assert base64.b64decode(event.image) == jpeg
+    assert event.image_mime == "image/jpeg"
+
+    session._on_tool(
+        "c2",
+        "browser_screenshot",
+        {},
+        "saved .engine/debug/big.jpg",
+        image=b"y" * (WIRE_IMAGE_BYTES + 1),
+    )
+    huge = queue.get_nowait()
+    assert huge.image is None
+    assert "image" not in huge.to_json()

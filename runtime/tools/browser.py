@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tools.base import WIRE_IMAGE_BYTES
+
 _MISSING = "error: browser tools unavailable (install playwright and run playwright install chromium)"
 MAX_IMAGE_BYTES = 1_500_000
 VIEWPORT = {"width": 1280, "height": 800}
@@ -23,6 +25,7 @@ _pages: dict[str, _PageState] = {}
 class ScreenshotResult:
     text: str
     image: bytes | None = None
+    wire: bytes | None = None
 
 
 @dataclass
@@ -154,6 +157,12 @@ async def browser_console(agent_id: str = "") -> str:
         return "\n".join(state.console[-80:])
 
 
+def _wire_jpeg(image: bytes | None) -> bytes | None:
+    if image and len(image) <= WIRE_IMAGE_BYTES:
+        return image
+    return None
+
+
 async def browser_screenshot(
     workspace: Path,
     name: str = "shot.jpg",
@@ -179,11 +188,21 @@ async def browser_screenshot(
             return ScreenshotResult(f"error: {exc}")
         target.write_bytes(image)
         rel = target.relative_to(workspace).as_posix()
+        wire = _wire_jpeg(image)
+        if wire is None:
+            try:
+                smaller = await state.page.screenshot(
+                    type="jpeg", quality=25, full_page=full_page
+                )
+            except Exception:  # noqa: BLE001
+                smaller = None
+            wire = _wire_jpeg(smaller) if smaller else None
         if len(image) > MAX_IMAGE_BYTES:
             return ScreenshotResult(
-                f"saved {rel} ({len(image)} bytes; image omitted, too large)"
+                f"saved {rel} ({len(image)} bytes; image omitted, too large)",
+                wire=wire,
             )
-        return ScreenshotResult(f"saved {rel}", image)
+        return ScreenshotResult(f"saved {rel}", image, wire=wire)
 
 
 async def browser_network(agent_id: str = "") -> str:
