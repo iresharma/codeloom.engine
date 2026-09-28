@@ -227,7 +227,7 @@ The user talks only to the **orchestrator** (`agents/orchestrator.py`), which is
 
 A spawn is fire-and-forget. The personality tool returns immediately with `agent_id` (and `worktree` / `branch` for writers). The child runs in the background with a fresh history and an allowlisted tool set. When it finishes, `compress_for_parent` turns its transcript into an `AgentResult` (`status`, `summary`, `outcome`, `files_touched`, `leftover_questions`, `missing_checks`). `files_touched` is successful edits, not reads. `leftover_questions` is parsed from labeled `leftover:` / `leftover_questions:` lines in the LLM report (or the child's closer). That string is posted to the orch as an `engine` chat line and, if the orch is idle, starts a follow-up orch turn so it can brief the user or spawn the next step. Child tokens stream live as `ChatMessageStarted` / `ChatMessageDelta` / `ChatMessageAdded` with `agent_id` set; they never persist in orch chat history.
 
-`AgentLoop` is still an OpenAI-style tool-calling loop. The orch is capped at `EngineConfig.max_turns` (default 16). Each child uses its profile `max_turns` (default 32). Hitting the cap is a checkpoint, not a kill: the engine asks **continue** (same history, another `turn_slice` of 16, at most `max_continues` of 3), **handoff** (orch may spawn one writer with leftover), or **stop**. `ENGINE_TURN_CONTINUE=never` skips the prompt and hands off. The orch may emit several personality calls in one model turn; those children run concurrently. A child's own tools stay sequential so read-before-write cannot race. `EngineConfig.max_spawns_per_turn` (default 8) caps how many children may be live at once.
+`AgentLoop` is still an OpenAI-style tool-calling loop. `max_turns` counts LLM rounds: every `complete()` except an overflow retry. A reply that mixes thinking with tool calls is one round; a text-only thinking reply is also one round. Output-cutoff continuations do not add a round. Finish nudges have their own cap of 3. Executed tools have a separate fuse (`max_tool_calls`, default 50; coder 64, tester 48); `ask_user` and judge-rejected calls do not count. The orch is capped at 16 rounds. Each child uses its profile `max_turns` (coder 32, tester/reviewer 12, others 32). Hitting either cap is a checkpoint, not a kill: the engine asks **continue** (same history, another `turn_slice` of 16 rounds and `2×` extra tool calls, at most `max_continues` of 1), **handoff** (orch may spawn one writer with leftover), or **stop**. Writers auto-continue once, then hand off. `ENGINE_TURN_CONTINUE=never` skips the prompt and hands off. The orch may emit several personality calls in one model turn; those children run concurrently. `EngineConfig.max_spawns_per_turn` (default 8) caps how many children may be live at once.
 
 `coder` and `tester` run in a git worktree (`workspace/.engine/worktrees/<agent_id>` on branch `engine/<profile>/<agent_id>`) so two writers — or a writer and your dirty checkout — do not collide. `reviewer` joins that worktree so `git_diff` sees the writer's changes. When the writer finishes, uncommitted edits are committed on that branch, then the engine prompts to **merge**, **open a PR**, **keep**, or **discard**. Natural-language replies such as "please merge it" count. A `WorktreeSettled` event and an `engine` chat line report what happened. Empty worktrees (no unique commits and a clean tree) are removed without asking. After a keep — or if the prompt was missed — the orch must call `settle_worktree` rather than spawn another coder; writers cannot check out the user's branch. Leftover engine worktrees are recovered on session start so a later merge/PR still finds them. `ask`, `researcher`, and `debugger` use the main workspace. If the workspace is not a git repo, spawn still starts on the main tree.
 
@@ -340,7 +340,10 @@ current disk hash does not match the hash stored with the note.
 | `ENGINE_LLM_STREAM` | `1` | Set `0` to disable token streaming. |
 | `ENGINE_LLM_TIMEOUT_S` | `600` | LLM request timeout. |
 | `ENGINE_LLM_IDLE_S` | `90` | Stream idle timeout. |
-| `ENGINE_MAX_TURNS` | `16` | Tool-calling turns per user message. |
+| `ENGINE_MAX_TURNS` | `16` | LLM rounds per user message (text-only included). |
+| `ENGINE_MAX_TOOL_CALLS` | `50` | Executed-tool fuse; `ask_user` does not count. |
+| `ENGINE_TURN_SLICE` | `16` | Extra rounds granted on continue. |
+| `ENGINE_MAX_CONTINUES` | `1` | Continue grants per run (writers always one then handoff). |
 | `ENGINE_MAX_SPAWNS_PER_TURN` | `8` | Live concurrent subagents (not reset each orch reply). |
 | `ENGINE_EXEC_APPROVAL` | `auto` (`judged` if a TypeSafe key is set) | `auto`, `always`, `never`, or `judged`. |
 | `ENGINE_EXEC_TIMEOUT_S` | `120` | Default `run_command` timeout. |
@@ -524,7 +527,8 @@ describe those implementations to a model. The suite exercises
 | Limit | Value | Where |
 |---|---|---|
 | NDJSON line | 8 MiB | `protocol/codec.py` |
-| Agent tool turns | orch 16, children 32; cap is a continue/handoff/stop checkpoint (slice 16, max 3 continues) | `EngineConfig.max_turns` / `turn_slice` / `max_continues` / `AgentProfile.max_turns` |
+| Agent rounds | orch 16, coder 32, tester/reviewer 12; each `complete()` is a round. Cap is a continue/handoff/stop checkpoint (slice 16, max 1 continue) | `EngineConfig.max_turns` / `turn_slice` / `max_continues` / `AgentProfile.max_turns` |
+| Tool-call fuse | 50 default; coder 64, tester 48. Parallel tools in one round count as N fuse, 1 round | `EngineConfig.max_tool_calls` / `AgentProfile.max_tool_calls` |
 | Live subagents | 8 | `EngineConfig.max_spawns_per_turn` |
 | Subscriber buffer | 4096 items / 1 MiB | `runtime/subscriber.py` |
 | Per-event soft limit | 512 KiB | `EVENT_SOFT_LIMIT` |

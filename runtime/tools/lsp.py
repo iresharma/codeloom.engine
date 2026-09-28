@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import queue
+import shutil
 import subprocess
 import threading
 import time
@@ -214,6 +215,37 @@ class LSPManager:
         ),
     }
 
+    @staticmethod
+    def _prefer_installed(cmd: list[str]) -> list[str]:
+        """Use a language server already on PATH.
+
+        The published commands go through ``npx -y``, which downloads the
+        package the first time diagnostics run. Sandbox images install
+        pyright-langserver and typescript-language-server, so those calls
+        skip the registry. A machine without the binary still uses npx.
+        """
+        if not cmd or cmd[0] != "npx":
+            return list(cmd)
+        args = cmd[1:]
+        index = 0
+        binary: str | None = None
+        while index < len(args):
+            token = args[index]
+            if token in ("-y", "--yes"):
+                index += 1
+                continue
+            if token in ("-p", "--package") and index + 1 < len(args):
+                index += 2
+                continue
+            binary = token
+            break
+        if binary is None:
+            return list(cmd)
+        found = shutil.which(binary)
+        if not found:
+            return list(cmd)
+        return [found, *args[index + 1 :]]
+
     VALID_ACTIONS: ClassVar[dict[str, str]] = {
         "references": "textDocument/references",
         "definition": "textDocument/definition",
@@ -262,7 +294,7 @@ class LSPManager:
             if client is not None:
                 return client
 
-        client = LSPClient(cfg.cmd, cwd=self.root)
+        client = LSPClient(self._prefer_installed(cfg.cmd), cwd=self.root)
         client.request(
             "initialize",
             {

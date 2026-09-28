@@ -42,6 +42,7 @@ GIT = [
     "git_range",
 ]
 SHELL = ["run_command"]
+TOOLCHAIN = ["toolchain"]
 WEB = ["web_search", "web_fetch"]
 BROWSER = [
     "browser_open",
@@ -189,6 +190,7 @@ class AgentProfile:
     write_globs: list[str] | None = None
     required_tools: list[str] = field(default_factory=list)
     max_turns: int = 32
+    max_tool_calls: int = 50
     model: str | None = None
     temperature: float = 0.2
     needs_worktree: bool = False

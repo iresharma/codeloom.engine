@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from protocol.commands import (
     CloseFile,
     CreatePath,
@@ -23,6 +25,53 @@ from runtime.tools.fs import (
     relative_posix,
     resolve_in_workspace,
 )
+from runtime.tools.git import is_repo, list_engine_worktrees, read_head_file
+
+
+def _open_roots(workspace: Path) -> list[Path]:
+    root = Path(workspace).resolve()
+    roots = [root]
+    seen = {root}
+    for _, _, dest in list_engine_worktrees(root):
+        resolved = Path(dest).resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            roots.append(resolved)
+    return roots
+
+
+def _original_for(root: Path, rel: str, content: str) -> str | None:
+    if not is_repo(root):
+        return None
+    blob = read_head_file(root, rel)
+    if blob is None:
+        return ""
+    if blob != content:
+        return blob
+    return None
+
+
+def load_open_file(workspace: Path, path: str) -> tuple[str, str, str | None]:
+    """Return (rel, working-tree text, original). original is None when the
+    file matches HEAD, "" when it is new/untracked, or the HEAD blob when
+    dirty. Prefers a dirty engine worktree copy over the main checkout."""
+    found: list[tuple[str, str, str | None]] = []
+    for index, root in enumerate(_open_roots(workspace)):
+        try:
+            rel, content = read_text(root, path)
+        except FileNotFoundError:
+            continue
+        except WorkspacePathError:
+            if index == 0:
+                raise
+            continue
+        found.append((rel, content, _original_for(root, rel, content)))
+    if not found:
+        raise FileNotFoundError(path)
+    for rel, content, original in found:
+        if original is not None:
+            return rel, content, original
+    return found[0]
 
 
 @handles(OpenFile)
@@ -30,7 +79,7 @@ def open_file(session, command: OpenFile) -> None:
     if not session._require_session():
         return
     try:
-        rel, _content = read_text(session._workspace, command.path)
+        rel, _content, _original = load_open_file(session._workspace, command.path)
     except FileNotFoundError:
         session._emit(ErrorOccurred(message=f"file not found: {command.path}"))
         return

@@ -4,6 +4,7 @@ import asyncio
 
 from agents.agent_loop import AgentLoop
 from agents.compactor import AgentResult, compress_for_parent
+from agents.diagnostics import diagnostics_gaps, format_diagnostics_gaps
 from agents.profile import (
     REPORT_TO_ORCH,
     AgentProfile,
@@ -17,6 +18,11 @@ CLOSING_REPORT = (
     "test_plan:, and the checks you ran."
 )
 FINISH_MISSING_TOOLS = "Not finished yet: call {tools} first. " + CLOSING_REPORT
+FINISH_DIRTY_LSP = (
+    "Not finished yet: get_diagnostics is not clean on {detail}. "
+    "Fix every Error, then call get_diagnostics again on each changed file "
+    "after the last edit. Warnings are allowed. " + CLOSING_REPORT
+)
 FINISH_NEEDS_TEST = (
     "Not finished yet: this repo has tests, and you changed source ({paths}) "
     "without adding or updating one. Add or extend a test next to the existing "
@@ -46,6 +52,15 @@ class Subagent(AgentLoop):
         self._repo_has_tests: bool | None = None
         if profile.max_turns:
             self._config.max_turns = profile.max_turns
+        if profile.max_tool_calls:
+            self._config.max_tool_calls = profile.max_tool_calls
+
+    async def _offer_continue(self, continues: int) -> str:
+        # One extra slice is enough for a task that ran slightly long.
+        # A second continue is how Auto burned millions of cached tokens.
+        if self._profile.needs_worktree:
+            return "continue" if continues < 1 else "handoff"
+        return await super()._offer_continue(continues)
 
     async def _finish_nudge(self) -> str | None:
         missing = [
@@ -53,11 +68,29 @@ class Subagent(AgentLoop):
         ]
         if missing:
             return FINISH_MISSING_TOOLS.format(tools=", ".join(missing))
+        gap = self._diagnostics_nudge()
+        if gap:
+            return gap
         if self._profile.requires_tests:
             source = await self._untested_source()
             if source:
                 return FINISH_NEEDS_TEST.format(paths=", ".join(source[:5]))
         return None
+
+    def _diagnostics_nudge(self) -> str | None:
+        if "get_diagnostics" not in self._profile.required_tools:
+            return None
+        gaps = diagnostics_gaps(self._files_touched, self._diag_by_path)
+        if not gaps:
+            return None
+        return FINISH_DIRTY_LSP.format(detail=format_diagnostics_gaps(gaps[:8]))
+
+    def _tools_called_for_finish(self) -> set[str]:
+        called = set(self._tools_called)
+        if "get_diagnostics" in self._profile.required_tools:
+            if diagnostics_gaps(self._files_touched, self._diag_by_path):
+                called.discard("get_diagnostics")
+        return called
 
     async def _untested_source(self) -> list[str]:
         touched = list(self._files_touched)
@@ -83,7 +116,7 @@ class Subagent(AgentLoop):
                 status=status,
                 required_tools=self._profile.required_tools,
                 files_touched=list(self._files_touched),
-                tools_called=set(self._tools_called),
+                tools_called=self._tools_called_for_finish(),
             )
         except Exception as exc:  # noqa: BLE001
             return AgentResult(

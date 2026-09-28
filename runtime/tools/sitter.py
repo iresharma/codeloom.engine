@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -238,6 +239,219 @@ def syntax_gate(
         if edited is not None and edited[0] <= item.line <= edited[1]:
             return _format_syntax_error(path, post, created=False)
     return None
+
+
+_JS_FUNCTION_TYPES = {
+    "function_declaration",
+    "function_expression",
+    "arrow_function",
+    "method_definition",
+    "generator_function",
+    "generator_function_declaration",
+}
+_PY_OWNER_TYPES = {"function_definition", "class_definition", "module"}
+
+
+def binding_gate(
+    path: str,
+    new_text: str,
+    old_text: str | None,
+    language: str = "",
+) -> str | None:
+    """Refuse an edit that introduces a same-scope duplicate binding."""
+    lang = language_for(path, language)
+    if lang is None:
+        return None
+    try:
+        new_map = _collect_bindings(lang, new_text.encode("utf-8"))
+        old_map = (
+            _collect_bindings(lang, old_text.encode("utf-8"))
+            if old_text is not None
+            else {}
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    for key, new_lines in new_map.items():
+        old_lines = old_map.get(key) or []
+        if len(new_lines) > len(old_lines) and len(new_lines) >= 2:
+            _scope, name = key
+            first, second = new_lines[0], new_lines[1]
+            return (
+                f"error: binding gate rejected edit of '{path}'\n"
+                f"  '{name}' redeclared in the same scope "
+                f"(lines {first} and {second})"
+            )
+    return None
+
+
+def _collect_bindings(lang: str, source: bytes) -> dict[tuple[str, str], list[int]]:
+    tree = parse_bytes(lang, source)
+    found: dict[tuple[str, str], list[int]] = {}
+    if lang == "python":
+        _walk_python_bindings(tree.root_node, source, found)
+    elif lang == "go":
+        _walk_go_bindings(tree.root_node, source, found)
+    else:
+        _walk_js_bindings(tree.root_node, source, found)
+    return found
+
+
+def _add_binding(
+    found: dict[tuple[str, str], list[int]], scope: str, name: str, node
+) -> None:
+    if not name:
+        return
+    key = (scope, name)
+    line, _col = _pos(node)
+    found.setdefault(key, []).append(line)
+
+
+def _nth_of_type(node) -> int:
+    parent = node.parent
+    if parent is None:
+        return 0
+    index = 0
+    for child in parent.children:
+        if child.type != node.type:
+            continue
+        if child.start_byte == node.start_byte and child.end_byte == node.end_byte:
+            return index
+        index += 1
+    return 0
+
+
+def _assigned_name(fn_node, source: bytes) -> str | None:
+    parent = fn_node.parent
+    if parent is None:
+        return None
+    if parent.type == "variable_declarator":
+        return _node_name(parent, source)
+    if parent.type == "pair":
+        key = parent.child_by_field_name("key")
+        if key is not None:
+            return _text(source, key)
+    return None
+
+
+def _js_function_label(node, source: bytes) -> str:
+    name = _node_name(node, source) or _assigned_name(node, source)
+    if name:
+        return f"fn:{name}"
+    return f"fn:anon#{_nth_of_type(node)}"
+
+
+def _js_scope(node, source: bytes, kind: str) -> str:
+    current = node
+    parts: list[str] = []
+    while current is not None:
+        if current.type == "program":
+            parts.append("program")
+        elif kind == "block" and current.type == "statement_block":
+            parent = current.parent
+            if parent is not None and parent.type in _JS_FUNCTION_TYPES:
+                parts.append(_js_function_label(parent, source))
+            else:
+                parts.append(f"block#{_nth_of_type(current)}")
+        elif kind == "function" and current.type in _JS_FUNCTION_TYPES:
+            parts.append(_js_function_label(current, source))
+        current = current.parent
+    parts.reverse()
+    return "/".join(parts) or "program"
+
+
+def _js_decl_name(node, source: bytes) -> str:
+    name = node.child_by_field_name("name")
+    if name is None:
+        return ""
+    if name.type not in {"identifier", "type_identifier", "property_identifier"}:
+        return ""
+    return _text(source, name)
+
+
+def _walk_js_bindings(root, source: bytes, found) -> None:
+    def walk(node) -> None:
+        if node.type in {"lexical_declaration", "variable_declaration"}:
+            kind = "function" if node.type == "variable_declaration" else "block"
+            if node.type == "lexical_declaration":
+                kind_field = node.child_by_field_name("kind")
+                text = _text(source, kind_field) if kind_field is not None else ""
+                if text.strip() == "var":
+                    kind = "function"
+            for child in node.children:
+                if child.type != "variable_declarator":
+                    continue
+                name = _js_decl_name(child, source)
+                _add_binding(found, _js_scope(node, source, kind), name, child)
+        elif node.type in {"function_declaration", "class_declaration",
+                           "generator_function_declaration"}:
+            name = _node_name(node, source) or ""
+            kind = "function" if node.type != "class_declaration" else "block"
+            owner = node.parent or node
+            _add_binding(found, _js_scope(owner, source, kind), name, node)
+        elif node.type in {"interface_declaration", "type_alias_declaration"}:
+            name = _node_name(node, source) or ""
+            _add_binding(found, _js_scope(node, source, "block"), name, node)
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+
+
+def _python_scope(node, source: bytes) -> str:
+    parent = node.parent
+    while parent is not None and parent.type == "decorated_definition":
+        parent = parent.parent
+    if parent is None or parent.type == "module":
+        return "module"
+    owner = parent.parent
+    while owner is not None and owner.type not in _PY_OWNER_TYPES:
+        owner = owner.parent
+    if owner is None or owner.type == "module":
+        return "module"
+    name = _node_name(owner, source) or owner.type
+    return f"{owner.type}:{name}"
+
+
+def _walk_python_bindings(root, source: bytes, found) -> None:
+    def walk(node) -> None:
+        if node.type in {"function_definition", "class_definition"}:
+            name = _node_name(node, source) or ""
+            _add_binding(found, _python_scope(node, source), name, node)
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+
+
+def _go_receiver(node, source: bytes) -> str:
+    recv = node.child_by_field_name("receiver")
+    if recv is None:
+        return ""
+    text = _text(source, recv)
+    return re.sub(r"[^A-Za-z0-9_]+", "", text)
+
+
+def _walk_go_bindings(root, source: bytes, found) -> None:
+    def walk(node) -> None:
+        if node.type == "function_declaration":
+            name = _node_name(node, source) or ""
+            _add_binding(found, "file:func", name, node)
+        elif node.type == "method_declaration":
+            name = _node_name(node, source) or ""
+            recv = _go_receiver(node, source) or "recv"
+            _add_binding(found, f"method:{recv}", name, node)
+        elif node.type == "type_declaration":
+            for child in node.children:
+                if child.type != "type_spec":
+                    continue
+                inner = child.child_by_field_name("name")
+                if inner is None:
+                    continue
+                _add_binding(found, "file:type", _text(source, inner), child)
+        for child in node.children:
+            walk(child)
+
+    walk(root)
 
 
 def _format_syntax_error(path: str, faults: list[SyntaxFault], created: bool) -> str:

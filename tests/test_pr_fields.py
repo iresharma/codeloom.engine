@@ -39,6 +39,11 @@ def test_title_short_summary_kept_whole():
     assert pr_title_from_summary("Cap HTTP redirects at 5") == "Cap HTTP redirects at 5"
 
 
+def test_title_uses_what_block_not_paths_label():
+    summary = "paths: None changed\nwhat: add a web workspace mock\nverdict: ok\n"
+    assert pr_title_from_summary(summary) == "add a web workspace mock"
+
+
 def test_title_takes_only_the_first_sentence():
     summary = (
         "Cap HTTP redirects at five hops. Also pinned pyinstaller in the "

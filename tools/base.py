@@ -35,6 +35,7 @@ class ToolContext:
     judge: Any = None
     on_judgement: Any = None
     user_request: str = ""
+    origin_request: str = ""
 
 
 @dataclass

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from protocol.snapshot import GitState
 from runtime.tools.fs import WorkspacePathError, resolve_in_workspace
+from runtime.tools.toolchain import detect_toolchain, skip_commit_path
 
 SETTLE_CHOICES = ("merge", "pr", "keep", "discard")
 LOG_MAX = 50
@@ -22,6 +23,19 @@ _ENGINE_EMAIL = "engine@localhost"
 PR_TITLE_MAX = 72
 PR_BODY_MAX = 60_000
 _SENTENCE_END = re.compile(r"(?<=[.!?])[\s]")
+_BRIEFING_LABELS = frozenset(
+    {
+        "what",
+        "paths",
+        "facts",
+        "verdict",
+        "leftover",
+        "reasoning",
+        "test_plan",
+        "testplan",
+        "checks",
+    }
+)
 
 
 def read_state(workspace: Path, *, diffs: bool = True) -> GitState:
@@ -46,6 +60,47 @@ def read_state(workspace: Path, *, diffs: bool = True) -> GitState:
     )
 
 
+def read_workspace_state(workspace: Path, *, diffs: bool = True) -> GitState:
+    """Git status for the main checkout plus every engine worktree.
+
+    Writers edit linked worktrees, so `read_state(workspace)` stays clean
+    while the Changes panel would otherwise show nothing.
+    """
+    workspace = workspace.resolve()
+    main = read_state(workspace, diffs=diffs)
+    staged = list(main.staged)
+    unstaged = list(main.unstaged)
+    untracked = list(main.untracked)
+    seen = set(staged + unstaged + untracked)
+    base = _run(workspace, "rev-parse", "HEAD").strip() if _is_repo(workspace) else ""
+
+    def _add(bucket: list[str], path: str) -> None:
+        if path and path not in seen:
+            seen.add(path)
+            bucket.append(path)
+
+    for _agent_id, _branch, dest in list_engine_worktrees(workspace):
+        child = read_state(dest, diffs=False)
+        for path in child.staged:
+            _add(staged, path)
+        for path in child.unstaged:
+            _add(unstaged, path)
+        for path in child.untracked:
+            _add(untracked, path)
+        if base:
+            for path in _run(dest, "diff", "--name-only", base).splitlines():
+                _add(unstaged, path.strip())
+    return GitState(
+        branch=main.branch,
+        dirty=bool(staged or unstaged or untracked),
+        staged=staged,
+        unstaged=unstaged,
+        untracked=untracked,
+        staged_diff=main.staged_diff,
+        unstaged_diff=main.unstaged_diff,
+    )
+
+
 def _is_repo(workspace: Path) -> bool:
     try:
         output = _run(workspace, "rev-parse", "--is-inside-work-tree")
@@ -56,6 +111,16 @@ def _is_repo(workspace: Path) -> bool:
 
 def is_repo(workspace: Path) -> bool:
     return _is_repo(workspace)
+
+
+def read_head_file(repo: Path, rel: str) -> str | None:
+    """Blob at HEAD:rel, or None if the path is not in HEAD."""
+    if not rel or not _is_repo(repo):
+        return None
+    result = exec_cmd(repo, ["git", "show", f"HEAD:{rel}"], timeout=10)
+    if result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def add_agent_worktree(
@@ -164,6 +229,28 @@ def normalize_settle_action(text: str) -> str:
     return parse_settle_intent(text) or "keep"
 
 
+def _title_source(summary: str) -> str:
+    """Prefer the what: body over briefing labels like paths:."""
+    what = ""
+    unlabeled: list[str] = []
+    for line in (summary or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        key, sep, rest = stripped.partition(":")
+        key_norm = key.strip().lower().replace(" ", "")
+        if sep and key_norm in _BRIEFING_LABELS:
+            if key_norm == "what" and rest.strip():
+                what = rest.strip()
+            continue
+        unlabeled.append(stripped)
+    if what:
+        return what
+    if unlabeled:
+        return "\n".join(unlabeled)
+    return ""
+
+
 def pr_title_from_summary(summary: str, *, limit: int = PR_TITLE_MAX) -> str:
     """First sentence of `summary`, cut on a word boundary to `limit` chars.
 
@@ -172,14 +259,15 @@ def pr_title_from_summary(summary: str, *, limit: int = PR_TITLE_MAX) -> str:
     alone is longer than `limit` there is no word boundary to cut on, so
     that single word is returned whole rather than sliced.
     """
-    first = next((ln for ln in (summary or "").splitlines() if ln.strip()), "")
+    source = _title_source(summary)
+    first = next((ln for ln in (source or "").splitlines() if ln.strip()), "")
     heading = _TITLE_LINE.match(first)
     if heading:
         # A summary that opens with a standalone **Title** or `# Title` line
         # already has one: use it whole rather than its first sentence.
         title = " ".join(next(g for g in heading.groups() if g).split())
         return pr_title_from_summary(title, limit=limit)
-    text = " ".join((summary or "").replace("\n", " ").split())
+    text = " ".join((source or "").replace("\n", " ").split())
     if not text:
         return ""
     # Strip a leading bullet/label the orchestrator may have opened with.
@@ -378,12 +466,32 @@ def build_pr_body(
     return _clip("\n\n".join(parts), PR_BODY_MAX)
 
 
+def _paths_to_stage(dest: Path, state) -> list[str]:
+    manager = detect_toolchain(dest).manager
+    out: list[str] = []
+    seen: set[str] = set()
+    untracked = set(state.untracked)
+    for path in (*state.staged, *state.unstaged, *state.untracked):
+        if not path or path in seen:
+            continue
+        if skip_commit_path(
+            dest, path, untracked=path in untracked, manager=manager
+        ):
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
 def commit_if_dirty(dest: Path, message: str) -> str:
     dest = Path(dest)
     state = read_state(dest, diffs=False)
     if not state.dirty:
         return ""
-    added = _exec(dest, ["git", "add", "-A"])
+    to_stage = _paths_to_stage(dest, state)
+    if not to_stage:
+        return ""
+    added = _exec(dest, ["git", "add", "--", *to_stage])
     if added.returncode != 0:
         return (added.stderr or added.stdout or "git add failed").strip()
     commit = _exec(
@@ -699,6 +807,8 @@ def _parse_porcelain(porcelain: str) -> tuple[list[str], list[str], list[str]]:
         path = raw[3:]
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
+        if not _keep_status_path(path):
+            continue
         if code == "??":
             untracked.append(path)
             continue
@@ -707,3 +817,8 @@ def _parse_porcelain(porcelain: str) -> tuple[list[str], list[str], list[str]]:
         if code[1] not in (" ", "?"):
             unstaged.append(path)
     return staged, unstaged, untracked
+
+
+def _keep_status_path(path: str) -> bool:
+    head = path.split("/", 1)[0].rstrip("/")
+    return head not in {".engine", ".git"}

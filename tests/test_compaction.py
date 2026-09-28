@@ -300,6 +300,8 @@ def test_child_compact_defaults():
     from runtime.config import (
         CHILD_COMPACT_TRIGGER,
         CHILD_KEEP_FULL_TOOLS,
+        WRITER_COMPACT_TRIGGER,
+        WRITER_KEEP_FULL_TOOLS,
         EngineConfig,
     )
 
@@ -308,6 +310,8 @@ def test_child_compact_defaults():
     assert orch.keep_full_tools == 3
     assert CHILD_COMPACT_TRIGGER == 2.0
     assert CHILD_KEEP_FULL_TOOLS == 10
+    assert WRITER_COMPACT_TRIGGER == 0.7
+    assert WRITER_KEEP_FULL_TOOLS == 3
 
 
 def test_make_subagent_uses_child_compact(tmp_path):
@@ -316,6 +320,8 @@ def test_make_subagent_uses_child_compact(tmp_path):
     from runtime.config import (
         CHILD_COMPACT_TRIGGER,
         CHILD_KEEP_FULL_TOOLS,
+        WRITER_COMPACT_TRIGGER,
+        WRITER_KEEP_FULL_TOOLS,
         EngineConfig,
     )
     from tests.fakes import FakeProvider
@@ -344,6 +350,11 @@ def test_make_subagent_uses_child_compact(tmp_path):
         discover_profiles().get("ask"), "ask1", tmp_path, isolated=False
     )
     assert ask._model is None
+    coder = orch._make_subagent(
+        discover_profiles().get("coder"), "coder1", tmp_path, isolated=True
+    )
+    assert coder._config.compact_trigger == WRITER_COMPACT_TRIGGER
+    assert coder._config.keep_full_tools == WRITER_KEEP_FULL_TOOLS
 
 
 def test_freeze_system_ignores_later_memory(tmp_path):

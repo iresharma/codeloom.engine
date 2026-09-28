@@ -10,6 +10,7 @@ def test_defaults(monkeypatch, tmp_path):
     monkeypatch.delenv("ENGINE_MAX_TURNS", raising=False)
     monkeypatch.delenv("ENGINE_TURN_SLICE", raising=False)
     monkeypatch.delenv("ENGINE_MAX_CONTINUES", raising=False)
+    monkeypatch.delenv("ENGINE_MAX_TOOL_CALLS", raising=False)
     monkeypatch.delenv("ENGINE_TURN_CONTINUE", raising=False)
     monkeypatch.delenv("ENGINE_MAX_SPAWNS_PER_TURN", raising=False)
     monkeypatch.delenv("ENGINE_EXEC_APPROVAL", raising=False)
@@ -23,7 +24,8 @@ def test_defaults(monkeypatch, tmp_path):
     config = EngineConfig.from_env(tmp_path)
     assert config.max_turns == 16
     assert config.turn_slice == 16
-    assert config.max_continues == 3
+    assert config.max_continues == 1
+    assert config.max_tool_calls == 50
     assert config.turn_continue == "prompt"
     assert config.max_spawns_per_turn == 8
     assert config.exec_approval == "auto"
@@ -41,12 +43,14 @@ def test_reads_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGINE_MAX_TURNS", "4")
     monkeypatch.setenv("ENGINE_TURN_SLICE", "8")
     monkeypatch.setenv("ENGINE_MAX_CONTINUES", "1")
+    monkeypatch.setenv("ENGINE_MAX_TOOL_CALLS", "40")
     monkeypatch.setenv("ENGINE_TURN_CONTINUE", "never")
     monkeypatch.setenv("ENGINE_LLM_STREAM", "0")
     config = EngineConfig.from_env(tmp_path)
     assert config.max_turns == 4
     assert config.turn_slice == 8
     assert config.max_continues == 1
+    assert config.max_tool_calls == 40
     assert config.turn_continue == "never"
     assert config.llm_stream is False
 

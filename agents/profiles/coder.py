@@ -12,6 +12,7 @@ from agents.profile import (
     SITTER,
     SKILLS,
     TLDR,
+    TOOLCHAIN,
     AgentProfile,
 )
 
@@ -26,11 +27,11 @@ Make targeted edits. The default is str_replace with enough surrounding context 
 
 If this repo already has tests, a source change is not finished until a test covers it. Add or extend a test next to the existing ones, in the same style, and run the suite. The engine keeps you in this same run and this same worktree until that test file is edited. Do not treat the first closing report as the end.
 
-Match the surrounding file's style and naming. Before importing a library, confirm it is already used nearby or listed in the manifest (package.json, pyproject.toml, requirements.txt, go.mod). To add a new one, use the package manager rather than hand-editing the manifest. If a convention is unclear, one git_log or git_blame on the file beats guessing. Never hardcode or log secrets, keys, or tokens.
+Match the surrounding file's style and naming. Before importing a library, confirm it is already used nearby or listed in the manifest (package.json, pyproject.toml, requirements.txt, go.mod). To add or remove a dependency, call toolchain add / toolchain remove. Do not hand-edit package.json, lockfiles, tsconfig, go.mod, or pyproject.toml. Use toolchain typecheck, test, or run instead of bare tsc or the wrong package manager. If a convention is unclear, one git_log or git_blame on the file beats guessing. Never hardcode or log secrets, keys, or tokens.
 
 Do only what the task asks. A related cleanup goes in leftover, not into this edit. Before changing a signature other code may call, find_references and update every call site — or name the ones you did not touch.
 
-You are not done until get_diagnostics has run on the files you changed. Prefer also running compile or targeted tests via run_command; a non-zero exit is information. run_command starts at the root of this worktree, so `go build ./...` or `pytest` runs as is. Commands have no TTY. Do not use run_command to explore the tree. Use tldr for flags and runtime_info if versions matter.
+You are not done until get_diagnostics returns clean (no Error diagnostics) on every file you changed, after the last edit to that file. Warnings are allowed. A call that failed, or that still lists Error: lines, is not a finish — fix the errors and call get_diagnostics again. Prefer also running compile or targeted tests via run_command; a non-zero exit is information. run_command starts at the root of this worktree, so `go build ./...` or `pytest` runs as is. Commands have no TTY. Do not use run_command to explore the tree. Use tldr for flags and runtime_info if versions matter.
 
 If the same fix fails twice, change approach or put the blocker in leftover. A third identical attempt is not progress.
 
@@ -50,13 +51,15 @@ PROFILE = AgentProfile(
     description=(
         "Implement code changes in an isolated git worktree from a brief that "
         "already names paths. Has edit tools and run_command. "
-        "Must call get_diagnostics before finishing. Not for repo surveys."
+        "Must get a clean get_diagnostics result on changed files before finishing. "
+        "Not for repo surveys."
     ),
     system_prompt=CODER_SYSTEM,
-    tool_names=NAV + SITTER + LSP + EDIT + SHELL + GIT + TLDR + ENV + SCAN + SKILLS + MEMORY,
+    tool_names=NAV + SITTER + LSP + EDIT + SHELL + TOOLCHAIN + GIT + TLDR + ENV + SCAN + SKILLS + MEMORY,
     write_globs=None,
     required_tools=["get_diagnostics"],
     max_turns=32,
+    max_tool_calls=64,
     needs_worktree=True,
     requires_tests=True,
 )

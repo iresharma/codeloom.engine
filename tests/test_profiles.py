@@ -70,6 +70,7 @@ def test_orch_and_profile_allowlists():
     assert "gh_pr_view" not in ask.names()
     coder = tools.subset(profiles.get("coder").tool_names)
     assert "str_replace" in coder.names()
+    assert "toolchain" in coder.names()
     assert "ask" not in coder.names()
     assert "git_log" in coder.names()
     assert "tldr" in coder.names()
@@ -132,9 +133,12 @@ def test_orch_and_profile_allowlists():
     assert profiles.get("reviewer").join_worktree is True
     assert profiles.get("ask").max_turns == 32
     assert profiles.get("coder").max_turns == 32
-    assert profiles.get("tester").max_turns == 32
+    assert profiles.get("tester").max_turns == 12
     assert profiles.get("debugger").max_turns == 32
     assert profiles.get("reviewer").max_turns == 12
+    assert profiles.get("coder").max_tool_calls == 64
+    assert profiles.get("tester").max_tool_calls == 48
+    assert profiles.get("ask").max_tool_calls == 50
     assert profiles.get("reviewer").required_tools == ["git_diff"]
     assert profiles.get("researcher").max_turns == 32
     assert profiles.get("ask").model is None

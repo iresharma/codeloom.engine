@@ -480,6 +480,45 @@ class TestLSPManager:
         mock_client.request.assert_called()
         assert manager._clients[tuple(cfg.cmd)] is mock_client
 
+    def test_prefer_installed_uses_server_on_path(self, monkeypatch):
+        monkeypatch.setattr(
+            "runtime.tools.lsp.shutil.which",
+            lambda name: "/usr/local/bin/pyright-langserver"
+            if name == "pyright-langserver"
+            else None,
+        )
+        cmd = LSPManager._prefer_installed(
+            ["npx", "-y", "-p", "pyright", "pyright-langserver", "--stdio"]
+        )
+        assert cmd == ["/usr/local/bin/pyright-langserver", "--stdio"]
+
+    def test_prefer_installed_keeps_npx_when_missing(self, monkeypatch):
+        monkeypatch.setattr("runtime.tools.lsp.shutil.which", lambda _name: None)
+        cmd = ["npx", "-y", "typescript-language-server", "--stdio"]
+        assert LSPManager._prefer_installed(cmd) == cmd
+
+    def test_prefer_installed_leaves_gopls_command(self):
+        assert LSPManager._prefer_installed(["gopls", "serve"]) == ["gopls", "serve"]
+
+    @patch("runtime.tools.lsp.LSPClient")
+    @patch(
+        "runtime.tools.lsp.shutil.which",
+        return_value="/usr/local/bin/typescript-language-server",
+    )
+    def test_client_for_skips_npx_when_server_is_installed(
+        self, _which, mock_client_class, tmp_path
+    ):
+        manager = LSPManager(tmp_path)
+        mock_client = MagicMock()
+        mock_client._alive = False
+        mock_client.request.return_value = {}
+        mock_client_class.return_value = mock_client
+        manager._client_for(LSPManager.SERVER_CONFIGS["typescript"])
+        assert mock_client_class.call_args.args[0] == [
+            "/usr/local/bin/typescript-language-server",
+            "--stdio",
+        ]
+
     def test_lspmanager_iter_source_files(self, tmp_path):
         """Test iterating source files."""
         manager = LSPManager(tmp_path)

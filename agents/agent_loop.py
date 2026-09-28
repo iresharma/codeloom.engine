@@ -17,6 +17,7 @@ from agents.compactor import (
     looks_like_overflow,
     validate_history,
 )
+from agents.diagnostics import classify_diagnostics_output, normalize_rel_path
 from agents.hooks import AgentHooks
 from llm.openrouter import OpenRouterLLM
 from llm.provider import Usage
@@ -99,19 +100,23 @@ DEFAULT_SYSTEM = (
 )
 
 CLOSER_MESSAGE = (
-    "You have two tool turns left. Finish the current edit, or write a closer "
+    "You have two rounds left. Finish the current edit, or write a closer "
     "with labeled leftover: (paths, done, next). Do not start new exploration."
 )
 CONTINUE_GRANT = (
-    "The user granted another {slice} tool turns. Continue from leftover. "
+    "The user granted another {slice} rounds. Continue from leftover. "
     "Do not re-explore files you already read."
 )
 TURN_CONTINUE_CHOICES = ("continue", "handoff", "stop")
-# A text-only reply does not spend a tool turn, so the finish check needs its
-# own ceiling or a model that keeps replying with prose would never stop.
+# Finish nudges have their own cap so a missing required tool does not burn
+# the whole round budget, and a model that only replies with prose still stops.
 FINISH_NUDGE_CAP = 3
 CONTINUE_ALIASES = frozenset({"continue", "c", "yes", "y", "resume"})
 STOP_ALIASES = frozenset({"stop", "s"})
+# Extra tool-call budget granted with each continue slice (tools per extra round).
+TOOL_FUSE_PER_ROUND = 2
+# Tools that talk to the user are not a fuse spend; the LLM round already counts.
+_FREE_TOOL_NAMES = frozenset({"ask_user"})
 
 
 def _flag_region(content: str) -> str:
@@ -162,6 +167,7 @@ class AgentLoop:
         on_memory=None,
         judge=None,
         on_judgement=None,
+        origin_request: str = "",
     ):
         self._llm = llm
         self._tools = tools or ToolRegistry()
@@ -175,11 +181,17 @@ class AgentLoop:
         self.profile = profile
         self._concurrent_tools = concurrent_tools
         self._tools_called: set[str] = set()
+        self._tool_call_count = 0
         self._files_touched: list[str] = []
+        self._diag_by_path: dict[str, str] = {}
 
         def record_edit(path, diff, tool, edit_id) -> None:
-            if path and path not in self._files_touched:
-                self._files_touched.append(path)
+            if path:
+                key = normalize_rel_path(path)
+                if key and key not in self._files_touched:
+                    self._files_touched.append(key)
+                if key:
+                    self._diag_by_path.pop(key, None)
             if on_edit is not None:
                 on_edit(path, diff, tool, edit_id)
 
@@ -203,6 +215,7 @@ class AgentLoop:
             on_memory=on_memory,
             judge=judge,
             on_judgement=on_judgement,
+            origin_request=origin_request,
         )
         self._system_prompt = system_prompt
         self._on_tool = self._hooks.on_tool
@@ -468,6 +481,8 @@ class AgentLoop:
             self._hooks.on_message(self._message_id, text)
 
     async def run(self, task: str) -> str:
+        if not self._ctx.origin_request:
+            self._ctx.origin_request = task
         marker = len(self._history)
         self._history.append({"role": "user", "content": task})
         schemas = self._tools.schemas()
@@ -477,9 +492,11 @@ class AgentLoop:
         self._exit_status = "ok"
         self._loop_extended_by = 0
         turn = 0
+        self._tool_call_count = 0
         continues = 0
         closer_ceilings: set[int] = set()
         original_max_turns = self._config.max_turns
+        original_max_tools = self._tool_budget()
         try:
             await self._maybe_compact()
             while turn < self._config.max_turns:
@@ -488,30 +505,24 @@ class AgentLoop:
                 result = await self._complete(self._build_messages(), schemas)
                 if result.tool_calls:
                     await self._dispatch(result)
+                    stop_text = await self._after_tools(result)
+                    if stop_text is not None:
+                        last_text = stop_text.strip()
+                        self._history.append(
+                            {"role": "assistant", "content": last_text}
+                        )
+                        # Keep the current stream id so session._run_turn can
+                        # ChatMessageAdded-close the text that already streamed
+                        # with the tool call. A new id leaves that bubble
+                        # streaming forever ("Writing" with no writer).
+                        return last_text
                     await self._maybe_compact()
                     turn += 1
                     await self._maybe_judge_loop_progress(turn, task)
-                    if turn >= self._config.max_turns:
-                        action = await self._offer_continue(continues)
-                        if action == "continue":
-                            slice_n = max(
-                                1,
-                                int(getattr(self._config, "turn_slice", 16) or 16),
-                            )
-                            self._config.max_turns += slice_n
-                            continues += 1
-                            self._history.append(
-                                {
-                                    "role": "user",
-                                    "content": CONTINUE_GRANT.format(slice=slice_n),
-                                }
-                            )
-                            continue
-                        if action == "stop":
-                            self._exit_status = "stopped"
-                        else:
-                            self._exit_status = "max_turns"
-                        break
+                    if self._budget_exhausted(turn):
+                        continues = await self._try_continue(continues)
+                        if continues is None:
+                            break
                     continue
                 last_text = result.text
                 self._history.append({"role": "assistant", "content": last_text})
@@ -525,14 +536,22 @@ class AgentLoop:
                         {"role": "user", "content": OUTPUT_CUTOFF_CONTINUE}
                     )
                     continue
-                nudge = (
+                # A text-only reply is one LLM round. Thinking in the same
+                # completion as tool_calls is already paid on the tool path.
+                turn += 1
+                pending = (
                     await self._finish_nudge()
                     if finish_nudges < FINISH_NUDGE_CAP
                     else None
                 )
-                if nudge:
+                if pending:
+                    if turn >= self._config.max_turns:
+                        granted = await self._try_continue(continues)
+                        if granted is None:
+                            break
+                        continues = granted
                     finish_nudges += 1
-                    self._history.append({"role": "user", "content": nudge})
+                    self._history.append({"role": "user", "content": pending})
                     continue
                 return _last_assistant_text(self._history) or last_text
             if self._exit_status == "ok":
@@ -542,7 +561,10 @@ class AgentLoop:
             elif self._exit_status == "stopped":
                 final = "stopped by user request"
             else:
-                final = f"stopped after {self._config.max_turns} tool turns"
+                final = (
+                    f"stopped after {self._config.max_turns} rounds "
+                    f"({self._tool_call_count} tool calls)"
+                )
             if not last_text:
                 self._emit_message(final)
             return final
@@ -558,6 +580,44 @@ class AgentLoop:
             raise
         finally:
             self._config.max_turns = original_max_turns
+            self._config.max_tool_calls = original_max_tools
+
+    def _tool_budget(self) -> int:
+        return max(1, int(getattr(self._config, "max_tool_calls", 50) or 50))
+
+    def _budget_exhausted(self, turn: int) -> bool:
+        return turn >= self._config.max_turns or self._tool_call_count >= self._tool_budget()
+
+    def _grant_slice(self, slice_n: int) -> None:
+        extra_tools = slice_n * TOOL_FUSE_PER_ROUND
+        self._config.max_turns += slice_n
+        self._config.max_tool_calls = self._tool_budget() + extra_tools
+
+    async def _try_continue(self, continues: int) -> int | None:
+        action = await self._offer_continue(continues)
+        if action == "continue":
+            slice_n = max(1, int(getattr(self._config, "turn_slice", 16) or 16))
+            self._grant_slice(slice_n)
+            self._history.append(
+                {
+                    "role": "user",
+                    "content": CONTINUE_GRANT.format(slice=slice_n),
+                }
+            )
+            return continues + 1
+        if action == "stop":
+            self._exit_status = "stopped"
+        else:
+            self._exit_status = "max_turns"
+        return None
+
+    async def _after_tools(self, result) -> str | None:
+        """Return text to end this run after a tool turn, or None to continue.
+
+        Orchestrator uses this so a successful ask/researcher spawn does not
+        immediately loop into another reader call.
+        """
+        return None
 
     async def _finish_nudge(self) -> str | None:
         """A message that sends the agent back to work instead of accepting
@@ -572,7 +632,7 @@ class AgentLoop:
         self._history.append({"role": "user", "content": CLOSER_MESSAGE})
 
     async def _offer_continue(self, continues: int) -> str:
-        max_continues = int(getattr(self._config, "max_continues", 3) or 0)
+        max_continues = int(getattr(self._config, "max_continues", 1) or 0)
         mode = str(
             getattr(self._config, "turn_continue", "prompt") or "prompt"
         ).strip().lower()
@@ -583,9 +643,12 @@ class AgentLoop:
             return "handoff"
         slice_n = max(1, int(getattr(self._config, "turn_slice", 16) or 16))
         ceiling = self._config.max_turns
+        tools = self._tool_budget()
+        used = self._tool_call_count
         question = (
-            f"Turn budget exhausted ({ceiling}/{ceiling}). Continue for another "
-            f"{slice_n} turns, hand off leftover to the orchestrator, or stop?"
+            f"Turn budget exhausted ({ceiling}/{ceiling} rounds, "
+            f"{used}/{tools} tool calls). Continue for another "
+            f"{slice_n} rounds, hand off leftover to the orchestrator, or stop?"
         )
         try:
             raw = await ask(
@@ -675,7 +738,7 @@ class AgentLoop:
             increment = min(
                 LOOP_EXTEND_INCREMENT, LOOP_EXTEND_MAX_TOTAL - self._loop_extended_by
             )
-            self._config.max_turns += increment
+            self._grant_slice(increment)
             self._loop_extended_by += increment
         return False
 
@@ -894,6 +957,12 @@ class AgentLoop:
         try:
             output = await self._tools.execute(call.name, self._ctx, arguments)
             self._tools_called.add(call.name)
+            if call.name not in _FREE_TOOL_NAMES:
+                self._tool_call_count += 1
+            if call.name == "get_diagnostics":
+                key = normalize_rel_path(str(arguments.get("path") or ""))
+                if key:
+                    self._diag_by_path[key] = classify_diagnostics_output(output)
             output = await self._screen_result(call.name, arguments, output)
         except asyncio.CancelledError:
             if self._hooks.on_tool is not None:

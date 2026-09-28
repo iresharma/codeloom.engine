@@ -45,7 +45,7 @@ SIZE_FIELDS: dict[type, tuple[str, ...]] = {
     ChatMessageAdded: ("text",),
     ChatHistoryAdded: ("text",),
     CommandOutputChunk: ("text",),
-    FileContent: ("content",),
+    FileContent: ("content", "original"),
     FileEdited: ("diff",),
     FileTreeUpdated: (),
     GitStateUpdated: (),

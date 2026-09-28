@@ -30,7 +30,7 @@ from runtime.tools.fileid import (
     synthetic_source,
 )
 from runtime.tools.fs import WorkspacePathError, relative_posix, resolve_in_workspace
-from runtime.tools.sitter import syntax_gate
+from runtime.tools.sitter import binding_gate, syntax_gate
 from runtime.tools.writeglob import write_allowed
 from tools.base import ToolContext
 
@@ -426,6 +426,14 @@ def _session_id(ctx: ToolContext) -> str:
     return ctx.session_id or "none"
 
 
+def _origin(ctx: ToolContext) -> str:
+    return getattr(ctx, "origin_request", "") or ""
+
+
+def _guard(ctx: ToolContext, path: str) -> Path:
+    return guard_write_path(ctx.workspace, path, origin_request=_origin(ctx))
+
+
 def _tracker_check(ctx: ToolContext, src: FileSource) -> None:
     if ctx.files is None:
         return
@@ -450,7 +458,7 @@ def _prepare(
     creating: bool = False,
     check_stale: bool = True,
 ) -> PreparedEdit:
-    resolved = guard_write_path(ctx.workspace, path)
+    resolved = _guard(ctx, path)
     created_dirs: list[str] = []
     if creating:
         if resolved.exists():
@@ -468,7 +476,9 @@ def _prepare(
             raise EditError(
                 str(exc) if str(exc).startswith("error:") else f"error: {exc}"
             ) from exc
-        gate = syntax_gate(src.rel, new_text, None)
+        gate = syntax_gate(src.rel, new_text, None) or binding_gate(
+            src.rel, new_text, None
+        )
         if gate:
             for directory in reversed(created_dirs):
                 _rmdir_if_empty(ctx.workspace / directory)
@@ -507,7 +517,9 @@ def _prepare(
             diff="",
             noop=True,
         )
-    gate = syntax_gate(src.rel, new_text, src.text)
+    gate = syntax_gate(src.rel, new_text, src.text) or binding_gate(
+        src.rel, new_text, src.text
+    )
     if gate:
         raise EditError(gate)
     new_bytes = render(src, new_text)
@@ -1088,7 +1100,7 @@ def mkdir_path_sync(ctx: ToolContext, path: str) -> ApplyResult:
     if denied:
         return ApplyResult(ok=False, message=denied)
     try:
-        resolved = guard_write_path(ctx.workspace, path)
+        resolved = _guard(ctx, path)
         rel = relative_posix(ctx.workspace, resolved)
         if resolved.exists():
             return ApplyResult(ok=False, message=f"error: path already exists: {rel}")
@@ -1132,7 +1144,7 @@ def delete_path_sync(ctx: ToolContext, path: str) -> ApplyResult:
     if denied:
         return ApplyResult(ok=False, message=denied)
     try:
-        resolved = guard_write_path(ctx.workspace, path)
+        resolved = _guard(ctx, path)
         rel = relative_posix(ctx.workspace, resolved)
         if not resolved.exists():
             return ApplyResult(ok=False, message=f"error: path not found: {rel}")
@@ -1191,8 +1203,8 @@ def rename_path_sync(ctx: ToolContext, src: str, dest: str) -> ApplyResult:
     if denied:
         return ApplyResult(ok=False, message=denied)
     try:
-        src_resolved = guard_write_path(ctx.workspace, src)
-        dest_resolved = guard_write_path(ctx.workspace, dest)
+        src_resolved = _guard(ctx, src)
+        dest_resolved = _guard(ctx, dest)
         src_rel = relative_posix(ctx.workspace, src_resolved)
         dest_rel = relative_posix(ctx.workspace, dest_resolved)
         if not src_resolved.exists():

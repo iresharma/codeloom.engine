@@ -175,7 +175,7 @@ def test_continue_does_not_leak_budget_to_next_run():
         provider.finish_after = None
         text = await loop.run("second")
         assert loop._exit_status == "max_turns"
-        assert "stopped after 3 tool turns" in text
+        assert "stopped after 3 rounds" in text
         assert loop._config.max_turns == 3
 
     asyncio.run(run())
@@ -252,6 +252,105 @@ def test_unknown_answer_is_handoff():
     asyncio.run(run())
 
 
+class _AlwaysThink(FakeProvider):
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
+        self.calls += 1
+        return LLMResult(text=f"thinking {self.calls}")
+
+
+class _NudgeLoop(AgentLoop):
+    async def _finish_nudge(self) -> str | None:
+        return "keep going"
+
+
+class _BatchPing(FakeProvider):
+    def __init__(self, batch=3, finish_after=None):
+        super().__init__()
+        self.batch = batch
+        self.finish_after = finish_after
+
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
+        self.calls += 1
+        if self.finish_after is not None and self.calls > self.finish_after:
+            return LLMResult(text="done")
+        return LLMResult(
+            text="working",
+            tool_calls=[
+                ToolCall(id=f"{self.calls}-{i}", name="ping", arguments_json="{}")
+                for i in range(self.batch)
+            ],
+        )
+
+
+def test_text_only_thinking_consumes_rounds():
+    async def run():
+        provider = _AlwaysThink()
+        loop = _NudgeLoop(
+            provider,
+            tools=_ping_tools(),
+            config=EngineConfig(max_turns=3, turn_continue="never"),
+        )
+        text = await loop.run("task")
+        assert provider.calls == 3
+        assert loop._exit_status == "max_turns"
+        assert "thinking 3" in text
+        assert loop._tool_call_count == 0
+
+    asyncio.run(run())
+
+
+def test_tools_plus_thinking_are_one_round():
+    async def run():
+        provider = _BatchPing(batch=5, finish_after=1)
+        loop = _loop(provider, max_turns=4, turn_continue="never")
+        text = await loop.run("task")
+        assert text == "done"
+        assert provider.calls == 2
+        assert loop._exit_status == "ok"
+        assert loop._tool_call_count == 5
+
+    asyncio.run(run())
+
+
+def test_tool_fuse_stops_with_rounds_left():
+    async def run():
+        provider = _BatchPing(batch=3)
+        loop = _loop(
+            provider,
+            max_turns=8,
+            max_tool_calls=4,
+            turn_continue="never",
+        )
+        text = await loop.run("task")
+        assert loop._exit_status == "max_turns"
+        assert loop._tool_call_count >= 4
+        assert provider.calls == 2
+        assert "rounds" in text
+        assert "tool calls" in text
+
+    asyncio.run(run())
+
+
+def test_continue_also_extends_tool_fuse():
+    async def run():
+        provider = _BatchPing(batch=3)
+        loop = _loop(
+            provider,
+            max_turns=1,
+            max_tool_calls=3,
+            turn_slice=1,
+            max_continues=1,
+            ask_user=_ScriptedAsk(["continue"]),
+        )
+        await loop.run("task")
+        assert loop._exit_status == "max_turns"
+        assert loop._config.max_tool_calls == 3
+        assert provider.calls == 2
+        assert loop._tool_call_count == 6
+
+    asyncio.run(run())
+
+
 def test_fourth_cap_after_three_continues_is_forced_handoff():
     async def run():
         ask = _ScriptedAsk(["continue", "continue", "continue", "continue"])
@@ -270,7 +369,7 @@ def test_fourth_cap_after_three_continues_is_forced_handoff():
         )
         text = await loop.run("task")
         assert loop._exit_status == "max_turns"
-        assert "stopped after 8 tool turns" in text
+        assert "stopped after 8 rounds" in text
         assert len(ask.asked) == 3
         assert loop._config.max_turns == 2
         assert any(max_turns == 8 for _, _, max_turns in states)

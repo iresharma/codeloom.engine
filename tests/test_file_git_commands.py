@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
-from protocol.commands import CloseFile, OpenFile, RequestGit, StartSession
+from protocol.commands import (
+    CloseFile,
+    CreatePath,
+    DeletePath,
+    OpenFile,
+    RenamePath,
+    RequestGit,
+    StartSession,
+    UndoLastEdit,
+)
 from protocol.events import (
     ErrorOccurred,
     FileClosed,
@@ -10,15 +20,10 @@ from protocol.events import (
     GitStateUpdated,
     WarningOccurred,
 )
+from runtime.commands.files import close_file, open_file
 from runtime.session import EngineSession
+from runtime.tools.git import add_agent_worktree
 from tests.test_orchestrator import _init_git
-from protocol.commands import (
-    CreatePath,
-    DeletePath,
-    RenamePath,
-    UndoLastEdit,
-)
-from runtime.commands.files import open_file, close_file
 
 
 async def _started(tmp_path):
@@ -186,6 +191,67 @@ def test_open_file_success(tmp_path):
     
     events = asyncio.run(run())
     assert any(isinstance(e, FileContent) and e.path == "test.py" for e in events)
+
+
+def test_open_file_dirty_includes_original(tmp_path):
+    _init_git(tmp_path)
+    (tmp_path / "README").write_text("changed\n", encoding="utf-8")
+
+    async def run():
+        session, queue = await _started(tmp_path)
+        await session.handle(OpenFile(path="README"))
+        events = _drain(queue)
+        await session.aclose()
+        return events
+
+    events = asyncio.run(run())
+    contents = [item for item in events if isinstance(item, FileContent)]
+    assert contents
+    assert contents[0].content == "changed\n"
+    assert contents[0].original == "x\n"
+
+
+def test_open_file_clean_omits_original(tmp_path):
+    _init_git(tmp_path)
+
+    async def run():
+        session, queue = await _started(tmp_path)
+        await session.handle(OpenFile(path="README"))
+        events = _drain(queue)
+        await session.aclose()
+        return events
+
+    events = asyncio.run(run())
+    contents = [item for item in events if isinstance(item, FileContent)]
+    assert contents
+    assert contents[0].content == "x\n"
+    assert contents[0].original is None
+
+
+def test_open_file_from_worktree_prefers_dirty_copy(tmp_path):
+    _init_git(tmp_path)
+    path, _branch, err = add_agent_worktree(tmp_path, "coder1", "coder")
+    assert not err
+    dest = Path(path)
+    (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
+    (dest / "README").write_text("from worktree\n", encoding="utf-8")
+
+    async def run():
+        session, queue = await _started(tmp_path)
+        await session.handle(OpenFile(path="flag.py"))
+        new_file = _drain(queue)
+        await session.handle(OpenFile(path="README"))
+        dirty = _drain(queue)
+        await session.aclose()
+        return new_file, dirty
+
+    new_file, dirty = asyncio.run(run())
+    created = [item for item in new_file if isinstance(item, FileContent)]
+    assert created and created[0].content == "x = 1\n"
+    assert created[0].original == ""
+    edited = [item for item in dirty if isinstance(item, FileContent)]
+    assert edited and edited[0].content == "from worktree\n"
+    assert edited[0].original == "x\n"
 
 
 def test_open_file_missing(tmp_path):

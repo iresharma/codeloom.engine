@@ -71,6 +71,7 @@ from runtime.store.sqlite import save as save_snapshot
 from runtime.subscriber import EVENT_SOFT_LIMIT, Subscriber, clip_text
 from runtime.tools.fs import WorkspacePathError, list_tree, read_text
 from runtime.tools.git import read_state as read_git
+from runtime.tools.git import read_workspace_state
 from runtime.tools.lsp import LSPManager, LSPTimeoutError
 from runtime.judge import JudgeManager
 from runtime.trace import TraceWriter
@@ -189,7 +190,7 @@ class EngineSession:
         snap = self._state.snapshot(
             str(self._workspace),
             tree,
-            read_git(self._workspace, diffs=False),
+            read_workspace_state(self._workspace, diffs=False),
             language=self.language.name,
             language_supported=self.language.supported,
         )
@@ -343,7 +344,7 @@ class EngineSession:
 
             return await undo_last(ctx)
         if meta_action == "what_changed":
-            state = read_git(self._workspace, diffs=False)
+            state = read_workspace_state(self._workspace, diffs=False)
             if state.branch is None and not state.dirty:
                 return "not a git repository"
             return "\n".join(
@@ -1231,7 +1232,7 @@ class EngineSession:
         self._emit(FileTreeUpdated(file_tree=nodes))
 
     def _emit_git(self) -> None:
-        git = read_git(self._workspace)
+        git = read_workspace_state(self._workspace)
         limit = EVENT_SOFT_LIMIT // 2
         staged, omitted_s = clip_text(git.staged_diff, limit)
         unstaged, omitted_u = clip_text(git.unstaged_diff, limit)
@@ -1309,8 +1310,10 @@ class EngineSession:
         )
 
     def _emit_file_content(self, path: str, *, full: bool = False) -> None:
+        from runtime.commands.files import load_open_file
+
         try:
-            rel, content = read_text(self._workspace, path)
+            rel, content, original = load_open_file(self._workspace, path)
         except (FileNotFoundError, WorkspacePathError) as exc:
             self._emit(ErrorOccurred(message=f"{path}: {exc}"))
             return
@@ -1324,7 +1327,10 @@ class EngineSession:
                     message=f"{rel} truncated; {omitted} bytes omitted"
                 )
             )
-        self._emit(FileContent(path=rel, content=clipped))
+        orig = None
+        if original is not None:
+            orig, _ = clip_text(original, limit)
+        self._emit(FileContent(path=rel, content=clipped, original=orig))
 
     async def _replay_history(self, history, generation: int) -> None:
         total = len(history)

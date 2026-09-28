@@ -18,6 +18,7 @@ from agents.profile import (
     SHELL,
     SITTER,
     SKILLS,
+    TOOLCHAIN,
     AgentProfile,
 )
 
@@ -51,7 +52,8 @@ PROFILE = AgentProfile(
     + BROWSER
     + SKILLS
     + MEMORY
-    + MCP,
+    + MCP
+    + TOOLCHAIN,
     write_globs=[],
     required_tools=[],
     max_turns=32,

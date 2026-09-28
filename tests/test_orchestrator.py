@@ -65,6 +65,15 @@ def _bind(tmp_path, provider, **config_kw):
     return setup
 
 
+async def _abandon_settles(orch) -> None:
+    for task in list(orch._settle_tasks.values()):
+        if not task.done():
+            task.cancel()
+    orch._pending_settles.clear()
+    orch._deferred_settles.clear()
+    await orch.wait_settle()
+
+
 async def _wait_idle(session, timeout: float = 3.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -379,12 +388,88 @@ def test_survey_first_turn_may_fan_out(tmp_path):
     async def run():
         session = await _bind(tmp_path, FakeProvider())()
         orch: Orchestrator = session._loop
-        first = await orch.spawn("ask", "one")
-        second = await orch.spawn("ask", "two")
-        assert first.startswith("started")
-        assert second.startswith("started")
+        started = [await orch.spawn("ask", f"area {i}") for i in range(3)]
+        assert all(item.startswith("started") for item in started)
+        fourth = await orch.spawn("ask", "too many")
+        assert "already spawned ask" in fourth
+        researcher = await orch.spawn("researcher", "docs")
+        extra_researcher = await orch.spawn("researcher", "again")
+        assert researcher.startswith("started")
+        assert "already spawned researcher" in extra_researcher
         await orch.wait_children()
         await _wait_idle(session)
+
+    asyncio.run(run())
+
+
+def test_survey_does_not_respawn_after_started(tmp_path):
+    async def run():
+        hang = asyncio.Event()
+        provider = _RetryAskHang(hang)
+        session = await _bind(tmp_path, provider)()
+        queue = session.subscribe()
+        while not queue.empty():
+            queue.get_nowait()
+        session.start_turn("update the landing page")
+        started = []
+        added = []
+        for _ in range(80):
+            for item in _queued(queue):
+                if isinstance(item, AgentStarted):
+                    started.append(item)
+                elif isinstance(item, ChatMessageAdded) and item.role == "assistant":
+                    if not item.agent_id:
+                        added.append(item)
+            turn = session._turn_task
+            if (
+                started
+                and added
+                and (turn is None or turn.done())
+            ):
+                break
+            await asyncio.sleep(0.02)
+        assert provider.orch_turns == 1
+        assert len(started) == 1
+        assert started[0].profile == "ask"
+        assert added
+        assert "I'll continue when that report arrives" in added[-1].text
+        hang.set()
+        await _wait_idle(session)
+
+    asyncio.run(run())
+
+
+def test_coder_does_not_respawn_after_started(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        hang = asyncio.Event()
+        provider = _RetryCoderHang(hang)
+        session = await _bind(tmp_path, provider)()
+        queue = session.subscribe()
+        while not queue.empty():
+            queue.get_nowait()
+        session.start_turn("update the landing page")
+        started = []
+        added = []
+        for _ in range(80):
+            for item in _queued(queue):
+                if isinstance(item, AgentStarted):
+                    started.append(item)
+                elif isinstance(item, ChatMessageAdded) and item.role == "assistant":
+                    if not item.agent_id:
+                        added.append(item)
+            turn = session._turn_task
+            if started and added and (turn is None or turn.done()):
+                break
+            await asyncio.sleep(0.02)
+        assert provider.orch_turns == 1
+        assert len(started) == 1
+        assert started[0].profile == "coder"
+        assert added
+        assert "I'll continue when that report arrives" in added[-1].text
+        hang.set()
+        await _wait_idle(session)
+        await _abandon_settles(session._loop)
 
     asyncio.run(run())
 
@@ -439,7 +524,7 @@ def test_incomplete_survey_may_respawn_once(tmp_path):
 def test_abort_turn_leaves_children(tmp_path):
     async def run():
         hang = asyncio.Event()
-        provider = _AskHangThenDone(hang, hang_orch=True)
+        provider = _AskHangThenDone(hang)
         session = await _bind(tmp_path, provider)()
         queue = session.subscribe()
         while not queue.empty():
@@ -450,18 +535,18 @@ def test_abort_turn_leaves_children(tmp_path):
                 break
             await asyncio.sleep(0.02)
         task = session._turn_task
-        assert session.abort_turn()
         if task is not None:
             await task
         orch: Orchestrator = session._loop
         assert orch._child_tasks
+        # Ask already returned started, so the orch turn is done. Aborting
+        # it is a no-op and must not cancel the reader.
+        assert session.abort_turn() is False
         hang.set()
         await _wait_idle(session)
         finished = [item for item in _queued(queue) if isinstance(item, AgentFinished)]
         assert finished
         assert all(item.status != "aborted" for item in finished)
-        texts = [m.text for m in session._state.messages if m.role == "assistant"]
-        assert any("aborted" in text for text in texts)
 
     asyncio.run(run())
 
@@ -530,6 +615,27 @@ def test_coder_gets_worktree(tmp_path):
     asyncio.run(run())
 
 
+def test_second_live_coder_is_rejected(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        hang = asyncio.Event()
+        session = await _bind(tmp_path, _HangChild(hang))()
+        orch: Orchestrator = session._loop
+        first = await orch.spawn("coder", "add a flag")
+        first_id = first.split("agent_id=")[1].split()[0]
+        assert first.startswith("started")
+        second = await orch.spawn("coder", "also add a flag")
+        assert second.startswith("error:")
+        assert first_id[:8] in second
+        assert "already running" in second
+        hang.set()
+        await orch.wait_children()
+        await _wait_idle(session)
+        await orch.wait_settle()
+
+    asyncio.run(run())
+
+
 def test_coder_continue_from_reuses_worktree(tmp_path):
     async def run():
         _init_git(tmp_path)
@@ -540,6 +646,9 @@ def test_coder_continue_from_reuses_worktree(tmp_path):
         first_id = first.split("agent_id=")[1].split()[0]
         first_worktree = orch._worktrees[first_id]
         first_branch = orch._worktree_branches[first_id]
+        (first_worktree / "flag.py").write_text("x = 1\n")
+        hang.set()
+        await orch.wait_children()
 
         second = await orch.spawn(
             "coder", "fix the review feedback", continue_from=first_id
@@ -556,10 +665,60 @@ def test_coder_continue_from_reuses_worktree(tmp_path):
         # be responsible for settling this worktree
         assert first_id not in orch._worktrees
 
-        hang.set()
         await orch.wait_children()
         await _wait_idle(session)
-        await orch.wait_settle()
+        await _abandon_settles(orch)
+
+    asyncio.run(run())
+
+
+def test_second_coder_auto_joins_open_worktree(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        hang = asyncio.Event()
+        session = await _bind(tmp_path, _HangChild(hang))()
+        orch: Orchestrator = session._loop
+        first = await orch.spawn("coder", "add a flag")
+        first_id = first.split("agent_id=")[1].split()[0]
+        first_worktree = orch._worktrees[first_id]
+        first_branch = orch._worktree_branches[first_id]
+        (first_worktree / "flag.py").write_text("x = 1\n")
+        hang.set()
+        await orch.wait_children()
+
+        second = await orch.spawn("coder", "now the home mock")
+        assert second.startswith("started")
+        assert f"worktree={first_worktree}" in second
+        assert f"branch={first_branch}" in second
+        assert f"continuing {first_id[:8]}" in second
+        await orch.wait_children()
+        await _wait_idle(session)
+        await _abandon_settles(orch)
+
+    asyncio.run(run())
+
+
+def test_tester_without_verify_joins_coder_tree(tmp_path):
+    async def run():
+        _init_git(tmp_path)
+        hang = asyncio.Event()
+        session = await _bind(tmp_path, _HangChild(hang))()
+        orch: Orchestrator = session._loop
+        first = await orch.spawn("coder", "add a flag")
+        first_id = first.split("agent_id=")[1].split()[0]
+        first_worktree = orch._worktrees[first_id]
+        (first_worktree / "flag.py").write_text("x = 1\n")
+        hang.set()
+        await orch.wait_children()
+
+        tester = await orch.spawn("tester", "prove the flag")
+        assert tester.startswith("started")
+        assert f"worktree={first_worktree}" in tester
+        assert "engine/tester/" not in tester
+        assert f"verifying {first_id[:8]}" in tester
+        await orch.wait_children()
+        await _wait_idle(session)
+        await _abandon_settles(orch)
 
     asyncio.run(run())
 
@@ -633,6 +792,66 @@ class _AskThenDone(FakeProvider):
         if on_delta:
             on_delta("text", "retry is in server.py")
         return LLMResult(text="retry is in server.py")
+
+
+class _RetryCoderHang(FakeProvider):
+    def __init__(self, hang):
+        super().__init__()
+        self.hang = hang
+        self.orch_turns = 0
+
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
+        if _is_orch(tools):
+            self.orch_turns += 1
+            last = ""
+            for message in reversed(messages or []):
+                if message.get("role") == "user":
+                    last = str(message.get("content") or "")
+                    break
+            if last.lstrip().startswith("[agent "):
+                return LLMResult(text="waiting for the first coder")
+            return LLMResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id=str(self.orch_turns),
+                        name="coder",
+                        arguments_json=f'{{"task":"update landing {self.orch_turns}"}}',
+                    )
+                ],
+            )
+        await self.hang.wait()
+        return _diagnostics_first(messages, tools) or LLMResult(text="child")
+
+
+class _RetryAskHang(FakeProvider):
+    def __init__(self, hang):
+        super().__init__()
+        self.hang = hang
+        self.orch_turns = 0
+
+    async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
+        if _is_orch(tools):
+            self.orch_turns += 1
+            last = ""
+            for message in reversed(messages or []):
+                if message.get("role") == "user":
+                    last = str(message.get("content") or "")
+                    break
+            if last.lstrip().startswith("[agent "):
+                return LLMResult(text="waiting for the first ask")
+            return LLMResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id=str(self.orch_turns),
+                        name="ask",
+                        arguments_json=f'{{"task":"find landing {self.orch_turns}"}}',
+                    )
+                ],
+            )
+        await self.hang.wait()
+        return LLMResult(text="done")
 
 
 class _TwoAsks(FakeProvider):

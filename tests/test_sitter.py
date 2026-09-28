@@ -15,6 +15,7 @@ from runtime.tools.sitter import (
     get_node_at,
     query_tree,
     parse_file,
+    binding_gate,
 )
 
 
@@ -221,6 +222,51 @@ class TestSyntaxGate:
         """Language override is respected."""
         result = syntax_gate("file.xyz", "def foo():\n    pass\n", None, language="python")
         assert result is None
+
+
+class TestBindingGate:
+    def test_rejects_second_const_same_scope(self):
+        old = "const detail = { a: 1 }\n"
+        new = "const detail = { a: 1 }\nconst detail = { b: 2 }\n"
+        err = binding_gate("home.tsx", new, old)
+        assert err is not None
+        assert "detail" in err
+        assert "binding gate" in err
+
+    def test_allows_a_new_name(self):
+        old = "const detail = { a: 1 }\n"
+        new = "const detail = { a: 1 }\nconst preview = { b: 2 }\n"
+        assert binding_gate("home.tsx", new, old) is None
+
+    def test_allows_shadowing_in_inner_function(self):
+        old = "const detail = 1\nfunction wrap() {\n  return detail\n}\n"
+        new = "const detail = 1\nfunction wrap() {\n  const detail = 2\n  return detail\n}\n"
+        assert binding_gate("home.ts", new, old) is None
+
+    def test_rejects_new_duplicate_on_already_broken_file(self):
+        old = "const detail = 1\nconst detail = 2\n"
+        new = "const detail = 1\nconst detail = 2\nconst clients = []\nconst clients = []\n"
+        err = binding_gate("clients.tsx", new, old)
+        assert err is not None
+        assert "clients" in err
+
+    def test_allows_existing_duplicates_if_count_does_not_rise(self):
+        src = "const detail = 1\nconst detail = 2\n"
+        assert binding_gate("home.tsx", src + "const extra = 3\n", src) is None
+
+    def test_python_same_scope_def(self):
+        old = "def foo():\n    return 1\n"
+        new = "def foo():\n    return 1\ndef foo():\n    return 2\n"
+        err = binding_gate("app.py", new, old)
+        assert err is not None
+        assert "foo" in err
+
+    def test_go_top_level_func(self):
+        old = "package p\nfunc Foo() {}\n"
+        new = "package p\nfunc Foo() {}\nfunc Foo() {}\n"
+        err = binding_gate("main.go", new, old)
+        assert err is not None
+        assert "Foo" in err
 
 
 class TestSymbolRangeInText:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,10 +15,22 @@ from runtime.tools.fs import (
 
 LOCKFILE_NAMES = {
     "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
     "uv.lock",
     "poetry.lock",
     "Cargo.lock",
     "go.sum",
+}
+
+TOOLCHAIN_FILE_NAMES = {
+    "package.json",
+    "pnpm-workspace.yaml",
+    "tsconfig.json",
+    "go.mod",
+    "pyproject.toml",
 }
 
 _ENV_NAMES = {"env.sh", ".env"}
@@ -175,7 +188,28 @@ def synthetic_source(
     )
 
 
-def guard_write_path(workspace: Path, path: str) -> Path:
+def is_toolchain_file(name: str) -> bool:
+    if name in TOOLCHAIN_FILE_NAMES:
+        return True
+    if name.startswith("tsconfig.") and name.endswith(".json"):
+        return True
+    if name.startswith("requirements") and name.endswith(".txt"):
+        return True
+    return False
+
+
+def named_in_request(name: str, origin_request: str) -> bool:
+    if not name or not (origin_request or "").strip():
+        return False
+    pattern = re.compile(
+        rf"(?i)(?:^|[\s/`'\"=(]){re.escape(name)}(?:$|[\s/`'\")\].,;:])"
+    )
+    return pattern.search(origin_request) is not None
+
+
+def guard_write_path(
+    workspace: Path, path: str, origin_request: str = ""
+) -> Path:
     """Refuse writes outside the workspace, through symlinks, or into denylisted paths."""
     workspace = workspace.resolve()
     candidate = Path(path)
@@ -196,4 +230,9 @@ def guard_write_path(workspace: Path, path: str) -> Path:
         raise WorkspacePathError(f"writes to lockfile '{name}' are not allowed")
     if name in _ENV_NAMES or name.startswith(".env."):
         raise WorkspacePathError(f"writes to '{name}' are not allowed")
+    if is_toolchain_file(name) and not named_in_request(name, origin_request):
+        raise WorkspacePathError(
+            f"writes to '{name}' are not allowed; use the toolchain tool "
+            "to change dependencies or compiler config"
+        )
     return resolved

@@ -40,6 +40,7 @@ def test_guard_denylist(ctx):
     (ctx.workspace / ".engine" / "x").write_text("x\n")
     (ctx.workspace / "env.sh").write_text("KEY=1\n")
     (ctx.workspace / "package-lock.json").write_text("{}\n")
+    (ctx.workspace / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
     (ctx.workspace / "node_modules").mkdir()
     (ctx.workspace / "node_modules" / "pkg.js").write_text("1\n")
     cases = [
@@ -47,6 +48,9 @@ def test_guard_denylist(ctx):
         ".engine/x",
         "env.sh",
         "package-lock.json",
+        "pnpm-lock.yaml",
+        "package.json",
+        "tsconfig.json",
         "node_modules/pkg.js",
         ".env.local",
         ".ruff_cache/x",

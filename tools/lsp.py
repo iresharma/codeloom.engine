@@ -144,7 +144,9 @@ async def hover(ctx: ToolContext, path: str, line, character) -> str:
 @tool(
     description=(
         "Compiler/type-checker diagnostics for a file (errors, warnings, "
-        "hints). Same information as editor squiggles."
+        "hints). Same information as editor squiggles. A coder is not "
+        "finished until this returns no Error diagnostics on every "
+        "changed file after the last edit."
     ),
     parameters={
         "type": "object",

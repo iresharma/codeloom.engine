@@ -74,6 +74,9 @@ class SessionList(ProtocolMessage):
 class FileContent(ProtocolMessage):
     path: str
     content: str
+    # Working-tree vs HEAD. None means the file matches HEAD (or git is
+    # unavailable); "" means a new/untracked file.
+    original: str | None = None
 
 
 @event

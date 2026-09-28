@@ -98,6 +98,9 @@ async def run_command(
     # Hard denylist wins unconditionally -- check it before paying for a
     # judge round trip that classify_exec can never override anyway.
     _hard_deny(stripped)
+    from runtime.tools.toolchain import deny_agent_command
+
+    deny_agent_command(ctx.workspace, stripped)
 
     reason_suffix = ""
     if approval == "judged":

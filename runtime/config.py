@@ -37,6 +37,10 @@ JUDGE_SITES = (
 # github_file windows or surveys hit the 120k fuse.
 CHILD_COMPACT_TRIGGER = 2.0
 CHILD_KEEP_FULL_TOOLS = 10
+# Coders/testers accumulate tool output. Leaving them on the survey trigger
+# replays a growing transcript every turn (millions of cached tokens).
+WRITER_COMPACT_TRIGGER = 0.7
+WRITER_KEEP_FULL_TOOLS = 3
 
 
 @dataclass
@@ -46,7 +50,10 @@ class EngineConfig:
     stream_idle_s: float = 90.0
     max_turns: int = 16
     turn_slice: int = 16
-    max_continues: int = 3
+    max_continues: int = 1
+    # Safety fuse on executed tools (ask_user does not count). LLM rounds
+    # are max_turns; this stops a single round from spraying unbounded calls.
+    max_tool_calls: int = 50
     turn_continue: str = "prompt"
     exec_approval: str = "auto"
     exec_timeout_s: int = 120
@@ -113,6 +120,9 @@ class EngineConfig:
         config.turn_slice = _env_int("ENGINE_TURN_SLICE", config.turn_slice, warnings)
         config.max_continues = _env_int(
             "ENGINE_MAX_CONTINUES", config.max_continues, warnings
+        )
+        config.max_tool_calls = _env_int(
+            "ENGINE_MAX_TOOL_CALLS", config.max_tool_calls, warnings
         )
         config.exec_timeout_s = _env_int(
             "ENGINE_EXEC_TIMEOUT_S", config.exec_timeout_s, warnings

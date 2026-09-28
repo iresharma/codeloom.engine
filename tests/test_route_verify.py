@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from agents.compactor import SUMMARY_CLIP, compress_for_parent
 from agents.orchestrator import Orchestrator, _reviewer_task, _tester_task
@@ -124,6 +125,17 @@ class _CoderSourceOnlyThenTest(FakeProvider):
                     )
                 ],
             )
+        if called.count("get_diagnostics") < 2:
+            return LLMResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="diag-test",
+                        name="get_diagnostics",
+                        arguments_json='{"path":"tests/test_nudge.py"}',
+                    )
+                ],
+            )
         return LLMResult(
             text=(
                 "what: added N and a test\n"
@@ -154,6 +166,8 @@ def test_coder_files_touched_spawns_tester_and_reviewer_and_holds_settle(tmp_pat
             )
             self._files_touched.extend(["flag.py", "test_flag.py"])
             self._tools_called.add("get_diagnostics")
+            self._diag_by_path["flag.py"] = "clean"
+            self._diag_by_path["test_flag.py"] = "clean"
             self._history.append({"role": "assistant", "content": _CLOSER})
             return _CLOSER
         await hang.wait()
@@ -243,6 +257,7 @@ def test_stopped_coder_does_not_settle(tmp_path):
         async def stopped(self, task):
             self._files_touched.append("app.py")
             self._tools_called.add("get_diagnostics")
+            self._diag_by_path["app.py"] = "clean"
             self._exit_status = "stopped"
             return "stopped mid-edit"
 
@@ -266,6 +281,8 @@ def test_coder_stays_alive_until_test_edit(tmp_path):
         _init_repo_with_tests(tmp_path)
         provider = _CoderSourceOnlyThenTest()
         tools = discover_tools().subset(CODER.tool_names, profile="coder")
+        lsp = MagicMock()
+        lsp.open_file_and_get_diagnostics.return_value = []
         child = Subagent(
             CODER,
             llm=provider,
@@ -273,7 +290,7 @@ def test_coder_stays_alive_until_test_edit(tmp_path):
             workspace=tmp_path,
             journal=tmp_path / "session.db",
             config=EngineConfig(max_turns=8),
-            lsp=None,
+            lsp=lsp,
         )
         text = await child.run("add N")
         assert provider.saw_nudge
@@ -299,13 +316,105 @@ def test_finish_nudge_requires_test_path(tmp_path):
         )
         child._tools_called.add("get_diagnostics")
         child._files_touched.append("app.py")
+        child._diag_by_path["app.py"] = "clean"
         child._repo_has_tests = True
         nudge = await child._finish_nudge()
         assert nudge is not None
         assert "app.py" in nudge
         assert "without adding or updating one" in nudge
         child._files_touched.append("tests/test_app.py")
+        child._diag_by_path["tests/test_app.py"] = "clean"
         assert await child._finish_nudge() is None
+
+    asyncio.run(run())
+
+
+def test_finish_nudge_requires_clean_diagnostics(tmp_path):
+    async def run():
+        _init_repo_with_tests(tmp_path)
+        tools = discover_tools().subset(CODER.tool_names, profile="coder")
+        child = Subagent(
+            CODER,
+            llm=FakeProvider(),
+            tools=tools,
+            workspace=tmp_path,
+            journal=tmp_path / "session.db",
+            config=EngineConfig(max_turns=8),
+        )
+        child._tools_called.add("get_diagnostics")
+        child._files_touched.extend(["app.py", "tests/test_app.py"])
+        child._repo_has_tests = True
+
+        child._diag_by_path["app.py"] = "errors"
+        child._diag_by_path["tests/test_app.py"] = "clean"
+        dirty = await child._finish_nudge()
+        assert dirty is not None
+        assert "app.py" in dirty
+        assert "Error diagnostics" in dirty
+
+        child._diag_by_path.pop("app.py")
+        stale = await child._finish_nudge()
+        assert stale is not None
+        assert "not checked after last edit" in stale
+
+        child._diag_by_path["app.py"] = "clean"
+        assert await child._finish_nudge() is None
+
+    asyncio.run(run())
+
+
+def test_finish_marks_incomplete_when_diagnostics_are_dirty(tmp_path):
+    async def run():
+        _init_repo_with_tests(tmp_path)
+        tools = discover_tools().subset(CODER.tool_names, profile="coder")
+        child = Subagent(
+            CODER,
+            llm=FakeProvider(),
+            tools=tools,
+            workspace=tmp_path,
+            journal=tmp_path / "session.db",
+            config=EngineConfig(max_turns=8),
+        )
+        child._tools_called.add("get_diagnostics")
+        child._files_touched.append("app.py")
+        child._diag_by_path["app.py"] = "errors"
+        child._history.append(
+            {
+                "role": "assistant",
+                "content": (
+                    "what: syntax error left in\npaths: app.py\n"
+                    "facts: shipped\nverdict: done"
+                ),
+            }
+        )
+        result = await child.finish("ok")
+        assert result.status == "incomplete"
+        assert "get_diagnostics" in result.missing_checks
+
+        child._diag_by_path["app.py"] = "clean"
+        child._files_touched.append("tests/test_app.py")
+        child._diag_by_path["tests/test_app.py"] = "clean"
+        ok = await child.finish("ok")
+        assert ok.status == "ok"
+        assert not ok.missing_checks
+
+    asyncio.run(run())
+
+
+def test_subagent_allows_one_continue_then_handoff(tmp_path):
+    async def run():
+        tools = discover_tools().subset(CODER.tool_names, profile="coder")
+        child = Subagent(
+            CODER,
+            llm=FakeProvider(),
+            tools=tools,
+            workspace=tmp_path,
+            journal=tmp_path / "session.db",
+            config=EngineConfig(max_turns=8),
+        )
+        assert await child._offer_continue(0) == "continue"
+        assert await child._offer_continue(1) == "handoff"
+        assert await child._offer_continue(2) == "handoff"
 
     asyncio.run(run())
 
@@ -435,6 +544,7 @@ def test_route_prompts_name_the_lanes():
     assert "engine starts tester and reviewer" in ORCH_SYSTEM
     assert "replace_symbol" in CODER.system_prompt
     assert "test_plan" in CODER.system_prompt
+    assert "no Error diagnostics" in CODER.system_prompt
     assert "coder's worktree" in TESTER.system_prompt
     assert "test_plan" in TESTER.system_prompt
     assert "reasoning" in REVIEWER.system_prompt

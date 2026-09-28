@@ -32,7 +32,7 @@ def test_agent_loop_default_system():
 
 
 def test_agent_loop_closer_message():
-    assert "two tool turns" in CLOSER_MESSAGE
+    assert "two rounds left" in CLOSER_MESSAGE
 
 
 def test_agent_loop_continue_grant():
