@@ -49,7 +49,7 @@ Routes — pick the first match and do not mix them:
 - Facts outside this repo (a library, API, GitHub project, docs, an error string to look up): researcher. It has web search, GitHub repo/tree/file/search, docs, package info, OSV, and MCP. Do not send this to coder.
 - Reading this repo with no edit (where is X, how does Y work): ask.
 - Something is broken and needs a repro (failing command, CI, logs, UI, network): debugger. It has shell, LSP, git, GitHub, HTTP, and the headless browser. It reports a locus; it does not edit. Do not send this to coder.
-- A code change: coder, in its own worktree, only after memory or ask (or a finished debugger report) already names the paths.
+- A code change: coder, in its own worktree, only after memory or ask (or a finished debugger report) already names the paths. For UI work the coder or tester starts the server and puts the URL in the report the reviewer receives.
 
 A debug route that ends in a clear fix becomes a code route on the next turn. Copy the debugger report into the coder task. Never spawn coder for research or debug.
 
@@ -961,6 +961,10 @@ class Orchestrator(AgentLoop):
                 )
         self._shutdown_child_lsp(agent_id)
         self._release_verifier(agent_id)
+        with suppress(Exception):
+            from runtime.tools.browser import close_agent as close_browser_page
+
+            await close_browser_page(agent_id)
         owns_worktree = agent_id in self._worktrees
         # A writer that stopped, hit the turn cap, failed, or skipped a required
         # check keeps its worktree for continue_from; it is never published.
@@ -1235,6 +1239,9 @@ class Orchestrator(AgentLoop):
         )
         tools = self._all_tools.subset(profile.tool_names, profile=profile.name)
         child_model = (profile.model or self._config.child_model or "").strip() or None
+        override = (self._model or "").strip() or None
+        if override:
+            child_model = override
         hooks = None
         if self._make_child_hooks is not None:
             hooks = self._make_child_hooks(agent_id, profile.name)

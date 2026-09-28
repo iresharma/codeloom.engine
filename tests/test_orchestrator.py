@@ -933,6 +933,7 @@ def test_discover_tools_includes_new_families():
     names = registry.names()
     assert {"git_status", "git_diff", "web_fetch", "web_search"} <= names
     assert {"browser_open", "browser_console", "browser_screenshot", "browser_network"} <= names
+    assert {"start_server", "stop_server", "server_logs"} <= names
     assert {
         "git_log",
         "gh_pr_view",
@@ -1211,3 +1212,33 @@ def test_orchestrator_hooks(tmp_path):
     hooks = AgentHooks()
     orch = _make_orchestrator(llm=provider, workspace=tmp_path, hooks=hooks)
     assert orch._hooks == hooks
+
+
+def test_submit_user_message_model_round_trip():
+    from protocol.codec import decode_command, encode
+    from protocol.commands import SubmitUserMessage
+
+    encoded = encode(SubmitUserMessage(text="hi", model="openai/gpt-5.6-luna"))
+    decoded = decode_command(encoded)
+    assert decoded.model == "openai/gpt-5.6-luna"
+    omitted = decode_command(encode(SubmitUserMessage(text="hi")))
+    assert omitted.model is None
+    assert b'"model"' not in encode(SubmitUserMessage(text="hi"))
+
+
+def test_make_subagent_uses_turn_model(tmp_path):
+    from agents.profile import discover_profiles
+    from agents.profiles.coder import PROFILE as CODER
+
+    orch = Orchestrator(
+        FakeProvider(),
+        all_tools=discover_tools(),
+        profiles=discover_profiles(),
+        workspace=tmp_path,
+    )
+    orch.use_model("openai/gpt-test")
+    child = orch._make_subagent(CODER, "abc123", tmp_path, isolated=False)
+    assert child._model == "openai/gpt-test"
+    orch.use_model(None)
+    child = orch._make_subagent(CODER, "def456", tmp_path, isolated=False)
+    assert child._model == CODER.model

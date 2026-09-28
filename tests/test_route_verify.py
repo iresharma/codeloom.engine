@@ -477,6 +477,9 @@ def test_reviewer_is_diff_first_not_a_survey():
     names = set(REVIEWER.tool_names)
     assert "git_diff" in names
     assert "read_file" in names
+    assert "browser_open" in names
+    assert "start_server" not in names
+    assert "run_command" not in names
     assert "list_files" not in names
     assert "search" not in names
     assert "github_repo" not in names
@@ -530,6 +533,9 @@ def test_researcher_and_debugger_keep_external_tools():
     assert "browser_console" in DEBUGGER.tool_names
     assert "browser_screenshot" in DEBUGGER.tool_names
     assert "browser_network" in DEBUGGER.tool_names
+    assert "start_server" in DEBUGGER.tool_names
+    assert "browser_open" in CODER.tool_names
+    assert "browser_open" in TESTER.tool_names
     assert "run_command" in DEBUGGER.tool_names
     assert TESTER.needs_worktree
     assert CODER.requires_tests

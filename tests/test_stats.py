@@ -61,7 +61,12 @@ def test_stats_round_trip_sqlite(tmp_path):
         open_files=[],
         file_tree=[],
         git=GitState.empty(),
-        stats=Stats(prompt_tokens=9, cost=0.5, requests=2),
+        stats=Stats(
+            prompt_tokens=9,
+            cost=0.5,
+            requests=2,
+            models=["openai/gpt-5.6-luna"],
+        ),
     )
     db = tmp_path / "session.db"
     from runtime.store.sqlite import init
@@ -71,6 +76,7 @@ def test_stats_round_trip_sqlite(tmp_path):
     loaded = load(db, "s1")
     assert loaded.stats.prompt_tokens == 9
     assert loaded.stats.requests == 2
+    assert loaded.stats.models == ["openai/gpt-5.6-luna"]
 
 
 def test_agent_runs_round_trip_sqlite(tmp_path):

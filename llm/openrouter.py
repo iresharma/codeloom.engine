@@ -18,6 +18,9 @@ except ImportError:  # pragma: no cover - older SDK
     BackoffStrategy = None  # type: ignore[misc, assignment]
 
 PLACEHOLDERS = {"", "...", "<OPENROUTER_API_KEY>", "your-key", "changeme"}
+# Coding agents need a tool-calling model that can hold a real edit. A mini
+# model is the wrong default: it ships broken patches and then cannot recover.
+DEFAULT_MODEL = "openai/gpt-5.6-luna"
 _PLACEHOLDERS = PLACEHOLDERS
 
 # Re-exports so `from llm.openrouter import LLMResult` keeps working.
@@ -48,7 +51,7 @@ class OpenRouterLLM:
             raise RuntimeError(
                 "set OPENROUTER_API_KEY to a real key (env.sh or the environment)"
             )
-        model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+        model = os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL)
         return cls(api_key=api_key, model=model, config=config)
 
     async def complete(
@@ -192,9 +195,18 @@ def _mark_message(message: dict) -> dict:
         }
     if isinstance(content, list) and content:
         parts = list(content)
-        last = parts[-1]
-        if isinstance(last, dict):
-            parts[-1] = {**last, "cache_control": dict(_CACHE)}
+        marked = False
+        for index in range(len(parts) - 1, -1, -1):
+            part = parts[index]
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image_url" or "image_url" in part:
+                continue
+            parts[index] = {**part, "cache_control": dict(_CACHE)}
+            marked = True
+            break
+        if not marked:
+            return {**message, "content": parts, "cache_control": dict(_CACHE)}
         return {**message, "content": parts}
     return {**message, "cache_control": dict(_CACHE)}
 

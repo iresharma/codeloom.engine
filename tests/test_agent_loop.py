@@ -1,5 +1,7 @@
 """Tests."""
 from __future__ import annotations
+
+import asyncio
 from unittest.mock import MagicMock
 from agents.agent_loop import (
     AgentLoop,
@@ -187,3 +189,66 @@ def test_agent_loop_context_dump(tmp_path):
 
     result = loop.context_dump()
     assert isinstance(result, str)
+
+
+def test_screenshot_history_keeps_last_two_images(tmp_path):
+    from tools.base import Tool, ToolResult
+    from tools.registry import ToolRegistry
+
+    async def shot(ctx, name="shot.jpg"):
+        return ToolResult(
+            text=f"saved {name}",
+            image=b"jpeg-" + name.encode(),
+            image_mime="image/jpeg",
+        )
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="browser_screenshot",
+            description="shot",
+            parameters={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+            },
+            fn=shot,
+        )
+    )
+    results = [
+        LLMResult(
+            text="",
+            tool_calls=[
+                ToolCall(
+                    id=str(index),
+                    name="browser_screenshot",
+                    arguments_json=f'{{"name": "s{index}.jpg"}}',
+                )
+            ],
+            usage=Usage(
+                prompt_tokens=1, completion_tokens=1, total_tokens=2, requests=1
+            ),
+        )
+        for index in range(3)
+    ]
+    results.append(
+        LLMResult(
+            text="done",
+            usage=Usage(
+                prompt_tokens=1, completion_tokens=1, total_tokens=2, requests=1
+            ),
+        )
+    )
+    loop = AgentLoop(
+        llm=FakeProvider(results=results),
+        workspace=tmp_path,
+        tools=registry,
+    )
+    asyncio.run(loop.run("look"))
+    shots = [message for message in loop._history if message.get("role") == "tool"]
+    assert len(shots) == 3
+    assert "[earlier screenshot omitted]" in shots[0]["content"]
+    assert isinstance(shots[0]["content"], str)
+    assert isinstance(shots[1]["content"], list)
+    assert shots[1]["content"][1]["type"] == "image_url"
+    assert isinstance(shots[2]["content"], list)
+    assert "s2.jpg" in shots[2]["content"][0]["text"]

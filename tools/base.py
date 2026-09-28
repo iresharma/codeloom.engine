@@ -11,6 +11,13 @@ _JSON_TYPES = {str: "string", int: "integer", float: "number", bool: "boolean"}
 
 
 @dataclass
+class ToolResult:
+    text: str
+    image: bytes | None = None
+    image_mime: str = "image/jpeg"
+
+
+@dataclass
 class ToolContext:
     workspace: Path
     language: Any = None
@@ -57,7 +64,7 @@ class Tool:
             },
         }
 
-    async def execute(self, ctx: ToolContext, arguments: dict) -> str:
+    async def execute(self, ctx: ToolContext, arguments: dict) -> str | ToolResult:
         sig = inspect.signature(self.fn)
         allowed = {name for name in sig.parameters if name not in _SKIP_PARAMS}
         kwargs = {key: value for key, value in arguments.items() if key in allowed}
@@ -69,6 +76,8 @@ class Tool:
             result = await result
         if result is None:
             return ""
+        if isinstance(result, ToolResult):
+            return result
         return result if isinstance(result, str) else str(result)
 
 

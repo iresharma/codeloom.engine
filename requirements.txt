@@ -8,3 +8,4 @@ tree-sitter-typescript
 tree-sitter-go
 textual>=1.0
 prometheus_client>=0.21
+playwright>=1.40

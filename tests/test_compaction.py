@@ -478,3 +478,64 @@ def test_relevance_eviction_preserves_history_invariant():
         assert validate_history(out) == []
 
     asyncio.run(run())
+
+
+def test_prune_screenshots_keeps_last_two():
+    from agents.compactor import SCREENSHOT_OMIT, prune_screenshots
+
+    def shot(call_id: str, name: str):
+        return {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": [
+                {"type": "text", "text": f"saved {name}"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{name}"},
+                },
+            ],
+        }
+
+    messages = [
+        {"role": "user", "content": "go"},
+        shot("1", "a.jpg"),
+        shot("2", "b.jpg"),
+        shot("3", "c.jpg"),
+    ]
+    out = prune_screenshots(messages)
+    assert SCREENSHOT_OMIT in out[1]["content"]
+    assert isinstance(out[1]["content"], str)
+    assert isinstance(out[2]["content"], list)
+    assert isinstance(out[3]["content"], list)
+
+
+def test_content_as_text_skips_image_parts():
+    from agents.compactor import _content_as_text
+
+    text = _content_as_text(
+        [
+            {"type": "text", "text": "saved shot.jpg"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,xxxx"}},
+        ]
+    )
+    assert text == "saved shot.jpg"
+    assert "xxxx" not in text
+
+
+def test_mark_message_cache_control_skips_image():
+    from llm.openrouter import _mark_message
+
+    marked = _mark_message(
+        {
+            "role": "tool",
+            "content": [
+                {"type": "text", "text": "saved shot.jpg"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/jpeg;base64,xx"},
+                },
+            ],
+        }
+    )
+    assert marked["content"][0]["cache_control"]["type"] == "ephemeral"
+    assert "cache_control" not in marked["content"][1]

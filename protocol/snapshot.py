@@ -189,6 +189,7 @@ class Stats:
     last_turn_tokens: int = 0
     last_turn_cost: float = 0.0
     agent_runs: list[AgentRun] = field(default_factory=list)
+    models: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -205,6 +206,7 @@ class Stats:
             "last_turn_tokens": self.last_turn_tokens,
             "last_turn_cost": self.last_turn_cost,
             "agent_runs": [row.to_json() for row in self.agent_runs],
+            "models": list(self.models),
         }
 
     @classmethod
@@ -227,6 +229,11 @@ class Stats:
             agent_runs=[
                 item if isinstance(item, AgentRun) else AgentRun.from_json(item)
                 for item in data.get("agent_runs") or []
+            ],
+            models=[
+                str(item)
+                for item in data.get("models") or []
+                if str(item).strip()
             ],
         )
 

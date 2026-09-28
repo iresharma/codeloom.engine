@@ -15,6 +15,7 @@ from agents.compactor import (
     _last_assistant_text,
     compact,
     looks_like_overflow,
+    prune_screenshots,
     validate_history,
 )
 from agents.diagnostics import classify_diagnostics_output, normalize_rel_path
@@ -48,8 +49,38 @@ from runtime.judge_decisions import (
 from runtime.prompts import PromptTimeout
 from runtime.skills.catalog import render_catalog
 from runtime.store.memory import render_memory
-from tools.base import ToolContext
+from tools.base import ToolContext, ToolResult
 from tools.registry import ToolRegistry
+
+
+def _tool_output_text(output: str | ToolResult) -> str:
+    if isinstance(output, ToolResult):
+        return output.text
+    return output
+
+
+def _tool_history_message(call_id: str, output: str | ToolResult) -> dict:
+    if isinstance(output, ToolResult) and output.image:
+        import base64
+
+        b64 = base64.b64encode(output.image).decode("ascii")
+        mime = output.image_mime or "image/jpeg"
+        return {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": [
+                {"type": "text", "text": output.text},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                },
+            ],
+        }
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": _tool_output_text(output),
+    }
 
 
 def compact_params(config: EngineConfig) -> tuple[float, int]:
@@ -925,28 +956,17 @@ class AgentLoop:
                 *[self._execute_call(call, reasoning=reasoning) for call in result.tool_calls]
             )
             for call, output in zip(result.tool_calls, outputs):
-                self._history.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": output,
-                    }
-                )
+                self._history.append(_tool_history_message(call.id, output))
         else:
             for call in result.tool_calls:
                 output = await self._execute_call(call, reasoning=reasoning)
-                self._history.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": output,
-                    }
-                )
+                self._history.append(_tool_history_message(call.id, output))
+        self._history = prune_screenshots(self._history)
         errors = validate_history(self._history)
         if errors:
             raise RuntimeError("history pairing broken: " + "; ".join(errors))
 
-    async def _execute_call(self, call, reasoning: str = "") -> str:
+    async def _execute_call(self, call, reasoning: str = "") -> str | ToolResult:
         arguments = call.arguments()
         if self._hooks.on_tool_start is not None:
             self._hooks.on_tool_start(call.id, call.name, arguments)
@@ -959,18 +979,33 @@ class AgentLoop:
             self._tools_called.add(call.name)
             if call.name not in _FREE_TOOL_NAMES:
                 self._tool_call_count += 1
+            text = _tool_output_text(output)
             if call.name == "get_diagnostics":
                 key = normalize_rel_path(str(arguments.get("path") or ""))
                 if key:
-                    self._diag_by_path[key] = classify_diagnostics_output(output)
-            output = await self._screen_result(call.name, arguments, output)
+                    self._diag_by_path[key] = classify_diagnostics_output(text)
+            screened = await self._screen_result(call.name, arguments, text)
+            if isinstance(output, ToolResult):
+                output = ToolResult(
+                    text=screened,
+                    image=output.image,
+                    image_mime=output.image_mime,
+                )
+            else:
+                output = screened
         except asyncio.CancelledError:
             if self._hooks.on_tool is not None:
                 self._hooks.on_tool(call.id, call.name, arguments, "cancelled", reasoning=reasoning)
             raise
         duration = int((time.monotonic() - started) * 1000)
         if self._hooks.on_tool is not None:
-            self._hooks.on_tool(call.id, call.name, arguments, output, reasoning=reasoning)
+            self._hooks.on_tool(
+                call.id,
+                call.name,
+                arguments,
+                _tool_output_text(output),
+                reasoning=reasoning,
+            )
         _ = duration
         return output
 

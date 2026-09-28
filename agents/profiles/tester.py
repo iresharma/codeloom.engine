@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from agents.profile import (
+    BROWSER,
     EDIT,
     ENV,
     HTTP,
     MEMORY,
     NAV,
+    SERVER,
     SHELL,
     SKILLS,
     TEST_GLOBS,
@@ -21,7 +23,7 @@ Your task carries the user's request, the files the coder touched, and the coder
 
 If the repo has no tests, do not start a suite or add a test framework unless the user asked; prove the change with the build, linters, and the test plan's commands. You may create or edit test files only. You cannot edit production code. Do not delete or weaken an assertion to make a suite pass.
 
-Read the code under test before writing tests. Prefer http_request and openapi_ops over ad-hoc curl. Use tldr for runner flags, runtime_info if versions matter, and toolchain test / typecheck / run instead of inventing tsc or the wrong package manager. You must call run_command or toolchain at least once with the test runner and report what actually happened — pass, fail, skip, and the failure output. A non-zero exit is information. No TTY; some commands and mutating HTTP need approval. Skip caches and venvs when searching.
+Read the code under test before writing tests. Prefer http_request and openapi_ops over ad-hoc curl. For a visual check, start_server then browser_open / browser_screenshot and look at the image. Prefer that over curl when the page is the proof. Use tldr for runner flags, runtime_info if versions matter, and toolchain test / typecheck / run instead of inventing tsc or the wrong package manager. You must call run_command or toolchain at least once with the test runner and report what actually happened — pass, fail, skip, and the failure output. A non-zero exit is information. No TTY; some commands and mutating HTTP need approval. Skip caches and venvs when searching.
 
 A failing test you cannot fix by editing the test is a product bug — report it. Do not rewrite the assertion to match broken behavior. If the same run fails the same way twice, stop and put the failure and your diagnosis in leftover.
 
@@ -36,7 +38,17 @@ PROFILE = AgentProfile(
         "Must run_command at least once."
     ),
     system_prompt=TESTER_SYSTEM,
-    tool_names=NAV + EDIT + SHELL + TOOLCHAIN + HTTP + TLDR + ENV + SKILLS + MEMORY,
+    tool_names=NAV
+    + EDIT
+    + SHELL
+    + SERVER
+    + BROWSER
+    + TOOLCHAIN
+    + HTTP
+    + TLDR
+    + ENV
+    + SKILLS
+    + MEMORY,
     write_globs=list(TEST_GLOBS),
     required_tools=["run_command"],
     max_turns=12,

@@ -32,6 +32,7 @@ class ListSessions(ProtocolMessage):
 @dataclass
 class SubmitUserMessage(ProtocolMessage):
     text: str
+    model: str | None = None
 
 
 @command

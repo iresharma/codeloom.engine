@@ -50,6 +50,7 @@ BROWSER = [
     "browser_screenshot",
     "browser_network",
 ]
+SERVER = ["start_server", "stop_server", "server_logs"]
 GH_SOCIAL = [
     "gh_pr_list",
     "gh_pr_view",
@@ -179,6 +180,8 @@ def repo_has_tests(workspace) -> bool:
 # Tester only. Ask inherits OPENROUTER_MODEL — the briefing is the map
 # the orch and coder run on, and Haiku was the wrong place to save money.
 EXTRACTOR_MODEL = "anthropic/claude-haiku-4.5"
+# Coder is pinned. It must not inherit a cheap OPENROUTER_MODEL.
+CODER_MODEL = "openai/gpt-5.6-luna"
 
 
 @dataclass

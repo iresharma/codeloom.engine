@@ -82,6 +82,7 @@ pure `str -> str` function and inherits all of it.
 | `gh` (GitHub CLI) | Optional; GitHub tools (`gh_pr_*`, `github_search_code`, …). Authenticate with `gh auth login`. |
 | Node.js / `npx` | Optional; needed for the Python and TypeScript language servers |
 | `gopls` | Optional; needed for Go language server support |
+| Playwright / Chromium | Required by the browser tools. `pip install` pulls the Python package; then `playwright install chromium` |
 
 A Unix-like OS is required — the transport is an `AF_UNIX` socket.
 
@@ -93,6 +94,7 @@ cd engine
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt       # or requirements-dev.txt for tests and lint
+playwright install chromium
 ```
 
 ### Configure
@@ -101,7 +103,7 @@ Create `env.sh` in the workspace root. It is gitignored.
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-v1-..."
-export OPENROUTER_MODEL="anthropic/claude-sonnet-5"
+export OPENROUTER_MODEL="openai/gpt-5.6-luna"
 ```
 
 The engine reads `env.sh` from the workspace at startup, but real environment
@@ -334,7 +336,7 @@ current disk hash does not match the hash stored with the note.
 | Variable | Default | Purpose |
 |---|---|---|
 | `OPENROUTER_API_KEY` | — | Required for chat. Placeholder values (`...`, `your-key`, `changeme`, `<OPENROUTER_API_KEY>`) are treated as unset. |
-| `OPENROUTER_MODEL` | `openai/gpt-4o-mini` | Any OpenRouter model with tool-calling support. |
+| `OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Any OpenRouter model with tool-calling support. The coder profile is pinned to this model and does not follow this. |
 | `OPENROUTER_CHILD_MODEL` | (unset) | Fallback model for profiles that do not set `AgentProfile.model`. |
 | `ENGINE_MODEL_CHEAP` / `ENGINE_MODEL_STRONG` | (both unset; inherit `OPENROUTER_MODEL`) | Phase 5's intent router picks `ENGINE_MODEL_STRONG` for turns classified `edit` + multi-file; nothing changes until set. |
 | `ENGINE_LLM_STREAM` | `1` | Set `0` to disable token streaming. |
@@ -475,7 +477,8 @@ runtime/
     scan.py envinfo.py dep_why.py  TODOs, local versions, lockfile why
     shell.py              asyncio subprocess executor for run_command
     web.py                HTTP fetch and Brave search
-    browser.py            Playwright headless browser (optional)
+    browser.py            Playwright headless browser (one Chromium, page per agent)
+    server.py             long-running worktree server for localhost
     writeglob.py          profile write-path globs
 
 tools/                  LLM-facing tool definitions — thin wrappers over runtime/tools
@@ -484,7 +487,7 @@ tools/                  LLM-facing tool definitions — thin wrappers over runti
   read_file.py list_files.py search.py sitter.py lsp.py
   edit_file.py edit_symbol.py apply_patch.py undo.py
   shell.py              run_command
-  git.py github.py web.py browser.py skills.py remember.py
+  git.py github.py web.py browser.py server.py skills.py remember.py
   pkg.py docs.py osv.py http.py scan.py runtime_info.py dep_why.py
 
 agents/
@@ -537,7 +540,7 @@ describe those implementations to a model. The suite exercises
 | Command output | 30k / stream, 60k total | `runtime/tools/shell.py` |
 | Context budget | 120,000 tokens | `EngineConfig.context_budget` |
 | Compact trigger / keep full tools | orch 0.7 / 3; children never compact in-loop (`trigger=2.0`), overflow fuse + `compress_for_parent` on finish | `EngineConfig.compact_trigger` / `keep_full_tools` |
-| Child models | tester `anthropic/claude-haiku-4.5`; ask and others inherit `OPENROUTER_MODEL` | `AgentProfile.model` / `OPENROUTER_CHILD_MODEL` |
+| Child models | coder `openai/gpt-5.6-luna`; tester `anthropic/claude-haiku-4.5`; ask and others inherit `OPENROUTER_MODEL` | `AgentProfile.model` / `OPENROUTER_CHILD_MODEL` |
 | Survey spawn cap | first user turn may fan out; leftover inbox turns spawn at most one `ask` and one `researcher` | `Orchestrator.reset_user_message_spawns` |
 | `github_file` window | 12,000 chars default, 50,000 hard cap | `runtime/tools/github.py` |
 | Child report summary / outcome | 400 / 32,000 chars; a clipped closer is `incomplete` so ask/researcher may respawn once | `SUMMARY_CLIP` / `OUTCOME_CLIP` |

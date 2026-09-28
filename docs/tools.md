@@ -152,14 +152,22 @@ can edit a tool and pick it up by restarting the session — no server restart.
 Default profiles: `researcher`, `debugger`. Also `mcp_list_resources` and
 `mcp_read_resource` (`file://` rejected).
 
-**Browser.** Used by the `debugger` personality. Requires Playwright; otherwise the tools return `error: browser tools unavailable`.
+**Browser.** Used by `coder`, `tester`, `reviewer`, and `debugger`. Playwright and Chromium are required; a missing binary returns `error: browser tools unavailable`. Each agent has its own page on one shared Chromium.
 
 | Tool | Purpose |
 |---|---|
-| `browser_open` | Headless Chromium, resets console/network logs. |
+| `browser_open` | Headless Chromium, resets that agent's console/network logs. |
 | `browser_console` | Console messages since last open. |
-| `browser_screenshot` | PNG under `.engine/debug/`. |
+| `browser_screenshot` | Viewport JPEG under `.engine/debug/`; the image is sent to the model. |
 | `browser_network` | Failed and 4xx/5xx requests since last open. |
+
+**Server.** Used by `coder`, `tester`, and `debugger` — not `reviewer`. Leaves a process running so `browser_open` and `http_request` can hit `http://127.0.0.1:<port>`.
+
+| Tool | Purpose |
+|---|---|
+| `start_server` | Spawn a command in the worktree, wait until the port accepts, then return. One server per worktree. |
+| `stop_server` | Kill that worktree's server. |
+| `server_logs` | Recent stdout/stderr from the running server. |
 
 ## Writing a new tool
 

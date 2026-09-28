@@ -120,7 +120,7 @@ class EngineSession:
         self._history_task: asyncio.Task | None = None
         self._history_generation = 0
         self._turn_task: asyncio.Task | None = None
-        self._pending_user: list[str] = []
+        self._pending_user: list[tuple[str, str | None]] = []
         self._inbox: list[str] = []
         self._aborting = False
         self._turn_started = 0.0
@@ -156,6 +156,8 @@ class EngineSession:
             self._llm = OpenRouterLLM.from_env(self._workspace, config=self._config)
         except RuntimeError:
             self._llm = None
+        if self._llm is not None:
+            self._note_model(self._llm.model)
 
     async def start(self) -> None:
         init_store(self._db_path)
@@ -211,10 +213,18 @@ class EngineSession:
             await asyncio.gather(task, return_exceptions=True)
         if isinstance(self._loop, Orchestrator):
             self._loop.abort_all_children()
+            with suppress(Exception):
+                from runtime.tools.server import stop_all as stop_servers
+
+                await stop_servers()
             self._kill_live_procs()
             await self._loop.wait_children()
             await self._loop.wait_settle()
             self._loop.cleanup_worktrees()
+        with suppress(Exception):
+            from runtime.tools.browser import shutdown as shutdown_browser
+
+            await shutdown_browser()
         self._prompts.cancel_all()
         for task in list(self._auth_tasks):
             task.cancel()
@@ -256,7 +266,7 @@ class EngineSession:
     def emit_error(self, message: str) -> None:
         self._emit(ErrorOccurred(message=message))
 
-    def start_turn(self, text: str) -> None:
+    def start_turn(self, text: str, model: str | None = None) -> None:
         self._add_message(role="user", text=text)
         self._persist()
         if self._loop is not None:
@@ -264,11 +274,11 @@ class EngineSession:
         if isinstance(self._loop, Orchestrator):
             self._loop.reset_user_message_spawns()
         if self._turn_task is not None and not self._turn_task.done():
-            self._pending_user.append(text)
+            self._pending_user.append((text, model))
             return
-        self._begin_turn(text)
+        self._begin_turn(text, model=model)
 
-    def _begin_turn(self, text: str) -> None:
+    def _begin_turn(self, text: str, model: str | None = None) -> None:
         self._state.stats.last_turn_tokens = 0
         self._state.stats.last_turn_cost = 0.0
         self._aborting = False
@@ -276,7 +286,9 @@ class EngineSession:
         # Emit thinking before the task runs so headless clients do not
         # treat classify_turn / compact as "orch idle, no children".
         self._on_state("thinking", 0)
-        self._turn_task = asyncio.get_running_loop().create_task(self._run_turn(text))
+        self._turn_task = asyncio.get_running_loop().create_task(
+            self._run_turn(text, model=model)
+        )
 
     def _maybe_pump(self) -> None:
         if self._turn_task is not None and not self._turn_task.done():
@@ -284,18 +296,21 @@ class EngineSession:
         if self._state.ended or self._state.session_id is None:
             return
         if self._pending_user:
-            self._begin_turn(self._pending_user.pop(0))
+            text, model = self._pending_user.pop(0)
+            self._begin_turn(text, model=model)
             return
         if self._inbox:
             report = "\n\n".join(self._inbox)
             self._inbox.clear()
             self._begin_turn(report)
 
-    async def _run_turn(self, text: str) -> None:
+    async def _run_turn(self, text: str, model: str | None = None) -> None:
         # CancelledError is swallowed: this task is the cancellation
         # boundary. After an abort, task.cancelled() is False and
         # exception() is None. Use self._aborting, not the task flags.
         try:
+            if model and self._loop is not None:
+                self._loop.use_model(model)
             handled = await self._maybe_route_turn(text)
             reply = handled if handled is not None else await self._loop.run(text)
             if not self._aborting:
@@ -952,6 +967,7 @@ class EngineSession:
         stats.turns += 1
         stats.last_turn_tokens += usage.total_tokens
         stats.last_turn_cost += usage.cost
+        self._note_model(model)
         apply_cost_correction(self._workspace, self._state)
         if self._metrics is not None:
             self._metrics.observe_usage(
@@ -961,6 +977,11 @@ class EngineSession:
                 model=model,
             )
         self._emit_stats()
+
+    def _note_model(self, model: str) -> None:
+        name = (model or "").strip()
+        if name and name not in self._state.stats.models:
+            self._state.stats.models.append(name)
 
     def _on_llm_request(
         self, model: str, duration_s: float, failed: bool, profile: str = ""

@@ -76,6 +76,8 @@ def test_orch_and_profile_allowlists():
     assert "tldr" in coder.names()
     assert "gh_pr_view" not in coder.names()
     assert "gh_pr_create" not in coder.names()
+    assert "browser_open" in coder.names()
+    assert "start_server" in coder.names()
     reviewer = tools.subset(profiles.get("reviewer").tool_names)
     assert "git_diff" in reviewer.names()
     assert "gh_pr_view" in reviewer.names()
@@ -85,6 +87,9 @@ def test_orch_and_profile_allowlists():
     assert "search" not in reviewer.names()
     assert "gh_pr_create" not in reviewer.names()
     assert "gh_pr_comment" not in reviewer.names()
+    assert "browser_open" in reviewer.names()
+    assert "start_server" not in reviewer.names()
+    assert "run_command" not in reviewer.names()
     researcher = tools.subset(profiles.get("researcher").tool_names)
     assert "gh_pr_comment" not in researcher.names()
     assert "gh_pr_view" not in researcher.names()
@@ -114,13 +119,16 @@ def test_orch_and_profile_allowlists():
     assert "For external docs, spawn researcher" not in ORCH_SYSTEM
     assert "Check workspace memory before spawning ask" in ORCH_SYSTEM
     assert "For code questions, spawn ask" not in ORCH_SYSTEM
+    tester_tools = tools.subset(profiles.get("tester").tool_names)
+    assert "http_request" in tester_tools.names()
+    assert "gh_pr_view" not in tester_tools.names()
+    assert "browser_open" in tester_tools.names()
+    assert "start_server" in tester_tools.names()
     debugger = tools.subset(profiles.get("debugger").tool_names)
     assert "gh_pr_comment" in debugger.names()
     assert "http_request" in debugger.names()
     assert "github_tree" in debugger.names()
-    tester_tools = tools.subset(profiles.get("tester").tool_names)
-    assert "http_request" in tester_tools.names()
-    assert "gh_pr_view" not in tester_tools.names()
+    assert "start_server" in debugger.names()
     tester = profiles.get("tester")
     assert tester.write_globs == list(TEST_GLOBS)
     assert tester.required_tools == ["run_command"]
@@ -141,6 +149,7 @@ def test_orch_and_profile_allowlists():
     assert profiles.get("ask").max_tool_calls == 50
     assert profiles.get("reviewer").required_tools == ["git_diff"]
     assert profiles.get("researcher").max_turns == 32
+    assert profiles.get("coder").model == "openai/gpt-5.6-luna"
     assert profiles.get("ask").model is None
     assert profiles.get("tester").model == "anthropic/claude-haiku-4.5"
     assert profiles.get("researcher").model is None

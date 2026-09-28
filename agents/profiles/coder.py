@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agents.profile import (
+    BROWSER,
     EDIT,
     ENV,
     GIT,
@@ -8,11 +9,13 @@ from agents.profile import (
     MEMORY,
     NAV,
     SCAN,
+    SERVER,
     SHELL,
     SITTER,
     SKILLS,
     TLDR,
     TOOLCHAIN,
+    CODER_MODEL,
     AgentProfile,
 )
 
@@ -23,7 +26,7 @@ Plan the edit from the task before you write anything. The orchestrator already 
 - If a named path is missing or the briefing is clearly wrong, search or list_files once to recover — not as a first step. Skip caches, venvs, and build folders (.ruff_cache, __pycache__, node_modules, .venv, dist, build).
 - Always read_file a path before you edit it. That is verification, not discovery.
 
-Make targeted edits. The default is str_replace with enough surrounding context that the match is unique; it refuses ambiguous matches instead of guessing. Use replace_symbol only when you are rewriting most of a short function, replace_lines for a window you already have open, apply_patch for several hunks at once, insert_after_imports for new imports, rename_symbol for identifiers. For new behavior, add small helper functions and wire them in with short edits rather than rewriting a large function. Make the first edit as soon as the plan is clear, then build and test and adjust; do not draft the whole change in your head before writing any of it. Before you call a type or function you have not used yet, look it up (find_symbol or hover) so arguments and return shapes are right. undo_edit if something goes wrong.
+Make targeted edits. The default is str_replace with enough surrounding context that the match is unique; it refuses ambiguous matches instead of guessing. Use replace_symbol only when you are rewriting most of a short function, replace_lines for a window you already have open, apply_patch for several hunks at once, insert_after_imports for new imports, rename_symbol for identifiers. For new behavior, add small helper functions and wire them in with short edits rather than rewriting a large function. Make the first edit as soon as the plan is clear, then build and test and adjust; do not draft the whole change in your head before writing any of it. Before you call a type or function you have not used yet, look it up (find_symbol or hover) so arguments and return shapes are right. undo_edit if something goes wrong. After a UI change, start_server then browser_open / browser_screenshot and look at the image. Put the local URL in your report so reviewer can open it.
 
 If this repo already has tests, a source change is not finished until a test covers it. Add or extend a test next to the existing ones, in the same style, and run the suite. The engine keeps you in this same run and this same worktree until that test file is edited. Do not treat the first closing report as the end.
 
@@ -55,11 +58,25 @@ PROFILE = AgentProfile(
         "Not for repo surveys."
     ),
     system_prompt=CODER_SYSTEM,
-    tool_names=NAV + SITTER + LSP + EDIT + SHELL + TOOLCHAIN + GIT + TLDR + ENV + SCAN + SKILLS + MEMORY,
+    tool_names=NAV
+    + SITTER
+    + LSP
+    + EDIT
+    + SHELL
+    + SERVER
+    + BROWSER
+    + TOOLCHAIN
+    + GIT
+    + TLDR
+    + ENV
+    + SCAN
+    + SKILLS
+    + MEMORY,
     write_globs=None,
     required_tools=["get_diagnostics"],
     max_turns=32,
     max_tool_calls=64,
+    model=CODER_MODEL,
     needs_worktree=True,
     requires_tests=True,
 )

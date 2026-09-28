@@ -4,7 +4,7 @@ import importlib
 import pkgutil
 
 import tools as tools_pkg
-from tools.base import Tool, ToolContext
+from tools.base import Tool, ToolContext, ToolResult
 
 MAX_RESULT = 80_000
 DEFAULT_MCP_PROFILES = {"researcher", "debugger"}
@@ -58,17 +58,28 @@ class ToolRegistry:
     def schemas(self) -> list[dict]:
         return [spec.schema() for spec in self._tools.values()]
 
-    async def execute(self, name: str, ctx: ToolContext, arguments: dict) -> str:
+    async def execute(
+        self, name: str, ctx: ToolContext, arguments: dict
+    ) -> str | ToolResult:
         spec = self._tools.get(name)
         if spec is None:
             return f"error: unknown tool {name}"
         try:
-            text = await spec.execute(ctx, arguments)
+            result = await spec.execute(ctx, arguments)
         except Exception as exc:  # noqa: BLE001
             return f"error: {exc}"
-        if len(text) > MAX_RESULT:
-            return text[:MAX_RESULT] + "\n...[truncated]"
-        return text
+        if isinstance(result, ToolResult):
+            text = result.text
+            if len(text) > MAX_RESULT:
+                return ToolResult(
+                    text=text[:MAX_RESULT] + "\n...[truncated]",
+                    image=result.image,
+                    image_mime=result.image_mime,
+                )
+            return result
+        if len(result) > MAX_RESULT:
+            return result[:MAX_RESULT] + "\n...[truncated]"
+        return result
 
 
 def discover_tools() -> ToolRegistry:

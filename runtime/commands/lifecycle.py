@@ -81,7 +81,7 @@ def submit_user_message(session, command: SubmitUserMessage) -> None:
                 if session._loop is None:
                     session._emit(ErrorOccurred(message="set OPENROUTER_API_KEY"))
                     return
-                session.start_turn(command.text)
+                session.start_turn(command.text, model=command.model)
                 return
             session._prompts.answer(pending.prompt_id, intent)
             return
@@ -90,7 +90,7 @@ def submit_user_message(session, command: SubmitUserMessage) -> None:
     if session._loop is None:
         session._emit(ErrorOccurred(message="set OPENROUTER_API_KEY"))
         return
-    session.start_turn(command.text)
+    session.start_turn(command.text, model=command.model)
 
 
 @handles(RequestSnapshot)

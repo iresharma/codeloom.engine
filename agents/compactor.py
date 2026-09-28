@@ -34,6 +34,8 @@ OUTPUT_CUTOFF_CONTINUE = (
 OUTCOME_TRUNCATED = "\n... (truncated)"
 TRIM_KEEP = 400
 TRIM_NOTICE = "\n... (trimmed; re-run the tool if you need this again)"
+SCREENSHOT_KEEP = 2
+SCREENSHOT_OMIT = "[earlier screenshot omitted]"
 _PATH_KEYS = ("path", "file", "target", "dest")
 _LEFTOVER_LABELS = (
     "leftover_questions:",
@@ -157,6 +159,8 @@ def _content_as_text(content) -> str:
             if isinstance(block, str):
                 parts.append(block)
             elif isinstance(block, dict):
+                if block.get("type") == "image_url" or "image_url" in block:
+                    continue
                 text = block.get("text")
                 if isinstance(text, str):
                     parts.append(text)
@@ -170,6 +174,40 @@ def _content_as_text(content) -> str:
                 parts.append(str(block))
         return "\n".join(parts)
     return json.dumps(content, default=str)
+
+
+def _is_image_part(part) -> bool:
+    return isinstance(part, dict) and (
+        part.get("type") == "image_url" or "image_url" in part
+    )
+
+
+def prune_screenshots(
+    messages: list[dict], keep: int = SCREENSHOT_KEEP
+) -> list[dict]:
+    """Keep the last `keep` screenshot tool messages; drop older image parts."""
+    indexes = []
+    for index, message in enumerate(messages):
+        if message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        if isinstance(content, list) and any(_is_image_part(part) for part in content):
+            indexes.append(index)
+    drop = set(indexes[:-keep] if keep else indexes)
+    if not drop:
+        return messages
+    out = []
+    for index, message in enumerate(messages):
+        if index not in drop:
+            out.append(message)
+            continue
+        text = _content_as_text(message.get("content")).strip()
+        if text:
+            text = f"{text}\n{SCREENSHOT_OMIT}"
+        else:
+            text = SCREENSHOT_OMIT
+        out.append({**message, "content": text})
+    return out
 
 
 def _bounded_transcript(items: list[dict], limit: int = TRANSCRIPT_BOUND) -> str:
@@ -482,6 +520,7 @@ async def compact(
     on_judgement=None,
     agent_id: str = "",
 ) -> tuple[list[dict], dict]:
+    messages = prune_screenshots(list(messages))
     estimated = _scaled_tokens(messages, ratio, last_prompt_tokens)
     if estimated < int(budget * trigger_ratio):
         return messages, _info(
@@ -560,6 +599,7 @@ async def _summarize(messages: list[dict], complete) -> tuple[list[dict], int, s
     to_summarize = [item for item in head if item is not first_system]
     if not to_summarize:
         return messages, 0, ""
+    to_summarize = prune_screenshots(to_summarize, keep=0)
     prompt = [
         {
             "role": "system",
