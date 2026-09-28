@@ -21,6 +21,7 @@ def test_defaults(monkeypatch, tmp_path):
     monkeypatch.delenv("ENGINE_METRICS_JOB", raising=False)
     monkeypatch.delenv("ENGINE_METRICS_INSTANCE", raising=False)
     monkeypatch.delenv("ENGINE_METRICS_PUSH_INTERVAL_S", raising=False)
+    monkeypatch.delenv("ENGINE_INTERVIEW", raising=False)
     config = EngineConfig.from_env(tmp_path)
     assert config.max_turns == 16
     assert config.turn_slice == 16
@@ -36,6 +37,7 @@ def test_defaults(monkeypatch, tmp_path):
     assert config.metrics_job == "engine"
     assert config.metrics_instance == ""
     assert config.metrics_push_interval_s == 2.0
+    assert config.interview is False
     assert config.warnings == []
 
 
@@ -241,6 +243,7 @@ def test_calibrated_profile_enforces_read_sites_and_write_secrets(
     assert config.judge_mode_for("intent") == "off"
     assert config.judge_mode_for("write") == "off"
     assert config.judge_mode_for("merge") == "advisory"
+    assert config.judge_mode_for("brief") == "advisory"
     assert config.judge_usable is True
 
 
@@ -316,3 +319,29 @@ def test_negative_push_interval_warns(monkeypatch, tmp_path):
     config = EngineConfig.from_env(tmp_path)
     assert config.metrics_push_interval_s == 2.0
     assert any("ENGINE_METRICS_PUSH_INTERVAL_S" in item for item in config.warnings)
+
+
+def test_interview_defaults_off(monkeypatch, tmp_path):
+    monkeypatch.delenv("ENGINE_INTERVIEW", raising=False)
+    config = EngineConfig.from_env(tmp_path)
+    assert config.interview is False
+
+
+def test_interview_on_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_INTERVIEW", "on")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.interview is True
+
+
+def test_invalid_interview_warns_and_defaults_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_INTERVIEW", "maybe")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.interview is False
+    assert any("ENGINE_INTERVIEW" in item for item in config.warnings)
+
+
+def test_brief_judge_site_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_JUDGE", "advisory")
+    monkeypatch.setenv("ENGINE_JUDGE_BRIEF", "enforcing")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.judge_mode_for("brief") == "enforcing"

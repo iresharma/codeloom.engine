@@ -61,6 +61,7 @@ class OpenRouterLLM:
         *,
         on_delta: Callable[[str, str], None] | None = None,
         model: str | None = None,
+        temperature: float | None = None,
     ) -> LLMResult:
         token = self._api_key
         authorization = (
@@ -81,6 +82,8 @@ class OpenRouterLLM:
             "http_headers": {"Authorization": authorization},
             "timeout_ms": int(timeout_s * 1000),
         }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         if cached_tools:
             kwargs["tools"] = cached_tools
         retries = _retry_config()

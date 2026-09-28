@@ -1167,6 +1167,18 @@ def test_orchestrator_transcript_for_unknown(tmp_path):
     assert transcript is None
 
 
+def test_transcript_for_matches_report_prefix(tmp_path):
+    provider = FakeProvider()
+    orch = _make_orchestrator(llm=provider, workspace=tmp_path)
+    full = "abcdef1234567890abcd"
+    orch._finished_transcripts[full] = {
+        "lines": [{"role": "assistant", "text": "saw the page"}]
+    }
+    found = orch.transcript_for(full[:8])
+    assert found is not None
+    assert found[0]["text"] == "saw the page"
+
+
 def test_orchestrator_with_config(tmp_path):
     from runtime.config import EngineConfig
 

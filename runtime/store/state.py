@@ -22,6 +22,7 @@ class SessionState:
     stats: Stats = field(default_factory=Stats)
     pending_prompt: PendingPrompt | None = None
     agents: list[AgentRow] = field(default_factory=list)
+    selected_model: str | None = None
 
     def snapshot(
         self,
@@ -48,6 +49,7 @@ class SessionState:
             stats=self.stats,
             pending_prompt=self.pending_prompt,
             agents=list(self.agents),
+            selected_model=self.selected_model,
         )
 
     @classmethod
@@ -60,6 +62,7 @@ class SessionState:
             stats=snap.stats or Stats(),
             pending_prompt=None,
             agents=[],
+            selected_model=snap.selected_model,
         )
 
 

@@ -61,7 +61,7 @@ A coder brief carries answers, not questions. Copy ask's facts into it: the sign
 
 Spawn returns at once with agent_id (and worktree/branch for writers). That ack is not a briefing. After ask, researcher, or coder returns started, stop this turn: tell the user you started them, and wait. Do not call that personality again until [agent … finished] arrives. One coder gets the whole change — do not split a numbered list into a second live coder. Spawn more than one reader in a turn only when the work is independent, and only in that same tool burst. Do not say the work is done until a child report arrives.
 
-Need understanding, then an edit? If memory already has fresh paths and facts, spawn coder with those. Otherwise spawn ask now. When its report arrives and names paths, spawn coder with that report copied in. Do not stop to interview the user for screenshots, copy, or extra assets — state an assumption and proceed. Never spawn coder in the same turn you still needed ask's answer. Never respawn ask because started came back without facts.
+Need understanding, then an edit? If memory already has fresh paths and facts, spawn coder with those. Otherwise spawn ask now. When its report arrives and names paths, spawn coder with that report copied in. Do not stop to interview the user for screenshots, copy, or extra assets — state an assumption and proceed. Never spawn coder in the same turn you still needed ask's answer. Never respawn ask because started came back without facts. A message that already contains a completed brief is the plan; do not interview again.
 
 Writers share one worktree per change. The first coder creates `engine/coder/<id>` under .engine/worktrees/. A second live coder is rejected — wait for it to finish. Do not retry the same coder brief in this turn. After that, spawn coder with continue_from=<that agent_id> (or omit it: the engine attaches to the open tree). Tester and reviewer join that tree; they never get their own. Ask, researcher, and debugger stay on the main checkout.
 
@@ -246,7 +246,23 @@ class Orchestrator(AgentLoop):
             return self
         return self._children.get(agent_id)
 
+    def _resolve_agent_id(self, agent_id: str) -> str:
+        """Reports quote the first 8 hex chars. The live id is the full uuid."""
+        if not agent_id:
+            return ""
+        if agent_id in self._children or agent_id in self._finished_transcripts:
+            return agent_id
+        matches = [
+            key
+            for key in (*self._children, *self._finished_transcripts)
+            if key.startswith(agent_id) or agent_id.startswith(key)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return agent_id
+
     def transcript_for(self, agent_id: str):
+        agent_id = self._resolve_agent_id(agent_id)
         child = self._children.get(agent_id)
         if child is not None:
             return child.transcript_lines()
@@ -258,6 +274,7 @@ class Orchestrator(AgentLoop):
     def breakdown_for(self, agent_id: str = ""):
         if not agent_id:
             return self.context_breakdown()
+        agent_id = self._resolve_agent_id(agent_id)
         child = self._children.get(agent_id)
         if child is not None:
             return child.context_breakdown()

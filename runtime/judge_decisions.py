@@ -639,3 +639,79 @@ def merge_signals(verdict) -> dict[str, float]:
         "worth_parent_context": verdict.score("worth_parent_context"),
         "contradicts_siblings": verdict.noul("contradicts_siblings"),
     }
+
+
+# --------------------------------------------------------------------------
+# Pre-turn brief gate (agents/prompter.py, runtime/session.py)
+#
+# ENGINE_INTERVIEW=on is the act switch for this site, independent of the
+# global ENGINE_JUDGE mode. The judge scores four closed questions; code
+# decides whether to run the prompter. A model fallback only runs when
+# judge.ask returns None.
+# --------------------------------------------------------------------------
+
+BRIEF_CONVERSATIONAL_SKIP = 0.5
+BRIEF_DONE_PRESENT = 0.5
+BRIEF_MATERIAL_GAP = 0.5
+BRIEF_ACTIONABLE_SKIP = 0.7
+
+BRIEF_SIGNAL_KEYS = (
+    "has_done_statement",
+    "has_material_gaps",
+    "is_already_actionable",
+    "is_conversational",
+)
+
+
+def brief_questions() -> dict:
+    from runtime.judge import Noul
+
+    return {
+        "has_done_statement": Noul(
+            instructions=(
+                "Does `text` state an observable completion condition "
+                "(a behavior, test, file, or user-visible result)?"
+            )
+        ),
+        "has_material_gaps": Noul(
+            instructions=(
+                "Does `text` leave an unspecified choice that would change "
+                "the implementation plan?"
+            )
+        ),
+        "is_already_actionable": Noul(
+            instructions=(
+                "Could an engineer plan this work from `text` alone without "
+                "asking clarifying questions?"
+            )
+        ),
+        "is_conversational": Noul(
+            instructions=(
+                "Is `text` a greeting, confirmation, settle request, or a "
+                "question that only wants an answer (not an implementation)?"
+            )
+        ),
+    }
+
+
+def classify_brief(verdict) -> bool:
+    """True = run the prompter interview.
+
+    Interview only when it is not conversational and either the done
+    statement is missing or a material gap is likely. A confident
+    actionable prompt skips the prompter. `verdict is None` is False —
+    the call site uses a cheap-model fallback for that case.
+    """
+    if verdict is None:
+        return False
+    if verdict.noul("is_conversational") > BRIEF_CONVERSATIONAL_SKIP:
+        return False
+    if verdict.noul("is_already_actionable") > BRIEF_ACTIONABLE_SKIP:
+        return False
+    missing_done = verdict.noul("has_done_statement") < BRIEF_DONE_PRESENT
+    material_gap = verdict.noul("has_material_gaps") > BRIEF_MATERIAL_GAP
+    return missing_done or material_gap
+
+
+def brief_signals(verdict) -> dict[str, float]:
+    return {key: verdict.noul(key) for key in BRIEF_SIGNAL_KEYS}

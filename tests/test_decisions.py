@@ -12,6 +12,7 @@ import pytest
 from runtime.judge_decisions import (
     SCREEN_MULTI_SLICE_FLOOR,
     SCREEN_WINDOW,
+    classify_brief,
     classify_exec,
     classify_loop,
     classify_merge,
@@ -249,3 +250,93 @@ def test_classify_merge_contradiction_forces_full_regardless_of_worth():
     level, contradicts = classify_merge(verdict)
     assert level == "full"
     assert contradicts is True
+
+
+# ---------------------------------------------------------------------
+# Pre-turn brief gate: classify_brief
+# ---------------------------------------------------------------------
+
+
+def test_classify_brief_none_verdict_is_false():
+    assert classify_brief(None) is False
+
+
+BRIEF_CASES = [
+    pytest.param(
+        FakeVerdict(
+            nouls={
+                "has_done_statement": 0.2,
+                "has_material_gaps": 0.1,
+                "is_already_actionable": 0.2,
+                "is_conversational": 0.1,
+            }
+        ),
+        True,
+        id="missing-done-interviews",
+    ),
+    pytest.param(
+        FakeVerdict(
+            nouls={
+                "has_done_statement": 0.9,
+                "has_material_gaps": 0.8,
+                "is_already_actionable": 0.2,
+                "is_conversational": 0.1,
+            }
+        ),
+        True,
+        id="material-gap-interviews",
+    ),
+    pytest.param(
+        FakeVerdict(
+            nouls={
+                "has_done_statement": 0.1,
+                "has_material_gaps": 0.9,
+                "is_already_actionable": 0.85,
+                "is_conversational": 0.1,
+            }
+        ),
+        False,
+        id="actionable-skips",
+    ),
+    pytest.param(
+        FakeVerdict(
+            nouls={
+                "has_done_statement": 0.1,
+                "has_material_gaps": 0.9,
+                "is_already_actionable": 0.2,
+                "is_conversational": 0.8,
+            }
+        ),
+        False,
+        id="conversational-skips",
+    ),
+    pytest.param(
+        FakeVerdict(
+            nouls={
+                "has_done_statement": 0.5,
+                "has_material_gaps": 0.5,
+                "is_already_actionable": 0.7,
+                "is_conversational": 0.5,
+            }
+        ),
+        False,
+        id="at-thresholds-does-not-interview",
+    ),
+    pytest.param(
+        FakeVerdict(
+            nouls={
+                "has_done_statement": 0.49,
+                "has_material_gaps": 0.5,
+                "is_already_actionable": 0.7,
+                "is_conversational": 0.5,
+            }
+        ),
+        True,
+        id="done-below-floor-interviews",
+    ),
+]
+
+
+@pytest.mark.parametrize("verdict,expected", BRIEF_CASES)
+def test_classify_brief(verdict, expected):
+    assert classify_brief(verdict) is expected

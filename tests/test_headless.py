@@ -57,6 +57,37 @@ def test_auto_answer_confirm_yes():
     assert auto_answer(_prompt()) == "yes"
 
 
+def test_auto_answer_interview_raises_instead_of_yes():
+    event = _prompt(kind="interview", choices=[], question="What should Done look like?")
+    with pytest.raises(HeadlessError, match="interview prompts require interactive input"):
+        auto_answer(event)
+
+
+def test_wait_until_idle_interview_does_not_reply_yes():
+    events = [
+        _prompt(kind="interview", choices=[], question="What should Done look like?"),
+    ]
+    sent = []
+
+    async def get_event():
+        if not events:
+            await asyncio.sleep(30)
+            raise AssertionError("get_event called after events exhausted")
+        return events.pop(0)
+
+    async def send(command):
+        sent.append(command)
+
+    async def run():
+        with pytest.raises(
+            HeadlessError, match="interview prompts require interactive input"
+        ):
+            await wait_until_idle(get_event, send, timeout=2.0, quiet_s=0.05)
+
+    asyncio.run(run())
+    assert sent == []
+
+
 def test_wait_until_idle_answers_prompt_and_returns():
     events = [
         _prompt(),

@@ -106,6 +106,11 @@ def _normalize_meta(text: str) -> str:
     return " ".join(str(text).lower().split()).rstrip(".!")
 
 
+def _clean_model(model: str | None) -> str | None:
+    name = (model or "").strip()
+    return name or None
+
+
 class EngineSession:
     def __init__(self, workspace: Path, db_path: Path):
         self._workspace = workspace.resolve()
@@ -156,8 +161,6 @@ class EngineSession:
             self._llm = OpenRouterLLM.from_env(self._workspace, config=self._config)
         except RuntimeError:
             self._llm = None
-        if self._llm is not None:
-            self._note_model(self._llm.model)
 
     async def start(self) -> None:
         init_store(self._db_path)
@@ -267,6 +270,8 @@ class EngineSession:
         self._emit(ErrorOccurred(message=message))
 
     def start_turn(self, text: str, model: str | None = None) -> None:
+        chosen = _clean_model(model)
+        self._state.selected_model = chosen
         self._add_message(role="user", text=text)
         self._persist()
         if self._loop is not None:
@@ -274,11 +279,18 @@ class EngineSession:
         if isinstance(self._loop, Orchestrator):
             self._loop.reset_user_message_spawns()
         if self._turn_task is not None and not self._turn_task.done():
-            self._pending_user.append((text, model))
+            self._pending_user.append((text, chosen))
             return
-        self._begin_turn(text, model=model)
+        self._begin_turn(text, model=chosen)
 
-    def _begin_turn(self, text: str, model: str | None = None) -> None:
+    def _begin_turn(
+        self, text: str, model: str | None = None, *, keep_model: bool = False
+    ) -> None:
+        if keep_model:
+            chosen = self._state.selected_model
+        else:
+            chosen = _clean_model(model)
+            self._state.selected_model = chosen
         self._state.stats.last_turn_tokens = 0
         self._state.stats.last_turn_cost = 0.0
         self._aborting = False
@@ -287,7 +299,7 @@ class EngineSession:
         # treat classify_turn / compact as "orch idle, no children".
         self._on_state("thinking", 0)
         self._turn_task = asyncio.get_running_loop().create_task(
-            self._run_turn(text, model=model)
+            self._run_turn(text, model=chosen)
         )
 
     def _maybe_pump(self) -> None:
@@ -302,7 +314,7 @@ class EngineSession:
         if self._inbox:
             report = "\n\n".join(self._inbox)
             self._inbox.clear()
-            self._begin_turn(report)
+            self._begin_turn(report, keep_model=True)
 
     async def _run_turn(self, text: str, model: str | None = None) -> None:
         # CancelledError is swallowed: this task is the cancellation
@@ -312,7 +324,11 @@ class EngineSession:
             if model and self._loop is not None:
                 self._loop.use_model(model)
             handled = await self._maybe_route_turn(text)
-            reply = handled if handled is not None else await self._loop.run(text)
+            if handled is not None:
+                reply = handled
+            else:
+                task = await self._maybe_interview(text)
+                reply = await self._loop.run(task)
             if not self._aborting:
                 # Same id as ChatMessageStarted/Delta so clients that
                 # already rendered the stream do not reprint the text.
@@ -338,6 +354,56 @@ class EngineSession:
             self._on_state("idle", 0)
             self._maybe_pump()
             self._flush_settles_if_idle()
+
+    async def _maybe_interview(self, text: str) -> str:
+        """Optional pre-turn prompter. Off by default (ENGINE_INTERVIEW).
+
+        Returns the brief for Orchestrator.run when an interview completes,
+        otherwise the original user text. Runs once per user message; the
+        brief is not classified again.
+        """
+        if not self._config.interview or self._loop is None or self._llm is None:
+            return text
+        stripped = (text or "").strip()
+        if not stripped:
+            return text
+        if _is_inbox_report(text):
+            return text
+        if _META_PHRASES.get(_normalize_meta(text)) is not None:
+            return text
+        from agents.prompter import (
+            BRIEF_TRANSCRIPT_PREFIX,
+            needs_interview,
+            run_prompter,
+        )
+
+        interview = await needs_interview(
+            stripped,
+            judge=self._judge,
+            config=self._config,
+            llm=self._llm,
+            on_judgement=self._on_judgement,
+        )
+        if not interview:
+            return text
+        brief = await run_prompter(
+            llm=self._llm,
+            text=stripped,
+            ask_user=self._prompts.ask,
+            config=self._config,
+            make_hooks=lambda agent_id: self._hooks_for(agent_id, "prompter"),
+            model=self._state.selected_model,
+            on_started=self._on_agent_started,
+            on_finished=self._on_agent_finished,
+        )
+        if brief is None:
+            return text
+        self._add_message(
+            role="assistant",
+            text=f"{BRIEF_TRANSCRIPT_PREFIX}{brief}",
+        )
+        self._persist()
+        return brief
 
     async def _maybe_route_turn(self, text: str) -> str | None:
         """Answer an exact session command (undo, what changed, list edits)

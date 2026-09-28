@@ -488,6 +488,7 @@ class EngineSnapshot:
     agents: list[AgentRow] | None = None
     mcp_servers: list[McpServerRow] | None = None
     skills: list[SkillRow] | None = None
+    selected_model: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -508,6 +509,8 @@ class EngineSnapshot:
             "mcp_servers": [row.to_json() for row in (self.mcp_servers or [])],
             "skills": [row.to_json() for row in (self.skills or [])],
         }
+        if self.selected_model:
+            payload["selected_model"] = self.selected_model
         if self.pending_prompt is not None:
             payload["pending_prompt"] = self.pending_prompt.to_json()
         return payload
@@ -547,4 +550,5 @@ class EngineSnapshot:
                 item if isinstance(item, SkillRow) else SkillRow.from_json(item)
                 for item in data.get("skills") or []
             ],
+            selected_model=(str(data.get("selected_model") or "").strip() or None),
         )

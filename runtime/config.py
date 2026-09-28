@@ -21,6 +21,7 @@ CALIBRATED_SITE_MODES = {
     "diagnostics": "advisory",
     "loop": "advisory",
     "merge": "advisory",
+    "brief": "advisory",
 }
 TYPESAFE_PLACEHOLDERS = {"", "...", "your-key", "changeme"}
 JUDGE_SITES = (
@@ -32,6 +33,7 @@ JUDGE_SITES = (
     "diagnostics",
     "loop",
     "merge",
+    "brief",
 )
 # 2.0 never fires in-loop; overflow still force-compacts. Must ship with
 # github_file windows or surveys hit the 120k fuse.
@@ -87,6 +89,10 @@ class EngineConfig:
     judge_mode_diagnostics: str = ""
     judge_mode_loop: str = ""
     judge_mode_merge: str = ""
+    judge_mode_brief: str = ""
+    # Opt-in pre-turn prompter. Independent of ENGINE_JUDGE: on means the
+    # brief site may act even when the global judge is advisory.
+    interview: bool = False
 
     def judge_mode_for(self, site: str) -> str:
         """Effective judge mode for a call site: its own override, or the
@@ -200,6 +206,17 @@ class EngineConfig:
                 _env_judge_site(f"ENGINE_JUDGE_{site.upper()}", warnings),
             )
         config.trace_calls = _env_bool("ENGINE_TRACE_CALLS", config.trace_calls, warnings)
+        raw_interview = os.environ.get("ENGINE_INTERVIEW", "off")
+        interview = (raw_interview or "").strip().lower()
+        if interview in {"1", "true", "yes", "on"}:
+            config.interview = True
+        elif interview in {"0", "false", "no", "off", ""}:
+            config.interview = False
+        else:
+            warnings.append(
+                f"ENGINE_INTERVIEW={raw_interview!r} is not off|on; using off"
+            )
+            config.interview = False
 
         # An explicit-but-invalid value (a typo, a stale config) is not a
         # deliberate opt-out of the judged default -- it's treated the same

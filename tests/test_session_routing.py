@@ -140,3 +140,55 @@ def test_inbox_report_never_gets_intent_routed(tmp_path):
         assert not any(e.name == "search" for e in tool_starts)
 
     asyncio.run(run())
+
+
+def test_selected_model_sticks_across_inbox_turns(tmp_path):
+    """A composer model applies to later agent reports, and Default clears it."""
+
+    async def run():
+        from agents.profiles.coder import PROFILE as CODER
+        from runtime.store import SessionState
+        from runtime.store.sqlite import load
+
+        session = await _bound(tmp_path)
+        loop = session._loop
+        seen: list = []
+        real = loop.use_model
+
+        def spy(model):
+            seen.append(model)
+            real(model)
+            if model:
+                child = loop._make_subagent(CODER, "child", tmp_path, isolated=False)
+                seen.append(child._model)
+
+        loop.use_model = spy
+        session.start_turn("build the preview", model="anthropic/claude-opus-5.5")
+        await _wait_idle(session)
+        assert seen[0] == "anthropic/claude-opus-5.5"
+        assert "anthropic/claude-opus-5.5" in seen
+        assert session._state.selected_model == "anthropic/claude-opus-5.5"
+        loaded = load(session._db_path, session._state.session_id)
+        assert loaded.selected_model == "anthropic/claude-opus-5.5"
+        assert SessionState.from_snapshot(loaded).selected_model == "anthropic/claude-opus-5.5"
+
+        seen.clear()
+        session._inbox.append("[agent ask abcdef12 finished]\nfound the clients card")
+        session._maybe_pump()
+        await _wait_idle(session)
+        assert seen[0] == "anthropic/claude-opus-5.5"
+        assert seen[1] == "anthropic/claude-opus-5.5"
+
+        seen.clear()
+        session.start_turn("switch back", model=None)
+        await _wait_idle(session)
+        assert session._state.selected_model is None
+        assert "anthropic/claude-opus-5.5" not in seen
+
+        seen.clear()
+        session._inbox.append("[agent coder abcdef12 finished]\npatched")
+        session._maybe_pump()
+        await _wait_idle(session)
+        assert seen == [None]
+
+    asyncio.run(run())

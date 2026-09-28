@@ -15,6 +15,7 @@ _lock = asyncio.Lock()
 _play = None
 _browser = None
 _context = None
+_launch_error: str | None = None
 _pages: dict[str, _PageState] = {}
 
 
@@ -31,18 +32,42 @@ class _PageState:
     network: list[str] = field(default_factory=list)
 
 
+def _in_container() -> bool:
+    if os.environ.get("container") == "docker":
+        return True
+    return os.path.exists("/.dockerenv")
+
+
 def _launch_args() -> list[str]:
-    args = ["--disable-dev-shm-usage"]
+    # Docker's /dev/shm is 64MB. Chromium's renderer dies on navigation
+    # without this, and a crashed page then fails every later load.
+    args = ["--disable-dev-shm-usage", "--disable-gpu"]
+    root = False
     try:
-        if os.geteuid() == 0:
-            args.append("--no-sandbox")
+        root = os.geteuid() == 0
     except AttributeError:
         pass
+    if root or _in_container():
+        args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
     return args
 
 
+def _missing() -> str:
+    if _launch_error:
+        return f"error: browser tools unavailable ({_launch_error})"
+    return _MISSING
+
+
+def _page_dead(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in ("crash", "has been closed", "target closed", "browser has been closed")
+    )
+
+
 async def _ensure_browser():
-    global _play, _browser, _context
+    global _play, _browser, _context, _launch_error
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -53,11 +78,13 @@ async def _ensure_browser():
         _play = await async_playwright().start()
         _browser = await _play.chromium.launch(headless=True, args=_launch_args())
         _context = await _browser.new_context(viewport=VIEWPORT)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _launch_error = str(exc)
         _play = None
         _browser = None
         _context = None
         return None
+    _launch_error = None
     return _context
 
 
@@ -83,7 +110,10 @@ async def _state_for(agent_id: str) -> _PageState | None:
     key = agent_id or "default"
     state = _pages.get(key)
     if state is not None:
-        return state
+        closed = getattr(state.page, "is_closed", None)
+        if closed is None or not closed():
+            return state
+        _pages.pop(key, None)
     page = await context.new_page()
     state = _PageState(page=page)
     _attach(state)
@@ -93,23 +123,32 @@ async def _state_for(agent_id: str) -> _PageState | None:
 
 async def browser_open(url: str, agent_id: str = "") -> str:
     async with _lock:
-        state = await _state_for(agent_id)
-        if state is None:
-            return _MISSING
-        state.console.clear()
-        state.network.clear()
-        try:
-            await state.page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        except Exception as exc:  # noqa: BLE001
-            return f"error: {exc}"
-        return f"opened {state.page.url} title={await state.page.title()!r}"
+        last = ""
+        for attempt in (1, 2):
+            state = await _state_for(agent_id)
+            if state is None:
+                return _missing()
+            state.console.clear()
+            state.network.clear()
+            try:
+                await state.page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                return f"opened {state.page.url} title={await state.page.title()!r}"
+            except Exception as exc:  # noqa: BLE001
+                last = str(exc)
+                # A renderer crash leaves the Page dead. Reusing it makes
+                # every later navigation fail the same way.
+                if attempt == 1 and _page_dead(exc):
+                    await _shutdown_locked()
+                    continue
+                return f"error: {exc}"
+        return f"error: {last}"
 
 
 async def browser_console(agent_id: str = "") -> str:
     async with _lock:
         state = await _state_for(agent_id)
         if state is None:
-            return _MISSING
+            return _missing()
         if not state.console:
             return "(no console messages)"
         return "\n".join(state.console[-80:])
@@ -124,7 +163,7 @@ async def browser_screenshot(
     async with _lock:
         state = await _state_for(agent_id)
         if state is None:
-            return ScreenshotResult(_MISSING)
+            return ScreenshotResult(_missing())
         folder = workspace / ".engine" / "debug"
         folder.mkdir(parents=True, exist_ok=True)
         stem = Path(name).name or "shot.jpg"
@@ -135,6 +174,8 @@ async def browser_screenshot(
                 type="jpeg", quality=60, full_page=full_page
             )
         except Exception as exc:  # noqa: BLE001
+            if _page_dead(exc):
+                await _shutdown_locked()
             return ScreenshotResult(f"error: {exc}")
         target.write_bytes(image)
         rel = target.relative_to(workspace).as_posix()
@@ -149,7 +190,7 @@ async def browser_network(agent_id: str = "") -> str:
     async with _lock:
         state = await _state_for(agent_id)
         if state is None:
-            return _MISSING
+            return _missing()
         if not state.network:
             return "(no failed or 4xx/5xx requests)"
         return "\n".join(state.network[-80:])
@@ -172,7 +213,7 @@ async def shutdown() -> None:
 
 
 async def _shutdown_locked() -> None:
-    global _play, _browser, _context
+    global _play, _browser, _context, _launch_error
     for state in list(_pages.values()):
         with suppress(Exception):
             await state.page.close()
@@ -189,3 +230,4 @@ async def _shutdown_locked() -> None:
     _play = None
     _browser = None
     _context = None
+    _launch_error = None

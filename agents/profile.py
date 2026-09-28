@@ -177,10 +177,10 @@ def repo_has_tests(workspace) -> bool:
     return any(is_test_path(rel) and is_code_path(rel) for rel in paths)
 
 
-# Tester only. Ask inherits OPENROUTER_MODEL — the briefing is the map
-# the orch and coder run on, and Haiku was the wrong place to save money.
+# Pins for Default. A model chosen in the composer replaces both for the
+# rest of the session, including agents spawned after a child report.
+# Ask stays unpinned so Default follows OPENROUTER_MODEL.
 EXTRACTOR_MODEL = "anthropic/claude-haiku-4.5"
-# Coder is pinned. It must not inherit a cheap OPENROUTER_MODEL.
 CODER_MODEL = "openai/gpt-5.6-luna"
 
 

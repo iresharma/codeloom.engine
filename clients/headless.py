@@ -45,6 +45,8 @@ def is_turn_cap_prompt(event: UserPromptRequested) -> bool:
 
 def auto_answer(event: UserPromptRequested, *, settle: str = "keep") -> str:
     """Pick an unattended reply for a UserPromptRequested."""
+    if event.kind == "interview":
+        raise HeadlessError("interview prompts require interactive input")
     if is_settle_prompt(event.choices):
         action = (settle or "keep").strip().lower()
         return action if action in SETTLE_ACTIONS else "keep"
@@ -137,6 +139,8 @@ async def wait_until_idle(
         if on_event is not None:
             on_event(event)
         if isinstance(event, UserPromptRequested):
+            if event.kind == "interview":
+                raise HeadlessError("interview prompts require interactive input")
             pending = True
             is_settle = is_settle_prompt(event.choices)
             if is_settle and event.agent_id:
