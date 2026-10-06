@@ -49,14 +49,12 @@ def _empty() -> dict:
     }
 
 
-def _load_unlocked(path: Path) -> dict:
+def _sanitize(raw: object) -> dict:
+    """Coerce an untrusted memory payload into the canonical shape.
+
+    Used for both on-disk loads and seeds pushed in by the controller.
+    """
     data = _empty()
-    if not path.is_file():
-        return data
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return data
     if not isinstance(raw, dict):
         return data
     files = raw.get("files")
@@ -81,6 +79,16 @@ def _load_unlocked(path: Path) -> dict:
                 )
         data[section] = kept
     return data
+
+
+def _load_unlocked(path: Path) -> dict:
+    if not path.is_file():
+        return _empty()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _empty()
+    return _sanitize(raw)
 
 
 def _save_unlocked(path: Path, data: dict) -> None:
@@ -316,6 +324,21 @@ def ingest_result(
             )
         _prune(data)
         _save_unlocked(path_obj, data)
+
+
+def seed(workspace: Path, data: object) -> None:
+    """Overwrite the workspace memory with a sanitized payload.
+
+    Called at session start to seed memory kept by the cloud controller.
+    """
+    with _LOCK:
+        _save_unlocked(_file(workspace), _sanitize(data))
+
+
+def raw_memory(workspace: Path) -> dict:
+    """Exact on-disk memory content, for the controller to persist losslessly."""
+    with _LOCK:
+        return _load_unlocked(_file(workspace))
 
 
 def render_memory(workspace: Path, cap: int = RENDER_CAP) -> str:

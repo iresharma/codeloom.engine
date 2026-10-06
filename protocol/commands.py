@@ -20,6 +20,7 @@ Command = ProtocolMessage
 class StartSession(ProtocolMessage):
     workspace: str
     session_id: str | None = None
+    memory: dict | None = None
 
 
 @command

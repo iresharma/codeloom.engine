@@ -43,6 +43,11 @@ async def start_session(session, command: StartSession) -> None:
         )
         return
 
+    if command.memory:
+        from runtime.store.memory import seed as seed_memory
+
+        seed_memory(session._workspace, command.memory)
+
     session._persist()
     if command.session_id:
         loaded = load_snapshot(session._db_path, command.session_id)

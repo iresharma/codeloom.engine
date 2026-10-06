@@ -327,3 +327,11 @@ class MemoryUpdated(ProtocolMessage):
     product: list[MemoryDecision] = field(default_factory=list)
     cicd: list[MemoryDecision] = field(default_factory=list)
     other: list[MemoryDecision] = field(default_factory=list)
+
+
+@event
+@dataclass
+class MemoryExported(ProtocolMessage):
+    """Raw memory.json, for the cloud controller to persist. Not for the UI."""
+
+    memory: dict = field(default_factory=dict)

@@ -75,6 +75,30 @@ def test_start_session_new_session(session):
     assert len(events) >= 1
 
 
+def test_start_session_seeds_memory(session):
+    """StartSession.memory is written to the workspace before the first turn."""
+
+    payload = {
+        "files": {},
+        "engineering": [{"text": "seeded decision", "updated_at": "2026-01-01T00:00:00Z"}],
+        "product": [],
+        "cicd": [],
+        "other": [],
+    }
+    cmd = StartSession(workspace=str(session._workspace), session_id=None, memory=payload)
+    session._emit = lambda *args, **kwargs: None
+
+    async def run():
+        await start_session(session, cmd)
+
+    asyncio.run(run())
+
+    from runtime.store.memory import raw_memory, render_memory
+
+    assert raw_memory(session._workspace)["engineering"][0]["text"] == "seeded decision"
+    assert "seeded decision" in render_memory(session._workspace)
+
+
 def test_start_session_restore_unknown(session):
     """Test StartSession with unknown session_id."""
 

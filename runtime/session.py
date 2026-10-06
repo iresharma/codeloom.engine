@@ -40,6 +40,7 @@ from protocol.events import (
     GitStateUpdated,
     JudgementMade,
     McpAuthRequired,
+    MemoryExported,
     MemoryUpdated,
     McpServersUpdated,
     SessionEnded,
@@ -1346,7 +1347,7 @@ class EngineSession:
 
     def _emit_memory(self) -> None:
         from protocol.snapshot import MemoryDecision, MemoryFileNote
-        from runtime.store.memory import dump_for_client
+        from runtime.store.memory import dump_for_client, raw_memory
 
         raw = dump_for_client(self._workspace)
         self._emit(
@@ -1394,6 +1395,7 @@ class EngineSession:
                 ],
             )
         )
+        self._emit(MemoryExported(memory=raw_memory(self._workspace)))
 
     def tool_context(self) -> ToolContext:
         return ToolContext(

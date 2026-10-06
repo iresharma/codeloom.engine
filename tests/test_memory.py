@@ -12,8 +12,10 @@ from runtime.store.memory import (
     SECTION_CAP,
     ingest_result,
     load,
+    raw_memory,
     remember,
     render_memory,
+    seed,
     touch,
 )
 from runtime.tools.edits import apply_edit
@@ -56,6 +58,38 @@ def test_file_note_stale_then_fresh(tmp_path):
     assert "[STALE]" not in fresh
     assert "[fresh]" in fresh
     assert "after rewrite" in fresh
+
+
+def test_seed_and_raw_memory_roundtrip(tmp_path):
+    target = tmp_path / "git.py"
+    target.write_text("old\n", encoding="utf-8")
+    remember(tmp_path, "files", "git helpers", path="git.py")
+    remember(tmp_path, "engineering", "orchestrator binds the loop")
+
+    exported = raw_memory(tmp_path)
+    # The raw export keeps the staleness bookkeeping the rendered view drops.
+    assert exported["files"]["git.py"]["note_sha"]
+    assert exported["engineering"][0]["text"] == "orchestrator binds the loop"
+
+    # Seeding a fresh workspace reproduces byte-identical raw state.
+    other = tmp_path / "fresh"
+    other.mkdir()
+    seed(other, exported)
+    assert raw_memory(other) == exported
+
+    # Staleness still works off the restored note_sha.
+    (other / "git.py").write_text("old\n", encoding="utf-8")
+    assert "[fresh]" in render_memory(other)
+    (other / "git.py").write_text("changed\n", encoding="utf-8")
+    assert "[STALE]" in render_memory(other)
+
+
+def test_seed_rejects_junk(tmp_path):
+    empty = {"files": {}, "engineering": [], "product": [], "cicd": [], "other": []}
+    seed(tmp_path, {"files": "not-a-dict", "engineering": [{"nope": 1}], "bogus": 5})
+    assert raw_memory(tmp_path) == empty
+    seed(tmp_path, "garbage")
+    assert raw_memory(tmp_path) == empty
 
 
 def test_decision_section_keeps_newest(tmp_path):
