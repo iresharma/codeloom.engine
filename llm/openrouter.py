@@ -38,7 +38,9 @@ __all__ = [
 class OpenRouterLLM:
     def __init__(self, api_key: str, model: str, config=None):
         self._api_key = api_key
-        self._client = OpenRouter(api_key=api_key)
+        base_url = os.environ.get("OPENROUTER_BASE_URL", "").strip()
+        self._base_url = base_url
+        self._client = OpenRouter(api_key=api_key, **({"server_url": base_url} if base_url else {}))
         self.model = model
         self._config = config
 
@@ -92,7 +94,12 @@ class OpenRouterLLM:
             # handed back. Mid-stream failures are not retried — that would
             # duplicate text already forwarded via on_delta.
             kwargs["retries"] = retries
-        response = await self._client.chat.send_async(**kwargs)
+        try:
+            response = await self._client.chat.send_async(**kwargs)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 402 and "budget_exhausted" in str(exc):
+                raise LLMError("budget_exhausted", code=402) from exc
+            raise
         if stream:
             result = await _result_from_stream(response, on_delta, idle_s)
         else:
@@ -102,6 +109,10 @@ class OpenRouterLLM:
         return await self._fill_missing_cost(result)
 
     async def _fill_missing_cost(self, result: LLMResult) -> LLMResult:
+        # A custom inference broker owns billing and may intentionally expose
+        # only chat completions. Do not issue an out-of-band metadata request.
+        if self._base_url:
+            return result
         usage = result.usage
         gen_id = result.generation_id
         if (
@@ -215,6 +226,8 @@ def _mark_message(message: dict) -> dict:
 
 
 def _retry_config():
+    if os.environ.get("OPENROUTER_DISABLE_RETRIES") == "1":
+        return RetryConfig("none", BackoffStrategy(0, 0, 1, 0), False) if RetryConfig is not None and BackoffStrategy is not None else None
     if RetryConfig is None or BackoffStrategy is None:
         return None
     return RetryConfig(

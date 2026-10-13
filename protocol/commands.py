@@ -44,6 +44,13 @@ class RequestSnapshot(ProtocolMessage):
 
 @command
 @dataclass
+class RequestRunState(ProtocolMessage):
+    """Headless completion barrier, including queued reports and settlements."""
+    pass
+
+
+@command
+@dataclass
 class RequestOrchContext(ProtocolMessage):
     pass
 
