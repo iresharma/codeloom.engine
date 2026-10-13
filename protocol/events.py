@@ -127,6 +127,16 @@ class SessionEnded(ProtocolMessage):
 
 @event
 @dataclass
+class RunStateReady(ProtocolMessage):
+    idle: bool
+    live_children: int
+    live_settlements: int
+    queued_messages: int
+    pending_prompt: bool
+
+
+@event
+@dataclass
 class ChatMessageStarted(ProtocolMessage):
     id: str
     role: str
