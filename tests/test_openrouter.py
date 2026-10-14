@@ -30,7 +30,9 @@ def test_openrouter_from_env_placeholder():
 def test_openrouter_from_env_success():
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-real-key"}, clear=True):
         llm = OpenRouterLLM.from_env()
-        assert llm.model == "openai/gpt-4o-mini"
+        from llm.openrouter import DEFAULT_MODEL
+
+        assert llm.model == DEFAULT_MODEL
 
 
 def test_openrouter_from_env_custom_model():
