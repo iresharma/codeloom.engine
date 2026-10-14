@@ -1203,6 +1203,9 @@ def _tester_task(
             "If a test for the change is missing, add it under a test path, in "
             "the style of the existing tests, and make it call the code under "
             "test. A test that copies the logic into itself proves nothing. "
+            "Only add or edit tests for the files listed above — never touch "
+            "a test belonging to some other file or feature, even one you "
+            "notice is missing or broken; name it in leftover instead. "
         )
     else:
         missing = (
