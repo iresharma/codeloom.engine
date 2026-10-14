@@ -61,44 +61,8 @@ def read_state(workspace: Path, *, diffs: bool = True) -> GitState:
 
 
 def read_workspace_state(workspace: Path, *, diffs: bool = True) -> GitState:
-    """Git status for the main checkout plus every engine worktree.
-
-    Writers edit linked worktrees, so `read_state(workspace)` stays clean
-    while the Changes panel would otherwise show nothing.
-    """
-    workspace = workspace.resolve()
-    main = read_state(workspace, diffs=diffs)
-    staged = list(main.staged)
-    unstaged = list(main.unstaged)
-    untracked = list(main.untracked)
-    seen = set(staged + unstaged + untracked)
-    base = _run(workspace, "rev-parse", "HEAD").strip() if _is_repo(workspace) else ""
-
-    def _add(bucket: list[str], path: str) -> None:
-        if path and path not in seen:
-            seen.add(path)
-            bucket.append(path)
-
-    for _agent_id, _branch, dest in list_engine_worktrees(workspace):
-        child = read_state(dest, diffs=False)
-        for path in child.staged:
-            _add(staged, path)
-        for path in child.unstaged:
-            _add(unstaged, path)
-        for path in child.untracked:
-            _add(untracked, path)
-        if base:
-            for path in _run(dest, "diff", "--name-only", base).splitlines():
-                _add(unstaged, path.strip())
-    return GitState(
-        branch=main.branch,
-        dirty=bool(staged or unstaged or untracked),
-        staged=staged,
-        unstaged=unstaged,
-        untracked=untracked,
-        staged_diff=main.staged_diff,
-        unstaged_diff=main.unstaged_diff,
-    )
+    """Git status for the checkout shared by the session and all its agents."""
+    return read_state(workspace, diffs=diffs)
 
 
 def _is_repo(workspace: Path) -> bool:

@@ -603,7 +603,6 @@ class EngineSession:
             profiles=profiles,
             spawn_budget=self._config.max_spawns_per_turn,
             make_child_hooks=child_hooks,
-            make_child_lsp=self._make_child_lsp,
             on_agent_started=self._on_agent_started,
             on_agent_finished=self._on_agent_finished,
             on_agent_result=self._on_agent_result,
@@ -943,19 +942,17 @@ class EngineSession:
         )
 
     def _start_lsp(self) -> None:
-        self._stop_lsp()
-        if not self.language.supported:
+        if self._lsp is not None or not self.language.supported:
             return
         self._lsp = LSPManager(self._workspace)
         threading.Thread(
             target=self._warm_lsp,
+            args=(self._lsp, self.language.name),
             daemon=True,
             name="lsp-warm-start",
         ).start()
 
-    def _warm_lsp(self) -> None:
-        manager = self._lsp
-        name = self.language.name
+    def _warm_lsp(self, manager: LSPManager, name: str | None) -> None:
         if manager is None or not name:
             return
         with suppress(OSError, RuntimeError, ValueError, LSPTimeoutError):
@@ -1190,23 +1187,6 @@ class EngineSession:
                 profile or ("orchestrator" if not agent_id else "unknown"),
                 str(info.get("strategy") or ""),
             )
-
-    def _make_child_lsp(self, workspace: Path):
-        if workspace.resolve() == self._workspace:
-            return self._lsp
-        if not self.language.supported:
-            return None
-        manager = LSPManager(workspace)
-        name = self.language.name
-
-        def warm() -> None:
-            with suppress(OSError, RuntimeError, ValueError, LSPTimeoutError):
-                manager.warm_start(name)
-
-        threading.Thread(
-            target=warm, daemon=True, name="lsp-worktree-warm"
-        ).start()
-        return manager
 
     def _on_agent_started(
         self,

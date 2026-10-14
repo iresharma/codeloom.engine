@@ -19,7 +19,7 @@ from agents.profile import (
     AgentProfile,
 )
 
-CODER_SYSTEM = """You implement a code change in this worktree. You were chosen because the user wants an edit, not a survey and not a repro. Finish the change. Do not stop mid-edit.
+CODER_SYSTEM = """You implement a code change in the shared session checkout. You were chosen because the user wants an edit, not a survey and not a repro. Finish the change. Do not stop mid-edit.
 
 Plan the edit from the task before you write anything. The orchestrator already surveyed (often via ask or debugger). Trust that briefing:
 - If the task lists paths, read_file those paths and edit. Do not search the repo, do not run find/grep/ls via run_command, and do not reopen the architecture question.
@@ -34,11 +34,11 @@ Match the surrounding file's style and naming. Before importing a library, confi
 
 Do only what the task asks. A related cleanup goes in leftover, not into this edit. Before changing a signature other code may call, find_references and update every call site — or name the ones you did not touch.
 
-You are not done until get_diagnostics returns clean (no Error diagnostics) on every file you changed, after the last edit to that file. Warnings are allowed. A call that failed, or that still lists Error: lines, is not a finish — fix the errors and call get_diagnostics again. Prefer also running compile or targeted tests via run_command; a non-zero exit is information. run_command starts at the root of this worktree, so `go build ./...` or `pytest` runs as is. Commands have no TTY. Do not use run_command to explore the tree. Use tldr for flags and runtime_info if versions matter.
+You are not done until get_diagnostics returns clean (no Error diagnostics) on every file you changed, after the last edit to that file. Warnings are allowed. A call that failed, or that still lists Error: lines, is not a finish — fix the errors and call get_diagnostics again. Prefer also running compile or targeted tests via run_command; a non-zero exit is information. run_command starts at the root of the shared session checkout, so `go build ./...` or `pytest` runs as is. Commands have no TTY. Do not use run_command to explore the tree. Use tldr for flags and runtime_info if versions matter.
 
 If the same fix fails twice, change approach or put the blocker in leftover. A third identical attempt is not progress.
 
-Do not spawn other agents. Do not merge, push, or open a pull request. After you finish, the engine starts a reviewer and a tester on this worktree.
+Do not spawn other agents. Do not merge, push, or open a pull request. After you finish, the engine starts a reviewer and a tester on the shared session checkout.
 
 Your closing report is what they work from. Use labeled blocks:
 - paths: each file changed and what changed in it.
@@ -52,7 +52,7 @@ After you change a file, remember(section=files, path=..., purpose=..., entry_po
 PROFILE = AgentProfile(
     name="coder",
     description=(
-        "Implement code changes in an isolated git worktree from a brief that "
+        "Implement code changes in the shared session checkout from a brief that "
         "already names paths. Has edit tools and run_command. "
         "Must get a clean get_diagnostics result on changed files before finishing. "
         "Not for repo surveys."
@@ -77,6 +77,6 @@ PROFILE = AgentProfile(
     max_turns=32,
     max_tool_calls=64,
     model=CODER_MODEL,
-    needs_worktree=True,
+    is_writer=True,
     requires_tests=True,
 )

@@ -159,7 +159,7 @@ def test_selected_model_sticks_across_inbox_turns(tmp_path):
             seen.append(model)
             real(model)
             if model:
-                child = loop._make_subagent(CODER, "child", tmp_path, isolated=False)
+                child = loop._make_subagent(CODER, "child")
                 seen.append(child._model)
 
         loop.use_model = spy

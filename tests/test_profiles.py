@@ -30,12 +30,12 @@ def test_discover_builtin_profiles():
     assert "mcp" not in registry.get("ask").tool_names
 
 
-def test_continue_from_only_offered_for_worktree_profiles():
+def test_continue_from_only_offered_for_writer_profiles():
     profiles = discover_profiles()
     for spec in profiles.as_tools(_spawn):
         props = spec.parameters["properties"]
         profile = profiles.get(spec.name)
-        if profile.needs_worktree:
+        if profile.is_writer:
             assert "continue_from" in props, f"{spec.name} should offer continue_from"
         else:
             assert "continue_from" not in props, f"{spec.name} should not offer continue_from"
@@ -133,12 +133,11 @@ def test_orch_and_profile_allowlists():
     assert tester.write_globs == list(TEST_GLOBS)
     assert tester.required_tools == ["run_command"]
     assert profiles.get("coder").required_tools == ["get_diagnostics"]
-    assert profiles.get("coder").needs_worktree is True
-    assert profiles.get("tester").needs_worktree is True
-    assert profiles.get("ask").needs_worktree is False
-    assert profiles.get("debugger").needs_worktree is False
-    assert profiles.get("reviewer").needs_worktree is False
-    assert profiles.get("reviewer").join_worktree is True
+    assert profiles.get("coder").is_writer is True
+    assert profiles.get("tester").is_writer is True
+    assert profiles.get("ask").is_writer is False
+    assert profiles.get("debugger").is_writer is False
+    assert profiles.get("reviewer").is_writer is False
     assert profiles.get("ask").max_turns == 32
     assert profiles.get("coder").max_turns == 32
     assert profiles.get("tester").max_turns == 12

@@ -228,7 +228,7 @@ def test_open_file_clean_omits_original(tmp_path):
     assert contents[0].original is None
 
 
-def test_open_file_from_worktree_prefers_dirty_copy(tmp_path):
+def test_open_file_uses_session_checkout_not_legacy_copy(tmp_path):
     _init_git(tmp_path)
     path, _branch, err = add_agent_worktree(tmp_path, "coder1", "coder")
     assert not err
@@ -247,11 +247,12 @@ def test_open_file_from_worktree_prefers_dirty_copy(tmp_path):
 
     new_file, dirty = asyncio.run(run())
     created = [item for item in new_file if isinstance(item, FileContent)]
-    assert created and created[0].content == "x = 1\n"
-    assert created[0].original == ""
+    assert not created
+    assert any(isinstance(item, ErrorOccurred) for item in new_file)
     edited = [item for item in dirty if isinstance(item, FileContent)]
-    assert edited and edited[0].content == "from worktree\n"
-    assert edited[0].original == "x\n"
+    assert edited and edited[0].content == "x\n"
+    assert edited[0].original is None
+    assert dest.exists()  # Opening/closing the session preserves legacy work.
 
 
 def test_open_file_missing(tmp_path):

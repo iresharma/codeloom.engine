@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+from agents.orchestrator import _PendingSettle
 from llm.provider import LLMResult, ToolCall
 from protocol.commands import AnswerPrompt, SubmitUserMessage
 from protocol.events import UserPromptRequested, WorktreeSettled
@@ -129,7 +130,20 @@ async def _wait_prompt(session, timeout: float = 2.0):
     raise AssertionError("no worktree prompt")
 
 
-def test_session_prompts_then_merges(tmp_path):
+def _queue_legacy_settle(orch, workspace):
+    path, branch, err = add_agent_worktree(workspace, "legacy-coder", "coder")
+    assert not err
+    dest = Path(path)
+    (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
+    orch._recover_worktrees()
+    orch._pending_settles["legacy-coder"] = _PendingSettle(
+        "legacy-coder", "coder", dest, branch, "add a flag"
+    )
+    orch.schedule_flush_settles()
+    return dest
+
+
+def test_legacy_worktree_prompts_then_merges(tmp_path):
     async def run():
         _init_git(tmp_path)
         hang = asyncio.Event()
@@ -138,13 +152,7 @@ def test_session_prompts_then_merges(tmp_path):
         while not queue.empty():
             queue.get_nowait()
         orch = session._loop
-        text = await orch.spawn("coder", "add a flag")
-        assert "worktree=" in text
-        dest = next(iter(orch._worktrees.values()))
-        (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
-        hang.set()
-        await orch.wait_children()
-        await _wait_idle(session)
+        dest = _queue_legacy_settle(orch, tmp_path)
         pending = await _wait_prompt(session)
         assert "merge" in pending.choices
         assert "pr" in pending.choices
@@ -203,7 +211,7 @@ class _HangEachChild(FakeProvider):
         return _diagnostics_first(messages, tools) or LLMResult(text="child")
 
 
-def test_reviewer_joins_writer_then_prompts(tmp_path):
+def test_reviewer_shares_checkout_without_settle_prompt(tmp_path):
     async def run():
         _init_git(tmp_path)
         provider = _HangEachChild()
@@ -211,7 +219,7 @@ def test_reviewer_joins_writer_then_prompts(tmp_path):
         orch = session._loop
         started = await orch.spawn("coder", "add a flag")
         assert "worktree=" in started
-        dest = next(iter(orch._worktrees.values()))
+        dest = tmp_path
         (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
         for _ in range(50):
             if len(provider.hangs) >= 1:
@@ -230,21 +238,9 @@ def test_reviewer_joins_writer_then_prompts(tmp_path):
         provider.hangs[1].set()
         await orch.wait_children()
         await _wait_idle(session)
-        pending = await _wait_prompt(session)
-        assert "merge" in pending.choices
-        await session.handle(AnswerPrompt(prompt_id=pending.prompt_id, text="keep"))
-        await orch.wait_settle()
-        assert dest.exists()
+        assert session._prompts.pending() is None
         assert (dest / "flag.py").read_text(encoding="utf-8") == "x = 1\n"
-        log = subprocess.run(
-            ["git", "log", "--oneline", "engine/coder/" + dest.name],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert log.returncode == 0
-        assert log.stdout.strip()
+        assert not orch._worktrees
 
     asyncio.run(run())
 
@@ -270,12 +266,7 @@ def test_keep_commits_then_settle_tool_merges(tmp_path):
         hang = asyncio.Event()
         session = await _bind(tmp_path, _HangChild(hang))()
         orch = session._loop
-        await orch.spawn("coder", "add a flag")
-        dest = next(iter(orch._worktrees.values()))
-        (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
-        hang.set()
-        await orch.wait_children()
-        await _wait_idle(session)
+        dest = _queue_legacy_settle(orch, tmp_path)
         pending = await _wait_prompt(session)
         await session.handle(AnswerPrompt(prompt_id=pending.prompt_id, text="keep"))
         await orch.wait_settle()
@@ -313,12 +304,7 @@ def test_please_merge_it_answers_settle_prompt(tmp_path):
         hang = asyncio.Event()
         session = await _bind(tmp_path, _HangChild(hang))()
         orch = session._loop
-        await orch.spawn("coder", "add a flag")
-        dest = next(iter(orch._worktrees.values()))
-        (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
-        hang.set()
-        await orch.wait_children()
-        await _wait_idle(session)
+        dest = _queue_legacy_settle(orch, tmp_path)
         await _wait_prompt(session)
         await session.handle(SubmitUserMessage(text="no my bad please merge it"))
         await orch.wait_settle()
@@ -334,12 +320,7 @@ def test_unrelated_chat_leaves_settle_prompt(tmp_path):
         hang = asyncio.Event()
         session = await _bind(tmp_path, _HangChild(hang))()
         orch = session._loop
-        await orch.spawn("coder", "add a flag")
-        dest = next(iter(orch._worktrees.values()))
-        (dest / "flag.py").write_text("x = 1\n", encoding="utf-8")
-        hang.set()
-        await orch.wait_children()
-        await _wait_idle(session)
+        dest = _queue_legacy_settle(orch, tmp_path)
         pending = await _wait_prompt(session)
         await session.handle(SubmitUserMessage(text="what files changed?"))
         assert session._prompts.pending() is not None

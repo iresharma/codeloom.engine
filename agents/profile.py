@@ -197,8 +197,7 @@ class AgentProfile:
     model: str | None = None
     temperature: float = 0.2
     reasoning_effort: str | None = None
-    needs_worktree: bool = False
-    join_worktree: bool = False
+    is_writer: bool = False
     # When the repo already has tests, a source edit is not finished until a
     # test path was edited too. Checked in Subagent._finish_nudge.
     requires_tests: bool = False
@@ -249,15 +248,13 @@ def _spawn_tool(profile: AgentProfile, spawn: SpawnFn) -> Tool:
             ),
         }
     }
-    if profile.needs_worktree:
+    if profile.is_writer:
         properties["continue_from"] = {
             "type": "string",
             "description": (
-                "Optional: an existing writer agent_id whose worktree this "
-                "agent should continue in, instead of starting a fresh one. "
-                "Use this for a reviewer-requested fix -- a fresh worktree "
-                "branches off the original base commit and cannot see that "
-                "agent's diff no matter what the task text says."
+                "Optional: a previous writer agent_id from this session. "
+                "Use it to identify the run being continued after feedback. "
+                "All runs share the session workspace."
             ),
         }
 

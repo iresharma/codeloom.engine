@@ -58,7 +58,7 @@ class Subagent(AgentLoop):
     async def _offer_continue(self, continues: int) -> str:
         # One extra slice is enough for a task that ran slightly long.
         # A second continue is how Auto burned millions of cached tokens.
-        if self._profile.needs_worktree:
+        if self._profile.is_writer:
             return "continue" if continues < 1 else "handoff"
         return await super()._offer_continue(continues)
 

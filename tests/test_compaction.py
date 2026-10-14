@@ -336,7 +336,7 @@ def test_make_subagent_uses_child_compact(tmp_path):
         config=orch_config,
     )
     child = orch._make_subagent(
-        discover_profiles().get("researcher"), "abc123", tmp_path, isolated=False
+        discover_profiles().get("researcher"), "abc123"
     )
     assert orch._config.compact_trigger == 0.7
     assert orch._config.keep_full_tools == 3
@@ -347,11 +347,11 @@ def test_make_subagent_uses_child_compact(tmp_path):
     assert child._concurrent_tools is True
     assert child._model is None
     ask = orch._make_subagent(
-        discover_profiles().get("ask"), "ask1", tmp_path, isolated=False
+        discover_profiles().get("ask"), "ask1"
     )
     assert ask._model is None
     coder = orch._make_subagent(
-        discover_profiles().get("coder"), "coder1", tmp_path, isolated=True
+        discover_profiles().get("coder"), "coder1"
     )
     assert coder._config.compact_trigger == WRITER_COMPACT_TRIGGER
     assert coder._config.keep_full_tools == WRITER_KEEP_FULL_TOOLS
