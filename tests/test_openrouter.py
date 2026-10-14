@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from llm.openrouter import OpenRouterLLM, load_env_sh, model_to_row, with_cache_breakpoints
 from llm.openrouter import _mark_message
-from llm.provider import LLMResult
 from runtime.config import EngineConfig
 
 

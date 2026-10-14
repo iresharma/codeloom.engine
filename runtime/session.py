@@ -74,7 +74,6 @@ from runtime.store.sqlite import init as init_store
 from runtime.store.sqlite import save as save_snapshot
 from runtime.subscriber import EVENT_SOFT_LIMIT, Subscriber, clip_text
 from runtime.tools.fs import WorkspacePathError, list_tree, read_text
-from runtime.tools.git import read_state as read_git
 from runtime.tools.git import read_workspace_state
 from runtime.tools.lsp import LSPManager, LSPTimeoutError
 from runtime.judge import JudgeManager
