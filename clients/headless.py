@@ -24,7 +24,7 @@ from runtime.tools.git import is_settle_prompt
 TURN_CAP_CHOICES = frozenset({"continue", "handoff", "stop"})
 SETTLE_ACTIONS = frozenset({"keep", "pr", "merge", "discard"})
 QUIET_S = 1.0
-# After a child finishes the orch still has to merge-gate + pump a follow-up
+# After a child finishes the orch still has to process its report and pump a follow-up
 # turn. 1s of idle is shorter than a timed-out TypeSafe call (~800ms) plus
 # intent classify, so the headless client would leave and the bench would
 # SIGTERM the engine mid-turn ("aborted by the user").
@@ -82,7 +82,7 @@ async def wait_until_idle(
     `timeout` <= 0 or None waits until idle with no wall-clock cap.
     After a child finishes, wait `post_child_quiet_s` for the orch to pump
     the report before treating the session as done. After answering a
-    worktree-settle prompt, wait for the matching `WorktreeSettled` event
+    legacy worktree-settle prompt, wait for the matching `WorktreeSettled` event
     (not a fixed window) before the session can be considered idle, since
     settle can push a branch and open a PR over the network.
     """
