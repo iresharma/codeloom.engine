@@ -25,19 +25,7 @@ from runtime.tools.fs import (
     relative_posix,
     resolve_in_workspace,
 )
-from runtime.tools.git import is_repo, list_engine_worktrees, read_head_file
-
-
-def _open_roots(workspace: Path) -> list[Path]:
-    root = Path(workspace).resolve()
-    roots = [root]
-    seen = {root}
-    for _, _, dest in list_engine_worktrees(root):
-        resolved = Path(dest).resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            roots.append(resolved)
-    return roots
+from runtime.tools.git import is_repo, read_head_file
 
 
 def _original_for(root: Path, rel: str, content: str) -> str | None:
@@ -52,26 +40,10 @@ def _original_for(root: Path, rel: str, content: str) -> str | None:
 
 
 def load_open_file(workspace: Path, path: str) -> tuple[str, str, str | None]:
-    """Return (rel, working-tree text, original). original is None when the
-    file matches HEAD, "" when it is new/untracked, or the HEAD blob when
-    dirty. Prefers a dirty engine worktree copy over the main checkout."""
-    found: list[tuple[str, str, str | None]] = []
-    for index, root in enumerate(_open_roots(workspace)):
-        try:
-            rel, content = read_text(root, path)
-        except FileNotFoundError:
-            continue
-        except WorkspacePathError:
-            if index == 0:
-                raise
-            continue
-        found.append((rel, content, _original_for(root, rel, content)))
-    if not found:
-        raise FileNotFoundError(path)
-    for rel, content, original in found:
-        if original is not None:
-            return rel, content, original
-    return found[0]
+    """Read the session checkout and its HEAD version for the file panel."""
+    root = Path(workspace).resolve()
+    rel, content = read_text(root, path)
+    return rel, content, _original_for(root, rel, content)
 
 
 @handles(OpenFile)

@@ -140,7 +140,7 @@ def test_ask_spawn_only_orch_chat(tmp_path):
             elif isinstance(item, ChatMessageStarted) and item.agent_id:
                 child_started.append(item)
         assert started and started[0].profile == "ask"
-        assert not started[0].worktree
+        assert started[0].worktree == str(tmp_path)
         assert finished
         assert added
         assert engine
@@ -588,7 +588,7 @@ def test_user_can_talk_while_child_runs(tmp_path):
     asyncio.run(run())
 
 
-def test_coder_gets_worktree(tmp_path):
+def test_coder_uses_session_checkout(tmp_path):
     async def run():
         _init_git(tmp_path)
         hang = asyncio.Event()
@@ -596,7 +596,7 @@ def test_coder_gets_worktree(tmp_path):
         orch: Orchestrator = session._loop
         text = await orch.spawn("coder", "add a flag")
         assert "worktree=" in text
-        assert "branch=engine/coder/" in text
+        assert f"worktree={tmp_path}" in text
         started = False
         for _ in range(50):
             if orch._child_tasks:
@@ -604,13 +604,13 @@ def test_coder_gets_worktree(tmp_path):
                 break
             await asyncio.sleep(0.02)
         assert started
-        trees = list((tmp_path / ".engine" / "worktrees").iterdir())
-        assert trees
+        assert not (tmp_path / ".engine" / "worktrees").exists()
+        assert orch._children[next(iter(orch._children))]._ctx.workspace == tmp_path
         hang.set()
         await orch.wait_children()
         await _wait_idle(session)
         await orch.wait_settle()
-        assert not trees[0].exists()
+        assert tmp_path.exists()
 
     asyncio.run(run())
 
@@ -644,8 +644,8 @@ def test_coder_continue_from_reuses_worktree(tmp_path):
         orch: Orchestrator = session._loop
         first = await orch.spawn("coder", "add a flag")
         first_id = first.split("agent_id=")[1].split()[0]
-        first_worktree = orch._worktrees[first_id]
-        first_branch = orch._worktree_branches[first_id]
+        first_worktree = tmp_path
+        first_branch = ""
         (first_worktree / "flag.py").write_text("x = 1\n")
         hang.set()
         await orch.wait_children()
@@ -659,11 +659,10 @@ def test_coder_continue_from_reuses_worktree(tmp_path):
         assert f"continuing {first_id[:8]}" in second
 
         second_id = second.split("agent_id=")[1].split()[0]
-        assert orch._worktrees[second_id] == first_worktree
-        assert orch._worktree_branches[second_id] == first_branch
-        # ownership transferred, not duplicated -- only one agent_id should
-        # be responsible for settling this worktree
-        assert first_id not in orch._worktrees
+        assert orch._children[second_id]._ctx.workspace == first_worktree
+        assert orch._writer_runs[first_id] == "coder"
+        assert orch._writer_runs[second_id] == "coder"
+        assert not orch._worktrees
 
         await orch.wait_children()
         await _wait_idle(session)
@@ -672,16 +671,16 @@ def test_coder_continue_from_reuses_worktree(tmp_path):
     asyncio.run(run())
 
 
-def test_second_coder_auto_joins_open_worktree(tmp_path):
+def test_next_coder_uses_same_session_checkout(tmp_path):
     async def run():
         _init_git(tmp_path)
         hang = asyncio.Event()
         session = await _bind(tmp_path, _HangChild(hang))()
         orch: Orchestrator = session._loop
         first = await orch.spawn("coder", "add a flag")
-        first_id = first.split("agent_id=")[1].split()[0]
-        first_worktree = orch._worktrees[first_id]
-        first_branch = orch._worktree_branches[first_id]
+        assert first.startswith("started")
+        first_worktree = tmp_path
+        first_branch = ""
         (first_worktree / "flag.py").write_text("x = 1\n")
         hang.set()
         await orch.wait_children()
@@ -690,7 +689,7 @@ def test_second_coder_auto_joins_open_worktree(tmp_path):
         assert second.startswith("started")
         assert f"worktree={first_worktree}" in second
         assert f"branch={first_branch}" in second
-        assert f"continuing {first_id[:8]}" in second
+        assert "continuing" not in second
         await orch.wait_children()
         await _wait_idle(session)
         await _abandon_settles(orch)
@@ -706,7 +705,7 @@ def test_tester_without_verify_joins_coder_tree(tmp_path):
         orch: Orchestrator = session._loop
         first = await orch.spawn("coder", "add a flag")
         first_id = first.split("agent_id=")[1].split()[0]
-        first_worktree = orch._worktrees[first_id]
+        first_worktree = tmp_path
         (first_worktree / "flag.py").write_text("x = 1\n")
         hang.set()
         await orch.wait_children()
@@ -715,7 +714,8 @@ def test_tester_without_verify_joins_coder_tree(tmp_path):
         assert tester.startswith("started")
         assert f"worktree={first_worktree}" in tester
         assert "engine/tester/" not in tester
-        assert f"verifying {first_id[:8]}" in tester
+        tester_id = tester.split("agent_id=")[1].split()[0]
+        assert orch._verify_owner[tester_id] == first_id
         await orch.wait_children()
         await _wait_idle(session)
         await _abandon_settles(orch)
@@ -730,19 +730,19 @@ def test_coder_continue_from_unknown_agent_errors(tmp_path):
         orch: Orchestrator = session._loop
         text = await orch.spawn("coder", "fix it", continue_from="doesnotexist")
         assert text.startswith("error:")
-        assert "no open worktree" in text
+        assert "no previous writer run" in text
 
     asyncio.run(run())
 
 
-def test_continue_from_rejects_profile_without_own_worktree(tmp_path):
+def test_continue_from_rejects_read_only_profile(tmp_path):
     async def run():
         _init_git(tmp_path)
         session = await _bind(tmp_path, FakeProvider())()
         orch: Orchestrator = session._loop
         text = await orch.spawn("ask", "where?", continue_from="whatever")
         assert text.startswith("error:")
-        assert "does not use its own worktree" in text
+        assert "only for writers" in text
 
     asyncio.run(run())
 
@@ -753,7 +753,7 @@ def test_ask_skips_worktree(tmp_path):
         session = await _bind(tmp_path, FakeProvider())()
         orch: Orchestrator = session._loop
         text = await orch.spawn("ask", "where?")
-        assert "worktree=" not in text
+        assert f"worktree={tmp_path}" in text
         await orch.wait_children()
         await _wait_idle(session)
         root = tmp_path / ".engine" / "worktrees"
@@ -1249,10 +1249,10 @@ def test_make_subagent_uses_turn_model(tmp_path):
         workspace=tmp_path,
     )
     orch.use_model("openai/gpt-test")
-    child = orch._make_subagent(CODER, "abc123", tmp_path, isolated=False)
+    child = orch._make_subagent(CODER, "abc123")
     assert child._model == "openai/gpt-test"
     orch.use_model(None)
-    child = orch._make_subagent(CODER, "def456", tmp_path, isolated=False)
+    child = orch._make_subagent(CODER, "def456")
     assert child._model == CODER.model
 
 
@@ -1274,22 +1274,22 @@ def test_reasoning_effort_precedence_turn_override_beats_profile_beats_engine_de
     )
 
     # No profile pin, no turn override -> engine default.
-    child = orch._make_subagent(CODER, "a", tmp_path, isolated=False)
+    child = orch._make_subagent(CODER, "a")
     assert child._reasoning_effort == "low"
 
     # Profile pin beats the engine default.
     profiled = replace(CODER, reasoning_effort="high")
-    child = orch._make_subagent(profiled, "b", tmp_path, isolated=False)
+    child = orch._make_subagent(profiled, "b")
     assert child._reasoning_effort == "high"
 
     # A turn-level override beats the profile pin.
     orch.use_reasoning_effort("max")
-    child = orch._make_subagent(profiled, "c", tmp_path, isolated=False)
+    child = orch._make_subagent(profiled, "c")
     assert child._reasoning_effort == "max"
 
     # Resetting the turn override falls back to the profile pin again.
     orch.use_reasoning_effort(None)
-    child = orch._make_subagent(profiled, "d", tmp_path, isolated=False)
+    child = orch._make_subagent(profiled, "d")
     assert child._reasoning_effort == "high"
 
 

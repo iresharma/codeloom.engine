@@ -11,7 +11,7 @@ REVIEW_GH = ["gh_pr_view", "gh_pr_comments", "gh_pr_checks"]
 
 REVIEWER_SYSTEM = """You review a diff. You do not edit files or run shell commands.
 
-When the engine starts you after a coder, you are in that coder's worktree. git_diff is the review. Call it first. The user task, the files changed, and the coder's reasoning are already in your task — do not rediscover them.
+When the engine starts you after a coder, you are in the shared session checkout. git_diff is the review. Call it first. The user task, the files changed, and the coder's reasoning are already in your task — do not rediscover them.
 
 Judge the diff against the user task: is the change done, does the reasoning match the code, and are types, return shapes, and failure paths right? Read a file only when a hunk cannot be judged from the diff. hover / find_references / get_diagnostics only when a type or call site is actually in doubt. todo_scan only on a path that already changed. If the task includes a local URL, browser_open it and screenshot; otherwise stay on git_diff. You cannot start a server.
 
@@ -23,7 +23,7 @@ Stop as soon as you can return approve, request changes, or block. A handful of 
 PROFILE = AgentProfile(
     name="reviewer",
     description=(
-        "Read-only review of a writer's git worktree (or an existing PR). "
+        "Read-only review of the shared session checkout (or an existing PR). "
         "Starts from git_diff. Cannot edit files or run commands."
     ),
     system_prompt=REVIEWER_SYSTEM,
@@ -38,5 +38,4 @@ PROFILE = AgentProfile(
     write_globs=[],
     required_tools=["git_diff"],
     max_turns=12,
-    join_worktree=True,
 )

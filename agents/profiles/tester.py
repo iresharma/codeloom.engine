@@ -17,7 +17,7 @@ from agents.profile import (
     AgentProfile,
 )
 
-TESTER_SYSTEM = """You prove the change that is already on this branch. You were started because a coder edited files; you are in that coder's worktree, not a fresh checkout.
+TESTER_SYSTEM = """You prove the change that is already on this branch. You were started because a coder edited files; you are in the shared session checkout, not a fresh checkout.
 
 Your task carries the user's request, the files the coder touched, and the coder's test_plan. Use the plan as a starting point, not a script: run it, run the repo's own suite (pytest, cypress, npx playwright, or whatever this project already uses), and cover the behavior the user asked for even where the plan is silent. Tests you add here ship with the coder's change.
 
@@ -33,8 +33,8 @@ Do not spawn other agents. Do not merge, push, or open a pull request. Report pa
 PROFILE = AgentProfile(
     name="tester",
     description=(
-        "Write and run tests on a coder's worktree (unit, HTTP, project E2E). "
-        "Joins that tree via verify_owner. Cannot edit production code. "
+        "Write and run tests on the shared session checkout (unit, HTTP, project E2E). "
+        "Shares its LSP manager and write lock. Cannot edit production code. "
         "Must run_command at least once."
     ),
     system_prompt=TESTER_SYSTEM,
@@ -53,6 +53,6 @@ PROFILE = AgentProfile(
     required_tools=["run_command"],
     max_turns=12,
     max_tool_calls=48,
-    needs_worktree=True,
+    is_writer=True,
     model=EXTRACTOR_MODEL,
 )

@@ -154,7 +154,7 @@ def _patch_child_run(fn):
     return orig
 
 
-def test_coder_files_touched_spawns_tester_and_reviewer_and_holds_settle(tmp_path):
+def test_coder_files_touched_spawns_verifiers_in_shared_checkout(tmp_path):
     hang = asyncio.Event()
 
     async def fake_run(self, task):
@@ -199,7 +199,7 @@ def test_coder_files_touched_spawns_tester_and_reviewer_and_holds_settle(tmp_pat
             assert profiles >= {"coder", "tester", "reviewer"}
             tester = next(item for item in started if item.profile == "tester")
             reviewer = next(item for item in started if item.profile == "reviewer")
-            dest = orch._worktrees[coder_id]
+            dest = tmp_path
             assert Path(tester.worktree).resolve() == dest.resolve()
             assert "Coder's test plan:" in tester.task
             assert "python -c" in tester.task
@@ -208,7 +208,8 @@ def test_coder_files_touched_spawns_tester_and_reviewer_and_holds_settle(tmp_pat
             assert "Coder's reasoning:" in reviewer.task
             assert "module constant" in reviewer.task
             assert coder_id in orch._verifying
-            assert coder_id in orch._deferred_settles
+            assert not orch._deferred_settles
+            assert not orch._worktrees
             assert coder_id not in orch._pending_settles
             hang.set()
             await orch.wait_children()
@@ -487,14 +488,14 @@ def test_reviewer_is_diff_first_not_a_survey():
     assert "github_search_code" not in names
 
 
-def test_verify_owner_without_worktree_errors(tmp_path):
+def test_unknown_verify_owner_errors(tmp_path):
     async def run():
         _init_repo_with_tests(tmp_path)
         session = await _bind(tmp_path, FakeProvider())()
         orch: Orchestrator = session._loop
         text = await orch.spawn("tester", "prove it", verify_owner="missing")
         assert text.startswith("error:")
-        assert "no open worktree" in text
+        assert "no coder run" in text
 
     asyncio.run(run())
 
@@ -537,7 +538,7 @@ def test_researcher_and_debugger_keep_external_tools():
     assert "browser_open" in CODER.tool_names
     assert "browser_open" in TESTER.tool_names
     assert "run_command" in DEBUGGER.tool_names
-    assert TESTER.needs_worktree
+    assert TESTER.is_writer
     assert CODER.requires_tests
 
 
@@ -551,6 +552,6 @@ def test_route_prompts_name_the_lanes():
     assert "replace_symbol" in CODER.system_prompt
     assert "test_plan" in CODER.system_prompt
     assert "no Error diagnostics" in CODER.system_prompt
-    assert "coder's worktree" in TESTER.system_prompt
+    assert "session checkout" in TESTER.system_prompt
     assert "test_plan" in TESTER.system_prompt
     assert "reasoning" in REVIEWER.system_prompt

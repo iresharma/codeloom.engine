@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -264,6 +265,8 @@ class LSPManager:
         # change on disk is detectable without trusting mtime.
         self._sent_sha: dict[str, str] = {}
         self._lock = threading.Lock()
+        self._client_start_lock = threading.Lock()
+        self._document_lock = threading.RLock()
         self._closed = False
 
     @staticmethod
@@ -286,6 +289,12 @@ class LSPManager:
         return cfg.language_id
 
     def _client_for(self, cfg: ServerConfig) -> LSPClient:
+        # Warm start and agents may request the same server concurrently.
+        # Serialize cache misses through initialization, before spawning a process.
+        with self._client_start_lock:
+            return self._start_client(cfg)
+
+    def _start_client(self, cfg: ServerConfig) -> LSPClient:
         if self._closed:
             raise RuntimeError("LSP manager is shut down")
         key = tuple(cfg.cmd)
@@ -295,57 +304,61 @@ class LSPManager:
                 return client
 
         client = LSPClient(self._prefer_installed(cfg.cmd), cwd=self.root)
-        client.request(
-            "initialize",
-            {
-                "processId": os.getpid(),
-                "rootUri": self.root_uri,
-                "rootPath": self.root,
-                "workspaceFolders": [
-                    {"uri": self.root_uri, "name": Path(self.root).name}
-                ],
-                "capabilities": {
-                    "workspace": {
-                        "workspaceFolders": True,
-                        "configuration": True,
-                        "didChangeConfiguration": {"dynamicRegistration": False},
+        try:
+            client.request(
+                "initialize",
+                {
+                    "processId": os.getpid(),
+                    "rootUri": self.root_uri,
+                    "rootPath": self.root,
+                    "workspaceFolders": [
+                        {"uri": self.root_uri, "name": Path(self.root).name}
+                    ],
+                    "capabilities": {
+                        "workspace": {
+                            "workspaceFolders": True,
+                            "configuration": True,
+                            "didChangeConfiguration": {"dynamicRegistration": False},
+                        },
+                        "window": {"workDoneProgress": True},
+                        "textDocument": {
+                            "synchronization": {"didSave": True, "didChange": True},
+                            "publishDiagnostics": {"relatedInformation": True},
+                            "definition": {},
+                            "references": {},
+                            "hover": {},
+                            "rename": {"prepareSupport": True},
+                            "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+                        },
                     },
-                    "window": {"workDoneProgress": True},
-                    "textDocument": {
-                        "synchronization": {"didSave": True, "didChange": True},
-                        "publishDiagnostics": {"relatedInformation": True},
-                        "definition": {},
-                        "references": {},
-                        "hover": {},
-                        "rename": {"prepareSupport": True},
-                        "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
-                    },
+                    "initializationOptions": cfg.init_options,
                 },
-                "initializationOptions": cfg.init_options,
-            },
-            timeout=30.0,
-        )
-        threading.Thread(
-            target=self._notification_listener,
-            args=(client, cfg),
-            daemon=True,
-            name=f"lsp-notify-{cfg.language}",
-        ).start()
-        client.notify("initialized", {})
-        if cfg.settings:
-            client.notify(
-                "workspace/didChangeConfiguration", {"settings": cfg.settings}
+                timeout=30.0,
             )
-        with self._lock:
-            if self._closed:
+            threading.Thread(
+                target=self._notification_listener,
+                args=(client, cfg),
+                daemon=True,
+                name=f"lsp-notify-{cfg.language}",
+            ).start()
+            client.notify("initialized", {})
+            if cfg.settings:
+                client.notify(
+                    "workspace/didChangeConfiguration", {"settings": cfg.settings}
+                )
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("LSP manager is shut down")
+                existing = self._clients.get(key)
+                if existing is not None:
+                    client.shutdown()
+                    return existing
+                self._clients[key] = client
+            return client
+        except BaseException:
+            with suppress(OSError, RuntimeError):
                 client.shutdown()
-                raise RuntimeError("LSP manager is shut down")
-            existing = self._clients.get(key)
-            if existing is not None:
-                client.shutdown()
-                return existing
-            self._clients[key] = client
-        return client
+            raise
 
     def _notification_listener(self, client: LSPClient, cfg: ServerConfig) -> None:
         while client._alive and not self._closed:
@@ -455,6 +468,11 @@ class LSPManager:
                     return
 
     def _did_open(self, rel_path: str, cfg: ServerConfig | None = None) -> str | None:
+        # Warm indexing and agents must not send duplicate didOpen messages.
+        with self._document_lock:
+            return self._open_document(rel_path, cfg)
+
+    def _open_document(self, rel_path: str, cfg: ServerConfig | None) -> str | None:
         full_path = str(Path(self.root, rel_path).resolve())
         uri = self._path_to_uri(full_path)
         with self._lock:
@@ -606,12 +624,19 @@ class LSPManager:
         against the updated content.
         """
         full_path = str(Path(self.root, rel_path).resolve())
-        text = self._stale_disk_text(full_path)
-        if text is None:
-            return False
-        return self.did_change(rel_path, text) is not None
+        with self._document_lock:
+            text = self._stale_disk_text(full_path)
+            if text is None:
+                return False
+            return self.did_change(rel_path, text) is not None
 
     def did_change(self, rel_path: str, new_text: str) -> str | None:
+        # Keep version allocation and notification order consistent for readers
+        # syncing external changes alongside a writer's diagnostics request.
+        with self._document_lock:
+            return self._change_document(rel_path, new_text)
+
+    def _change_document(self, rel_path: str, new_text: str) -> str | None:
         full_path = str(Path(self.root, rel_path).resolve())
         ext = Path(full_path).suffix
         cfg = self._config_for_extension(ext)

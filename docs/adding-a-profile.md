@@ -35,7 +35,7 @@ PROFILE = AgentProfile(
     write_globs=["**/*.md", "**/docs/**"],
     required_tools=[],
     max_turns=8,
-    needs_worktree=False,
+    is_writer=True,
 )
 ```
 
@@ -77,7 +77,7 @@ PROFILE = AgentProfile(
     write_globs=[],
     required_tools=[],
     max_turns=4,
-    needs_worktree=False,
+    is_writer=False,
 )
 ```
 
@@ -112,7 +112,7 @@ PROFILE = AgentProfile(
     write_globs=["**/*.md", "docs/**"],
     required_tools=[],
     max_turns=8,
-    needs_worktree=False,
+    is_writer=True,
 )
 ```
 
@@ -191,7 +191,7 @@ PROFILE = AgentProfile(
     write_globs=[],
     required_tools=["todo_scanner"],
     max_turns=6,
-    needs_worktree=False,
+    is_writer=False,
 )
 ```
 
@@ -222,8 +222,7 @@ this personality will not do.
 prompt-cache prefixes stay stable; `remember()` during the child's own run is visible
 as a tool result, not as a rewritten system block. The orchestrator re-renders every turn.
 Ask, coder, and researcher briefings are ingested into the main workspace
-`memory.json` when the child finishes (hashed in the child's tree, including
-worktrees). Mid-run `remember` can still write a better structured note; ingest
+`memory.json` when the child finishes (hashed in the shared checkout). Mid-run `remember` can still write a better structured note; ingest
 will not overwrite a **fresh** file note. STALE notes (disk hash ≠ `note_sha`)
 are rewritten from the briefing.
 - `tool_names` — allowlist from `discover_tools()`. Unknown names become
@@ -237,17 +236,12 @@ list is matched against the relative path (`**/tests/**`, `**/*.md`, …).
 (`get_diagnostics`) and `tester` (`run_command`).
 - `max_turns` — child's own cap, independent of the orch. Built-in profiles use 32. Hitting it prompts continue (same child, another `turn_slice`), handoff (orch may spawn one writer with leftover), or stop (no respawn). `ENGINE_TURN_CONTINUE=never` skips the prompt and hands off. Do not lower researcher without `Stats.agent_runs` showing frequent `max_turns`; spawn-once still blocks a sibling researcher, so a hard cut just wastes the survey.
 - `model` — optional OpenRouter model id for this personality. `tester` uses Haiku; ask/researcher/coder/debugger/reviewer inherit `OPENROUTER_MODEL`. `OPENROUTER_CHILD_MODEL` overrides only profiles that leave `model` unset.
-- `needs_worktree` — if true, the child runs in a git worktree on a new branch
-under `.engine/worktrees/` so writers do not collide. `coder` and `tester`
-set this. When the child finishes with changes, those edits are committed on
-the writer branch, then the user is prompted to merge, open a PR, keep, or
-discard — after any `join_worktree` personality (reviewer) on that tree has
-also finished. Later "please merge it" goes through `settle_worktree`, not a
-new writer spawn.
-- `join_worktree` — if true, the child reuses a live writer worktree (same
-batch if possible) instead of creating one. `reviewer` sets this so it sees
-the writer's diff. If no worktree is open, it uses the main checkout.
-
+- `is_writer` — enables writer continuation IDs and writer-specific context and
+turn budgets. `coder` and `tester` set this. Every profile uses the session's
+existing checkout, LSP manager, and write lock; this flag does not create a
+branch or worktree. File permissions remain controlled by `write_globs`.
+New runs do not auto-commit or prompt for settlement. `settle_worktree` only
+handles isolated worktrees left by older engine versions.
 
 
 ## Hard vs prompt-only
@@ -262,7 +256,6 @@ hard stop. Which test runner to invoke stays prompt-only.
 - [ ] `tool_names` is an allowlist, not "all tools"
 - [ ] Read-only personalities set `write_globs=[]`
 - [ ] Writers that must stay in a subdirectory set `write_globs`
-- [ ] Writers that must stay isolated from other writers set `needs_worktree`
-- [ ] Review-only personalities that should see a writer's diff set `join_worktree`
+- [ ] Writers set `is_writer=True`; every profile shares the session checkout and LSP
 - [ ] Description tells the orch when to pick this personality
 - [ ] A test uses `discover_profiles()` and checks the name is present
