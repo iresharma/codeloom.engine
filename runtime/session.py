@@ -43,6 +43,7 @@ from protocol.events import (
     MemoryExported,
     MemoryUpdated,
     McpServersUpdated,
+    ModelCatalogUpdated,
     SessionEnded,
     SkillActivated,
     SkillCatalogUpdated,
@@ -60,9 +61,10 @@ from protocol.snapshot import (
     ChatMessage,
     EngineSnapshot,
     GitState,
+    ModelRow,
 )
 from runtime.commands import HANDLERS
-from runtime.config import EngineConfig
+from runtime.config import REASONING_EFFORTS, EngineConfig
 from runtime.metrics import EngineMetrics
 from runtime.language import LanguageInfo
 from runtime.language import detect as detect_language
@@ -72,7 +74,6 @@ from runtime.store.sqlite import init as init_store
 from runtime.store.sqlite import save as save_snapshot
 from runtime.subscriber import EVENT_SOFT_LIMIT, Subscriber, clip_text
 from runtime.tools.fs import WorkspacePathError, list_tree, read_text
-from runtime.tools.git import read_state as read_git
 from runtime.tools.git import read_workspace_state
 from runtime.tools.lsp import LSPManager, LSPTimeoutError
 from runtime.judge import JudgeManager
@@ -108,8 +109,16 @@ def _normalize_meta(text: str) -> str:
     return " ".join(str(text).lower().split()).rstrip(".!")
 
 
+MODEL_CATALOG_TIMEOUT_S = 10.0
+
+
 def _clean_model(model: str | None) -> str | None:
     name = (model or "").strip()
+    return name or None
+
+
+def _clean_effort(effort: str | None) -> str | None:
+    name = (effort or "").strip().lower()
     return name or None
 
 
@@ -127,7 +136,9 @@ class EngineSession:
         self._history_task: asyncio.Task | None = None
         self._history_generation = 0
         self._turn_task: asyncio.Task | None = None
-        self._pending_user: list[tuple[str, str | None]] = []
+        self._pending_user: list[tuple[str, str | None, str | None]] = []
+        self._models: list[ModelRow] = []
+        self._model_catalog_task: asyncio.Task | None = None
         self._inbox: list[str] = []
         self._aborting = False
         self._turn_started = 0.0
@@ -205,7 +216,34 @@ class EngineSession:
             snap.mcp_servers = self._mcp.rows()
         if self._skills is not None:
             snap.skills = self._skills.rows()
+        snap.models = self._models
         return snap
+
+    def _start_model_catalog_refresh(self) -> None:
+        if self._model_catalog_task is not None and not self._model_catalog_task.done():
+            return
+        self._model_catalog_task = asyncio.get_running_loop().create_task(
+            self._refresh_model_catalog()
+        )
+
+    async def _refresh_model_catalog(self) -> None:
+        if self._llm is None:
+            return
+        from llm.openrouter import model_to_row
+
+        try:
+            models = await asyncio.wait_for(
+                self._llm.list_models(), timeout=MODEL_CATALOG_TIMEOUT_S
+            )
+        except Exception as exc:  # noqa: BLE001 - network/API failures, SDK errors
+            self._emit(
+                WarningOccurred(
+                    message=f"could not refresh the model catalog: {exc}"
+                )
+            )
+            return
+        self._models = [model_to_row(model) for model in models]
+        self._emit(ModelCatalogUpdated(models=self._models))
 
     def shutdown(self) -> None:
         if not self.close_session():
@@ -216,6 +254,10 @@ class EngineSession:
         task = self._turn_task
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+        if self._model_catalog_task is not None:
+            self._model_catalog_task.cancel()
+            await asyncio.gather(self._model_catalog_task, return_exceptions=True)
+            self._model_catalog_task = None
         if isinstance(self._loop, Orchestrator):
             self._loop.abort_all_children()
             with suppress(Exception):
@@ -271,9 +313,26 @@ class EngineSession:
     def emit_error(self, message: str) -> None:
         self._emit(ErrorOccurred(message=message))
 
-    def start_turn(self, text: str, model: str | None = None) -> None:
+    def start_turn(
+        self,
+        text: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
         chosen = _clean_model(model)
         self._state.selected_model = chosen
+        chosen_effort = _clean_effort(reasoning_effort)
+        if chosen_effort and chosen_effort not in REASONING_EFFORTS:
+            self._emit(
+                WarningOccurred(
+                    message=(
+                        f"reasoning_effort={chosen_effort!r} is not one of "
+                        f"{'|'.join(REASONING_EFFORTS)}; ignoring"
+                    )
+                )
+            )
+            chosen_effort = None
+        self._state.selected_reasoning_effort = chosen_effort
         self._add_message(role="user", text=text)
         self._persist()
         if self._loop is not None:
@@ -281,18 +340,29 @@ class EngineSession:
         if isinstance(self._loop, Orchestrator):
             self._loop.reset_user_message_spawns()
         if self._turn_task is not None and not self._turn_task.done():
-            self._pending_user.append((text, chosen))
+            self._pending_user.append((text, chosen, chosen_effort))
             return
-        self._begin_turn(text, model=chosen)
+        self._begin_turn(text, model=chosen, reasoning_effort=chosen_effort)
 
     def _begin_turn(
-        self, text: str, model: str | None = None, *, keep_model: bool = False
+        self,
+        text: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        *,
+        keep_model: bool = False,
+        keep_reasoning_effort: bool = False,
     ) -> None:
         if keep_model:
             chosen = self._state.selected_model
         else:
             chosen = _clean_model(model)
             self._state.selected_model = chosen
+        if keep_reasoning_effort:
+            chosen_effort = self._state.selected_reasoning_effort
+        else:
+            chosen_effort = _clean_effort(reasoning_effort)
+            self._state.selected_reasoning_effort = chosen_effort
         self._state.stats.last_turn_tokens = 0
         self._state.stats.last_turn_cost = 0.0
         self._aborting = False
@@ -301,7 +371,7 @@ class EngineSession:
         # treat classify_turn / compact as "orch idle, no children".
         self._on_state("thinking", 0)
         self._turn_task = asyncio.get_running_loop().create_task(
-            self._run_turn(text, model=chosen)
+            self._run_turn(text, model=chosen, reasoning_effort=chosen_effort)
         )
 
     def _maybe_pump(self) -> None:
@@ -310,21 +380,28 @@ class EngineSession:
         if self._state.ended or self._state.session_id is None:
             return
         if self._pending_user:
-            text, model = self._pending_user.pop(0)
-            self._begin_turn(text, model=model)
+            text, model, reasoning_effort = self._pending_user.pop(0)
+            self._begin_turn(text, model=model, reasoning_effort=reasoning_effort)
             return
         if self._inbox:
             report = "\n\n".join(self._inbox)
             self._inbox.clear()
-            self._begin_turn(report, keep_model=True)
+            self._begin_turn(report, keep_model=True, keep_reasoning_effort=True)
 
-    async def _run_turn(self, text: str, model: str | None = None) -> None:
+    async def _run_turn(
+        self,
+        text: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
         # CancelledError is swallowed: this task is the cancellation
         # boundary. After an abort, task.cancelled() is False and
         # exception() is None. Use self._aborting, not the task flags.
         try:
             if model and self._loop is not None:
                 self._loop.use_model(model)
+            if reasoning_effort and self._loop is not None:
+                self._loop.use_reasoning_effort(reasoning_effort)
             handled = await self._maybe_route_turn(text)
             if handled is not None:
                 reply = handled
@@ -346,6 +423,7 @@ class EngineSession:
         finally:
             if self._loop is not None:
                 self._loop.use_model(None)
+                self._loop.use_reasoning_effort(None)
             self._state.stats.elapsed_s += max(0.0, time.monotonic() - self._turn_started)
             self._persist()
             self._turn_task = None
@@ -395,6 +473,7 @@ class EngineSession:
             config=self._config,
             make_hooks=lambda agent_id: self._hooks_for(agent_id, "prompter"),
             model=self._state.selected_model,
+            reasoning_effort=self._state.selected_reasoning_effort,
             on_started=self._on_agent_started,
             on_finished=self._on_agent_finished,
         )
@@ -509,6 +588,7 @@ class EngineSession:
         if self._llm is None:
             self._loop = None
             return
+        self._start_model_catalog_refresh()
         self._start_lsp()
         self._files = FileTracker()
         self._state.agents = []

@@ -9,6 +9,7 @@ from llm.openrouter import (
     OpenRouterLLM,
     _cost_from,
     _prefer_usage,
+    _result_from,
     _result_from_stream,
     _usage_from,
 )
@@ -248,6 +249,54 @@ def test_idle_timeout_closes():
         assert stream.closed
 
     asyncio.run(run())
+
+
+def test_stream_accumulates_reasoning_details_opaquely():
+    async def run():
+        stream = FakeStream(
+            [
+                chunk(reasoning_details=[{"type": "reasoning.encrypted", "data": "abc"}]),
+                chunk(content="out", reasoning_details=[{"type": "reasoning.text", "text": "hi"}]),
+            ]
+        )
+        result = await _result_from_stream(stream, None, 1)
+        assert result.reasoning_details == [
+            {"type": "reasoning.encrypted", "data": "abc"},
+            {"type": "reasoning.text", "text": "hi"},
+        ]
+
+    asyncio.run(run())
+
+
+def test_stream_reasoning_details_absent_is_none():
+    async def run():
+        stream = FakeStream([chunk(content="out")])
+        result = await _result_from_stream(stream, None, 1)
+        assert result.reasoning_details is None
+
+    asyncio.run(run())
+
+
+def test_non_stream_result_includes_reasoning_details():
+    from types import SimpleNamespace as NS
+
+    response = NS(
+        choices=[
+            NS(
+                message=NS(
+                    content="done",
+                    tool_calls=None,
+                    reasoning_details=[{"type": "reasoning.text", "text": "chain"}],
+                ),
+                finish_reason="stop",
+            )
+        ],
+        usage=None,
+        model="fake",
+        id="gen-5",
+    )
+    result = _result_from(response)
+    assert result.reasoning_details == [{"type": "reasoning.text", "text": "chain"}]
 
 
 def test_cancelled_closes():

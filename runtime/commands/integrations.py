@@ -4,6 +4,7 @@ from protocol.commands import (
     ActivateSkill,
     CompleteMcpAuth,
     ReloadIntegrations,
+    RequestModelCatalog,
     SetMcpEnabled,
 )
 from protocol.events import ErrorOccurred
@@ -38,3 +39,10 @@ async def complete_mcp_auth(session, command: CompleteMcpAuth) -> None:
     if not session._require_session():
         return
     await session.complete_mcp_auth(command.server, command.token)
+
+
+@handles(RequestModelCatalog)
+async def request_model_catalog(session, command: RequestModelCatalog) -> None:
+    if not session._require_session():
+        return
+    await session._refresh_model_catalog()

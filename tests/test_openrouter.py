@@ -2,9 +2,10 @@
 from __future__ import annotations
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
-from llm.openrouter import OpenRouterLLM, load_env_sh, with_cache_breakpoints
+from llm.openrouter import OpenRouterLLM, load_env_sh, model_to_row, with_cache_breakpoints
 from llm.openrouter import _mark_message
 from runtime.config import EngineConfig
 
@@ -29,7 +30,9 @@ def test_openrouter_from_env_placeholder():
 def test_openrouter_from_env_success():
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-real-key"}, clear=True):
         llm = OpenRouterLLM.from_env()
-        assert llm.model == "openai/gpt-4o-mini"
+        from llm.openrouter import DEFAULT_MODEL
+
+        assert llm.model == DEFAULT_MODEL
 
 
 def test_openrouter_from_env_custom_model():
@@ -208,3 +211,139 @@ class TestOpenRouterLLM:
         monkeypatch.setenv("OPENROUTER_API_KEY", "<OPENROUTER_API_KEY>")
         with pytest.raises(RuntimeError, match="real key"):
             OpenRouterLLM.from_env()
+
+
+# ============================================================================
+# reasoning_effort / reasoning_details / model catalog
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_complete_forwards_reasoning_effort_to_sdk():
+    llm = OpenRouterLLM(api_key="sk-test", model="fake")
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="done", tool_calls=None), finish_reason="stop")],
+        usage=None,
+        model="fake",
+        id="gen-1",
+    )
+    send_async = AsyncMock(return_value=response)
+    llm._client = SimpleNamespace(chat=SimpleNamespace(send_async=send_async))
+    llm._config = EngineConfig(llm_stream=False)
+
+    await llm.complete([{"role": "user", "content": "hi"}], reasoning_effort="high")
+
+    assert send_async.await_args.kwargs["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_complete_omits_reasoning_effort_when_unset():
+    llm = OpenRouterLLM(api_key="sk-test", model="fake")
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="done", tool_calls=None), finish_reason="stop")],
+        usage=None,
+        model="fake",
+        id="gen-1",
+    )
+    send_async = AsyncMock(return_value=response)
+    llm._client = SimpleNamespace(chat=SimpleNamespace(send_async=send_async))
+    llm._config = EngineConfig(llm_stream=False)
+
+    await llm.complete([{"role": "user", "content": "hi"}])
+
+    assert "reasoning_effort" not in send_async.await_args.kwargs
+
+
+def test_model_to_row_unsupported():
+    model = SimpleNamespace(id="org/no-reasoning", name="No Reasoning", reasoning=None)
+    row = model_to_row(model)
+    assert row.id == "org/no-reasoning"
+    assert row.supports_reasoning is False
+    assert row.supported_efforts is None
+    assert row.mandatory is False
+
+
+def test_model_to_row_unrestricted_efforts():
+    reasoning = SimpleNamespace(
+        mandatory=False,
+        default_effort="medium",
+        default_enabled=True,
+        supported_efforts=None,
+        supports_max_tokens=True,
+    )
+    model = SimpleNamespace(id="anthropic/claude-x", name="Claude X", reasoning=reasoning)
+    row = model_to_row(model)
+    assert row.supports_reasoning is True
+    assert row.supported_efforts is None
+    assert row.default_effort == "medium"
+    assert row.default_enabled is True
+    assert row.supports_max_tokens is True
+
+
+def test_model_to_row_restricted_efforts():
+    reasoning = SimpleNamespace(
+        mandatory=True,
+        default_effort="high",
+        default_enabled=None,
+        supported_efforts=["high", "medium", "low"],
+        supports_max_tokens=False,
+    )
+    model = SimpleNamespace(id="openai/o-series", name="O Series", reasoning=reasoning)
+    row = model_to_row(model)
+    assert row.supports_reasoning is True
+    assert row.mandatory is True
+    assert row.supported_efforts == ["high", "medium", "low"]
+
+
+def test_model_to_row_unset_sentinel_is_absent():
+    from llm.openrouter import UNSET
+
+    reasoning = SimpleNamespace(
+        mandatory=False,
+        default_effort=UNSET,
+        default_enabled=None,
+        supported_efforts=UNSET,
+        supports_max_tokens=False,
+    )
+    model = SimpleNamespace(id="org/model", name="Model", reasoning=reasoning)
+    row = model_to_row(model)
+    # UNSET (field never sent by the API) must not be confused with an
+    # explicit null (unrestricted efforts) — both collapse to the same
+    # "no allowlist known" representation, but via the UNSET branch here.
+    assert row.default_effort is None
+    assert row.supported_efforts is None
+
+
+@pytest.mark.asyncio
+async def test_list_models_paginates_until_next_is_none():
+    page1_models = [SimpleNamespace(id="m1")]
+    page2_models = [SimpleNamespace(id="m2")]
+
+    page2 = SimpleNamespace(result=SimpleNamespace(data=page2_models), next=None)
+    page1 = SimpleNamespace(result=SimpleNamespace(data=page1_models), next=lambda: _async_const(page2))
+
+    def _async_const(value):
+        async def inner():
+            return value
+        return inner()
+
+    llm = OpenRouterLLM(api_key="sk-test", model="fake")
+    models_list = AsyncMock(return_value=page1)
+    llm._client = SimpleNamespace(models=SimpleNamespace(list_async=models_list))
+
+    models = await llm.list_models()
+
+    assert [m.id for m in models] == ["m1", "m2"]
+    assert models_list.await_args.kwargs["supported_parameters"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_models_reasoning_only_sets_filter():
+    page = SimpleNamespace(result=SimpleNamespace(data=[]), next=None)
+    llm = OpenRouterLLM(api_key="sk-test", model="fake")
+    models_list = AsyncMock(return_value=page)
+    llm._client = SimpleNamespace(models=SimpleNamespace(list_async=models_list))
+
+    await llm.list_models(reasoning_only=True)
+
+    assert models_list.await_args.kwargs["supported_parameters"] == "reasoning"

@@ -359,6 +359,47 @@ class McpServerRow:
 
 
 @dataclass
+class ModelRow:
+    id: str
+    name: str = ""
+    supports_reasoning: bool = False
+    mandatory: bool = False
+    default_effort: str | None = None
+    default_enabled: bool | None = None
+    # None = reasoning supported with no effort allowlist (every level
+    # accepted); meaningful only when supports_reasoning is True.
+    supported_efforts: list[str] | None = None
+    supports_max_tokens: bool = False
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "name": self.name,
+            "supports_reasoning": self.supports_reasoning,
+        }
+        if self.supports_reasoning:
+            payload["mandatory"] = self.mandatory
+            payload["default_effort"] = self.default_effort
+            payload["default_enabled"] = self.default_enabled
+            payload["supported_efforts"] = self.supported_efforts
+            payload["supports_max_tokens"] = self.supports_max_tokens
+        return payload
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> ModelRow:
+        return cls(
+            id=data.get("id") or "",
+            name=data.get("name") or "",
+            supports_reasoning=bool(data.get("supports_reasoning", False)),
+            mandatory=bool(data.get("mandatory", False)),
+            default_effort=data.get("default_effort"),
+            default_enabled=data.get("default_enabled"),
+            supported_efforts=data.get("supported_efforts"),
+            supports_max_tokens=bool(data.get("supports_max_tokens", False)),
+        )
+
+
+@dataclass
 class SkillRow:
     name: str
     description: str
@@ -488,7 +529,9 @@ class EngineSnapshot:
     agents: list[AgentRow] | None = None
     mcp_servers: list[McpServerRow] | None = None
     skills: list[SkillRow] | None = None
+    models: list[ModelRow] | None = None
     selected_model: str | None = None
+    selected_reasoning_effort: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -508,9 +551,12 @@ class EngineSnapshot:
             "agents": [row.to_json() for row in (self.agents or [])],
             "mcp_servers": [row.to_json() for row in (self.mcp_servers or [])],
             "skills": [row.to_json() for row in (self.skills or [])],
+            "models": [row.to_json() for row in (self.models or [])],
         }
         if self.selected_model:
             payload["selected_model"] = self.selected_model
+        if self.selected_reasoning_effort:
+            payload["selected_reasoning_effort"] = self.selected_reasoning_effort
         if self.pending_prompt is not None:
             payload["pending_prompt"] = self.pending_prompt.to_json()
         return payload
@@ -550,5 +596,12 @@ class EngineSnapshot:
                 item if isinstance(item, SkillRow) else SkillRow.from_json(item)
                 for item in data.get("skills") or []
             ],
+            models=[
+                item if isinstance(item, ModelRow) else ModelRow.from_json(item)
+                for item in data.get("models") or []
+            ],
             selected_model=(str(data.get("selected_model") or "").strip() or None),
+            selected_reasoning_effort=(
+                str(data.get("selected_reasoning_effort") or "").strip() or None
+            ),
         )

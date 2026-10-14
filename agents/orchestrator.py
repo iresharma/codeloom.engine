@@ -1259,6 +1259,12 @@ class Orchestrator(AgentLoop):
         override = (self._model or "").strip() or None
         if override:
             child_model = override
+        child_reasoning_effort = (
+            profile.reasoning_effort or self._config.reasoning_effort or ""
+        ).strip() or None
+        effort_override = (self._reasoning_effort or "").strip() or None
+        if effort_override:
+            child_reasoning_effort = effort_override
         hooks = None
         if self._make_child_hooks is not None:
             hooks = self._make_child_hooks(agent_id, profile.name)
@@ -1306,6 +1312,7 @@ class Orchestrator(AgentLoop):
             skills=self._skills,
             on_skill_activated=self._on_skill_activated,
             model=child_model,
+            reasoning_effort=child_reasoning_effort,
             on_memory=self._ctx.on_memory,
             judge=self._ctx.judge,
             on_judgement=self._ctx.on_judgement,

@@ -122,6 +122,39 @@ def test_execute_call_forwards_reasoning_to_on_tool(tmp_path):
     assert seen == ["I should look at the file tree before editing anything."]
 
 
+def test_reasoning_details_round_trip_into_next_call(tmp_path):
+    import asyncio
+
+    from tools.registry import discover_tools
+
+    blocks = [{"type": "reasoning.encrypted", "data": "opaque"}]
+    provider = FakeProvider(
+        results=[
+            LLMResult(
+                text="",
+                tool_calls=[ToolCall(id="1", name="list_files", arguments_json="{}")],
+                usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2, requests=1),
+                reasoning_details=blocks,
+            ),
+            LLMResult(text="done", usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2, requests=1)),
+        ]
+    )
+    loop = AgentLoop(llm=provider, workspace=tmp_path, tools=discover_tools())
+    asyncio.run(loop.run("look around"))
+
+    # The second complete() call's messages must carry the first result's
+    # reasoning_details back unmodified on the assistant turn.
+    assert len(provider.call_messages) == 2
+    second_call_messages = provider.call_messages[1]
+    assistant_messages = [
+        m
+        for m in second_call_messages
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    ]
+    assert assistant_messages
+    assert assistant_messages[0]["reasoning_details"] == blocks
+
+
 def test_agent_loop_language(tmp_path):
     from runtime.language import LanguageInfo
 
