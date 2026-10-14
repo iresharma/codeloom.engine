@@ -13,6 +13,8 @@ from agents.profile import (
     repo_has_tests,
 )
 
+WRITER_CONTINUES = 2
+
 CLOSING_REPORT = (
     "Then send your full closing report again: paths changed, reasoning:, "
     "test_plan:, and the checks you ran."
@@ -56,10 +58,10 @@ class Subagent(AgentLoop):
             self._config.max_tool_calls = profile.max_tool_calls
 
     async def _offer_continue(self, continues: int) -> str:
-        # One extra slice is enough for a task that ran slightly long.
-        # A second continue is how Auto burned millions of cached tokens.
+        # Keep the writer's history for two bounded extra slices before
+        # handing unfinished work back to the orchestrator.
         if self._profile.is_writer:
-            return "continue" if continues < 1 else "handoff"
+            return "continue" if continues < WRITER_CONTINUES else "handoff"
         return await super()._offer_continue(continues)
 
     async def _finish_nudge(self) -> str | None:

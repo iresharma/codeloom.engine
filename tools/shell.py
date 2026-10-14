@@ -4,6 +4,7 @@ from runtime.judge import Noul, Score
 from runtime.judge_decisions import classify_exec, exec_reason, exec_signals
 from runtime.tools.shell import (
     DEFAULT_TIMEOUT,
+    HARD_MAX_TIMEOUT,
     _hard_deny,
     format_command_result,
 )
@@ -55,7 +56,7 @@ def _exec_questions() -> dict:
 
 @tool(
     description=(
-        "Run a shell command in the workspace. No TTY, default 120s timeout. "
+        "Run a shell command in the workspace. No TTY, configurable default 120s timeout. "
         "A non-zero exit code is information — read the output. Some commands "
         "ask the user for approval."
     ),
@@ -76,7 +77,10 @@ def _exec_questions() -> dict:
             },
             "timeout": {
                 "type": "integer",
-                "description": "Timeout in seconds (default 120, max 600).",
+                "description": (
+                    "Timeout in seconds (default ENGINE_EXEC_TIMEOUT_S or 120). "
+                    "An explicit value overrides the default; bounded to 1–600."
+                ),
             },
         },
         "required": ["command"],
@@ -86,13 +90,14 @@ async def run_command(
     ctx: ToolContext,
     command: str,
     cwd: str = "",
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: int | None = None,
 ) -> str:
     config = ctx.config
     approval = getattr(config, "exec_approval", "auto") if config else "auto"
     file_limit = getattr(config, "exec_file_limit_mb", 2048) if config else 2048
-    if config is not None:
-        timeout = min(timeout, getattr(config, "exec_timeout_s", timeout) or timeout)
+    if timeout is None:
+        timeout = getattr(config, "exec_timeout_s", DEFAULT_TIMEOUT) if config else DEFAULT_TIMEOUT
+    timeout = min(max(1, timeout), HARD_MAX_TIMEOUT)
 
     stripped = command.strip()
     # Hard denylist wins unconditionally -- check it before paying for a

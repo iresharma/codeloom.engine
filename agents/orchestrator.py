@@ -12,7 +12,7 @@ from agents.agent_loop import AgentLoop
 from agents.compactor import AgentResult
 from agents.hooks import AgentHooks
 from agents.profile import MEMORY, SKILLS, ProfileRegistry, repo_has_tests
-from agents.subagent import Subagent
+from agents.subagent import WRITER_CONTINUES, Subagent
 from runtime.config import (
     CHILD_COMPACT_TRIGGER,
     CHILD_KEEP_FULL_TOOLS,
@@ -51,7 +51,7 @@ Routes — pick the first match and do not mix them:
 
 A debug route that ends in a clear fix becomes a code route on the next turn. Copy the debugger report into the coder task. Never spawn coder for research or debug.
 
-After a coder finishes with files touched, the engine starts tester and reviewer in the shared session workspace. Wait until both finish before starting another coder. Do not spawn those two for that change, and do not call settle_worktree while they run. If the reviewer wants changes or a test fails, spawn coder with continue_from=<that coder's agent_id> and put the failing command or the review points in the task.
+After a coder finishes successfully with files touched, the engine starts tester and reviewer in the shared session workspace (reviewer only for documentation-only edits). Only say they started when the engine reports their actual starts. A coder that returns max_turns or incomplete has not reached verification: continue_from that coder, or explicitly report incomplete work and that verification has not run. Wait until the started verifiers finish before starting another coder. Do not spawn those two for that change, and do not call settle_worktree while they run. If the reviewer wants changes or a test fails, spawn coder with continue_from=<that coder's agent_id> and put the failing command or the review points in the task.
 
 You have no filesystem tools. ask is the only reader, after you check workspace memory. coder still reads a path before editing it; that is verification, not discovery. Your job is to put the paths and facts into the coder task so it does not search the tree.
 
@@ -91,6 +91,12 @@ class _PendingSettle:
     dest: Path
     branch: str
     summary: str
+
+
+@dataclass
+class _UnverifiedChange:
+    files: list[str]
+    reason: str
 
 
 def _apply_run_status(
@@ -202,6 +208,7 @@ class Orchestrator(AgentLoop):
         # Verify-after-edit: coder run -> live tester/reviewer ids and reverse map.
         self._verifying: dict[str, set[str]] = {}
         self._verify_owner: dict[str, str] = {}
+        self._unverified_changes: dict[str, _UnverifiedChange] = {}
         self._deferred_settles: dict[str, _PendingSettle] = {}
         self._skills = kwargs.get("skills")
         self._on_skill_activated = kwargs.get("on_skill_activated")
@@ -535,11 +542,27 @@ class Orchestrator(AgentLoop):
             self._batch_id = ""
             self._batch_name = ""
             self._inbox_turn = False
+        if self._unverified_changes and not self._live_coder_ids():
+            notice = self._verification_notice()
+            reply = f"{reply}\n\n{notice}" if reply else notice
+            # Session closes the streamed message with this return value.
+            # Keep the same correction in the model's subsequent context too.
+            self._history.append({"role": "assistant", "content": notice})
         # Only a deliberately set-apart summary counts (see
         # `pr_summary_from_reply`); an empty result makes settle fall back to
         # the task plus the diff stat instead of pasting chatter into the PR.
         self._closing_summary = pr_summary_from_reply(reply)
         return reply
+
+    def _verification_notice(self) -> str:
+        details = "; ".join(
+            f"coder {owner[:8]}: {change.reason}"
+            for owner, change in self._unverified_changes.items()
+        )
+        return (
+            "Incomplete; verification has not run for all required agents. "
+            f"Edits remain in the session checkout. {details}"
+        )
 
     def closing_summary(self) -> str:
         """The orchestrator's own last reply -- what settle titles a PR from."""
@@ -840,6 +863,19 @@ class Orchestrator(AgentLoop):
         except Exception as exc:  # noqa: BLE001
             result = AgentResult(status="failed", outcome=f"error: {exc}")
         _apply_run_status(result, status, outcome)
+        if profile.name in _VERIFY_AFTER:
+            # Include edits even if finish/compaction failed. A later coder
+            # uses this same checkout, so verification must cover retained
+            # changes too, including when the continuation makes no new edits.
+            touched = list(result.files_touched) + list(child._files_touched)
+            for change in self._unverified_changes.values():
+                touched.extend(change.files)
+            result.files_touched = list(dict.fromkeys(touched))
+            if result.files_touched:
+                self._unverified_changes[agent_id] = _UnverifiedChange(
+                    files=list(result.files_touched),
+                    reason=f"status={result.status}; required verification has not started",
+                )
         if (
             result.status == "incomplete"
             and profile.name in _SURVEY_ONCE
@@ -876,6 +912,8 @@ class Orchestrator(AgentLoop):
             and not self._aborting_all
         ):
             verify_note = await self._start_verification(agent_id, task, result)
+        elif profile.name in _VERIFY_AFTER and result.files_touched:
+            verify_note = self._verification_notice()
         merged_text = None
         if self._on_agent_result is not None and not self._aborting_all:
             # Merge-gate judge call while the child is still listed live so
@@ -921,8 +959,13 @@ class Orchestrator(AgentLoop):
             )
         for name, text in tasks.items():
             if name not in self._profiles.names():
+                failed.append(f"{name} (profile unavailable)")
                 continue
-            reply = await self.spawn(name, text, verify_owner=owner)
+            try:
+                reply = await self.spawn(name, text, verify_owner=owner)
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{name} ({exc})")
+                continue
             if reply.startswith("started agent_id="):
                 child_id = reply.split("agent_id=", 1)[1].split()[0]
                 started.append(f"{name} {child_id[:8]}")
@@ -938,7 +981,14 @@ class Orchestrator(AgentLoop):
                 f"or a failing test, spawn coder with continue_from={owner}."
             )
         if failed:
-            parts.append("verify: could not start " + "; ".join(failed))
+            reason = "could not start " + "; ".join(failed)
+            self._unverified_changes[owner] = _UnverifiedChange(
+                files=list(result.files_touched), reason=reason
+            )
+            parts.append("verify: " + reason)
+            parts.append(self._verification_notice())
+        else:
+            self._unverified_changes.clear()
         return "\n".join(parts)
 
     async def _apply_merge_gate(self, profile: str, task: str, result: AgentResult) -> str:
@@ -1075,7 +1125,7 @@ class Orchestrator(AgentLoop):
             keep_full_tools=(
                 WRITER_KEEP_FULL_TOOLS if writer else CHILD_KEEP_FULL_TOOLS
             ),
-            max_continues=1 if writer else self._config.max_continues,
+            max_continues=WRITER_CONTINUES if writer else self._config.max_continues,
         )
         tools = self._all_tools.subset(profile.tool_names, profile=profile.name)
         child_model = (profile.model or self._config.child_model or "").strip() or None

@@ -12,6 +12,47 @@ from tests.fakes import FakeApprover
 from tools.shell import run_command
 
 
+@pytest.mark.parametrize("default,requested,expected", [
+    (120, None, 120),
+    (240, None, 240),
+    (120, 300, 300),
+    (60, 300, 300),
+    (240, 10, 10),
+    (120, 0, 1),
+    (120, -1, 1),
+    (120, 1000, 600),
+    (1000, None, 600),
+    (0, None, 1),
+])
+async def test_timeout_default_and_explicit_override(ctx, monkeypatch, default, requested, expected):
+    from runtime.tools.shell import CommandResult
+
+    seen = []
+
+    async def command(workspace, text, **kwargs):
+        seen.append(kwargs["timeout"])
+        return CommandResult(text, 0, "ok", "", 0)
+
+    monkeypatch.setattr("tools.shell.run_command_impl", command)
+    ctx.config = EngineConfig(exec_approval="never", exec_timeout_s=default)
+    arguments = {} if requested is None else {"timeout": requested}
+    output = await run_command._engine_tool.execute(ctx, {"command": "npm test", **arguments})
+    assert seen == [expected]
+    assert "exit code: 0" in output
+
+
+async def test_timeout_without_config_defaults_to_120(ctx, monkeypatch):
+    from runtime.tools.shell import CommandResult
+
+    async def command(workspace, text, **kwargs):
+        assert kwargs["timeout"] == 120
+        return CommandResult(text, 0, "ok", "", 0)
+
+    monkeypatch.setattr("tools.shell.run_command_impl", command)
+    ctx.config = None
+    await run_command(ctx, "npm test")
+
+
 def _judged_ctx(ctx, judge, *, judge_mode="enforcing"):
     ctx.config = EngineConfig(exec_approval="judged", judge_mode=judge_mode)
     ctx.judge = judge

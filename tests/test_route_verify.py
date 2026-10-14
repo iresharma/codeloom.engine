@@ -402,7 +402,7 @@ def test_finish_marks_incomplete_when_diagnostics_are_dirty(tmp_path):
     asyncio.run(run())
 
 
-def test_subagent_allows_one_continue_then_handoff(tmp_path):
+def test_subagent_allows_two_continues_then_handoff(tmp_path):
     async def run():
         tools = discover_tools().subset(CODER.tool_names, profile="coder")
         child = Subagent(
@@ -414,7 +414,7 @@ def test_subagent_allows_one_continue_then_handoff(tmp_path):
             config=EngineConfig(max_turns=8),
         )
         assert await child._offer_continue(0) == "continue"
-        assert await child._offer_continue(1) == "handoff"
+        assert await child._offer_continue(1) == "continue"
         assert await child._offer_continue(2) == "handoff"
 
     asyncio.run(run())
