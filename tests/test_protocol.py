@@ -73,6 +73,74 @@ def test_snapshot_optional_language():
     assert decoded.snapshot.message_count == 0
 
 
+def test_submit_user_message_reasoning_effort_round_trip():
+    from protocol.commands import SubmitUserMessage
+
+    parsed = decode_command(
+        encode(SubmitUserMessage(text="hi", reasoning_effort="high"))
+    )
+    assert parsed.reasoning_effort == "high"
+    omitted = decode_command(encode(SubmitUserMessage(text="hi")))
+    assert omitted.reasoning_effort is None
+    assert b'"reasoning_effort"' not in encode(SubmitUserMessage(text="hi"))
+
+
+def test_request_model_catalog_round_trip():
+    from protocol.commands import RequestModelCatalog
+
+    parsed = decode_command(encode(RequestModelCatalog()))
+    assert isinstance(parsed, RequestModelCatalog)
+
+
+def test_model_catalog_updated_round_trip():
+    from protocol.events import ModelCatalogUpdated
+    from protocol.snapshot import ModelRow
+
+    rows = [
+        ModelRow(id="org/no-reasoning", supports_reasoning=False),
+        ModelRow(
+            id="anthropic/claude-opus-5.5",
+            name="Claude Opus 5.5",
+            supports_reasoning=True,
+            mandatory=False,
+            default_effort="medium",
+            default_enabled=True,
+            supported_efforts=None,
+            supports_max_tokens=True,
+        ),
+    ]
+    decoded = decode_event(encode(ModelCatalogUpdated(models=rows)))
+    assert [m.id for m in decoded.models] == [
+        "org/no-reasoning",
+        "anthropic/claude-opus-5.5",
+    ]
+    assert decoded.models[0].supports_reasoning is False
+    assert decoded.models[0].supported_efforts is None
+    assert decoded.models[1].supports_reasoning is True
+    assert decoded.models[1].supported_efforts is None
+    assert decoded.models[1].default_effort == "medium"
+
+
+def test_engine_snapshot_carries_models_and_selected_reasoning_effort():
+    from protocol.snapshot import EngineSnapshot, GitState, ModelRow
+
+    snap = EngineSnapshot(
+        session_id="s",
+        workspace="/tmp",
+        messages=[],
+        ended=False,
+        open_files=[],
+        file_tree=[],
+        git=GitState.empty(),
+        models=[ModelRow(id="anthropic/claude-opus-5.5", supports_reasoning=True)],
+        selected_reasoning_effort="xhigh",
+    )
+    event = SnapshotReady(snapshot=snap)
+    decoded = decode_event(encode(event))
+    assert decoded.snapshot.models[0].id == "anthropic/claude-opus-5.5"
+    assert decoded.snapshot.selected_reasoning_effort == "xhigh"
+
+
 def test_new_commands_and_events_round_trip():
     from protocol.commands import AbortAgent, AnswerPrompt
     from protocol.events import AgentStarted, UserPromptRequested

@@ -24,6 +24,7 @@ CALIBRATED_SITE_MODES = {
     "brief": "advisory",
 }
 TYPESAFE_PLACEHOLDERS = {"", "...", "your-key", "changeme"}
+REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "none")
 JUDGE_SITES = (
     "exec",
     "tools",
@@ -66,6 +67,7 @@ class EngineConfig:
     child_model: str = ""
     model_cheap: str = ""
     model_strong: str = ""
+    reasoning_effort: str = ""
     max_spawns_per_turn: int = 8
     subscriber_capacity: int = 4096
     subscriber_bytes: int = 1 << 20
@@ -144,6 +146,9 @@ class EngineConfig:
         ).strip()
         config.model_cheap = (os.environ.get("ENGINE_MODEL_CHEAP") or "").strip()
         config.model_strong = (os.environ.get("ENGINE_MODEL_STRONG") or "").strip()
+        config.reasoning_effort = _env_reasoning_effort(
+            "ENGINE_REASONING_EFFORT", warnings
+        )
         config.max_spawns_per_turn = _env_int(
             "ENGINE_MAX_SPAWNS_PER_TURN", config.max_spawns_per_turn, warnings
         )
@@ -305,6 +310,21 @@ def _env_judge_site(name: str, warnings: list[str]) -> str:
     if value not in ("off", "advisory", "enforcing"):
         warnings.append(
             f"{name}={raw!r} is not off|advisory|enforcing; ignoring override"
+        )
+        return ""
+    return value
+
+
+def _env_reasoning_effort(name: str, warnings: list[str]) -> str:
+    """Global default reasoning-effort level: empty string means 'omit the
+    parameter entirely' (no default)."""
+    raw = os.environ.get(name, "")
+    value = (raw or "").strip().lower()
+    if value == "":
+        return ""
+    if value not in REASONING_EFFORTS:
+        warnings.append(
+            f"{name}={raw!r} is not one of {'|'.join(REASONING_EFFORTS)}; ignoring"
         )
         return ""
     return value

@@ -57,6 +57,10 @@ class LLMResult:
     finish_reason: str | None = None
     model: str | None = None
     generation_id: str | None = None
+    # Opaque OpenRouter reasoning_details blocks (signed/encrypted/text).
+    # Never interpreted — only round-tripped back into the next request's
+    # assistant message so reasoning continuity holds across tool calls.
+    reasoning_details: list[dict] | None = None
 
 
 class LLMProvider(Protocol):
@@ -69,4 +73,5 @@ class LLMProvider(Protocol):
         *,
         on_delta: Callable[[str, str], None] | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResult: ...

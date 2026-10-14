@@ -12,6 +12,7 @@ from protocol.snapshot import (
     McpServerRow,
     MemoryDecision,
     MemoryFileNote,
+    ModelRow,
     SessionSummary,
     SkillRow,
     Stats,
@@ -272,6 +273,12 @@ class McpServersUpdated(ProtocolMessage):
 @dataclass
 class SkillCatalogUpdated(ProtocolMessage):
     skills: list[SkillRow]
+
+
+@event
+@dataclass
+class ModelCatalogUpdated(ProtocolMessage):
+    models: list[ModelRow]
 
 
 @event

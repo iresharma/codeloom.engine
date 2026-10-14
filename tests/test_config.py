@@ -57,6 +57,26 @@ def test_reads_env(monkeypatch, tmp_path):
     assert config.llm_stream is False
 
 
+def test_reasoning_effort_default_empty(monkeypatch, tmp_path):
+    monkeypatch.delenv("ENGINE_REASONING_EFFORT", raising=False)
+    config = EngineConfig.from_env(tmp_path)
+    assert config.reasoning_effort == ""
+
+
+def test_reasoning_effort_reads_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_REASONING_EFFORT", "high")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.reasoning_effort == "high"
+    assert config.warnings == []
+
+
+def test_reasoning_effort_invalid_warns(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGINE_REASONING_EFFORT", "extreme")
+    config = EngineConfig.from_env(tmp_path)
+    assert config.reasoning_effort == ""
+    assert any("ENGINE_REASONING_EFFORT" in w for w in config.warnings)
+
+
 def test_invalid_turn_continue_warns(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGINE_TURN_CONTINUE", "always")
     config = EngineConfig.from_env(tmp_path)

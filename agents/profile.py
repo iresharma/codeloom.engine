@@ -196,6 +196,7 @@ class AgentProfile:
     max_tool_calls: int = 50
     model: str | None = None
     temperature: float = 0.2
+    reasoning_effort: str | None = None
     needs_worktree: bool = False
     join_worktree: bool = False
     # When the repo already has tests, a source edit is not finished until a

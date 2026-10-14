@@ -124,7 +124,17 @@ def _parse_interview_json(text: str) -> bool | None:
 class Prompter(AgentLoop):
     """Short AgentLoop with one tool. Not registered by discover_profiles()."""
 
-    def __init__(self, llm, *, ask_user, config, hooks=None, model=None, agent_id=""):
+    def __init__(
+        self,
+        llm,
+        *,
+        ask_user,
+        config,
+        hooks=None,
+        model=None,
+        reasoning_effort=None,
+        agent_id="",
+    ):
         registry = ToolRegistry()
         registry.register(_ask_user_tool(self))
         base = config
@@ -148,6 +158,7 @@ class Prompter(AgentLoop):
             role="prompter",
             profile="prompter",
             model=model,
+            reasoning_effort=reasoning_effort,
             freeze_system=True,
             concurrent_tools=False,
             write_globs=[],
@@ -283,6 +294,7 @@ async def run_prompter(
     hooks: AgentHooks | None = None,
     make_hooks=None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
     on_started=None,
     on_finished=None,
 ) -> str | None:
@@ -303,6 +315,7 @@ async def run_prompter(
             config=config,
             hooks=hooks,
             model=model,
+            reasoning_effort=reasoning_effort,
             agent_id=agent_id,
         )
         reply = await agent.run(text)

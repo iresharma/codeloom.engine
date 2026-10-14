@@ -23,6 +23,7 @@ class SessionState:
     pending_prompt: PendingPrompt | None = None
     agents: list[AgentRow] = field(default_factory=list)
     selected_model: str | None = None
+    selected_reasoning_effort: str | None = None
 
     def snapshot(
         self,
@@ -50,6 +51,7 @@ class SessionState:
             pending_prompt=self.pending_prompt,
             agents=list(self.agents),
             selected_model=self.selected_model,
+            selected_reasoning_effort=self.selected_reasoning_effort,
         )
 
     @classmethod
@@ -63,6 +65,7 @@ class SessionState:
             pending_prompt=None,
             agents=[],
             selected_model=snap.selected_model,
+            selected_reasoning_effort=snap.selected_reasoning_effort,
         )
 
 

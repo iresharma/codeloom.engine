@@ -192,3 +192,103 @@ def test_selected_model_sticks_across_inbox_turns(tmp_path):
         assert seen == [None]
 
     asyncio.run(run())
+
+
+def test_selected_reasoning_effort_sticks_across_inbox_turns(tmp_path):
+    """A composer effort choice applies to later agent reports, mirroring
+    the selected_model lifecycle exactly, and clears on an omitted turn."""
+
+    async def run():
+        from runtime.store import SessionState
+        from runtime.store.sqlite import load
+
+        session = await _bound(tmp_path)
+        loop = session._loop
+        seen: list = []
+        real = loop.use_reasoning_effort
+
+        def spy(effort):
+            seen.append(effort)
+            real(effort)
+
+        loop.use_reasoning_effort = spy
+        session.start_turn("build the preview", reasoning_effort="high")
+        await _wait_idle(session)
+        assert seen[0] == "high"
+        assert session._state.selected_reasoning_effort == "high"
+        loaded = load(session._db_path, session._state.session_id)
+        assert loaded.selected_reasoning_effort == "high"
+        assert (
+            SessionState.from_snapshot(loaded).selected_reasoning_effort == "high"
+        )
+
+        # A continuation (inbox/child-report) keeps the sticky selection.
+        seen.clear()
+        session._inbox.append("[agent ask abcdef12 finished]\nfound the clients card")
+        session._maybe_pump()
+        await _wait_idle(session)
+        assert seen[0] == "high"
+
+        # An omitted turn clears the pin, same as model.
+        seen.clear()
+        session.start_turn("switch back", reasoning_effort=None)
+        await _wait_idle(session)
+        assert session._state.selected_reasoning_effort is None
+        assert seen[0] is None
+
+    asyncio.run(run())
+
+
+def test_submit_user_message_queues_reasoning_effort_while_turn_in_flight(tmp_path):
+    """A SubmitUserMessage sent while a turn is running preserves its
+    reasoning_effort through _pending_user into the eventual _begin_turn."""
+    import time
+
+    from protocol.commands import StartSession
+    from runtime.config import EngineConfig
+    from runtime.session import EngineSession
+
+    async def run():
+        hang = asyncio.Event()
+        session = EngineSession(tmp_path, tmp_path / "session.db")
+        await session.start()
+        session._llm = FakeProvider(hang=hang)
+        session._config = EngineConfig(max_turns=4)
+        await session.handle(StartSession(workspace=str(tmp_path)))
+        session._loop._llm = session._llm
+
+        session.start_turn("first", reasoning_effort="low")
+        assert session._turn_task is not None and not session._turn_task.done()
+
+        session.start_turn("second", reasoning_effort="xhigh")
+        assert session._pending_user == [("second", None, "xhigh")]
+
+        hang.set()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            turn = session._turn_task
+            if (turn is None or turn.done()) and not session._pending_user:
+                break
+            await asyncio.sleep(0.02)
+        # The queued turn's effort selection was carried through, not lost.
+        assert session._state.selected_reasoning_effort == "xhigh"
+
+    asyncio.run(run())
+
+
+def test_bad_reasoning_effort_warns_and_is_ignored(tmp_path):
+    async def run():
+        from protocol.events import WarningOccurred
+
+        session = await _bound(tmp_path)
+        queue = session.subscribe()
+        session.start_turn("hello", reasoning_effort="extreme")
+        await _wait_idle(session)
+        assert session._state.selected_reasoning_effort is None
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        warnings = [e for e in events if isinstance(e, WarningOccurred)]
+        assert any("extreme" in w.message for w in warnings)
+
+    asyncio.run(run())

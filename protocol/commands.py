@@ -34,6 +34,13 @@ class ListSessions(ProtocolMessage):
 class SubmitUserMessage(ProtocolMessage):
     text: str
     model: str | None = None
+    reasoning_effort: str | None = None
+
+
+@command
+@dataclass
+class RequestModelCatalog(ProtocolMessage):
+    pass
 
 
 @command

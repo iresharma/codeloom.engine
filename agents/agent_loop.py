@@ -203,6 +203,7 @@ class AgentLoop:
         unlocked_skills=None,
         on_skill_activated=None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         freeze_system: bool = False,
         on_memory=None,
         judge=None,
@@ -272,6 +273,7 @@ class AgentLoop:
         self._catalog_query = ""
         self._on_skill_activated = on_skill_activated
         self._model = model
+        self._reasoning_effort = reasoning_effort
         self._freeze_system = freeze_system
         self._frozen_system: str | None = None
         self._frozen_parts: dict[str, str] | None = None
@@ -301,6 +303,11 @@ class AgentLoop:
         """A one-shot model override for the next `run()` call. The caller
         resets it afterwards (pass None to clear it)."""
         self._model = model or None
+
+    def use_reasoning_effort(self, effort: str | None) -> None:
+        """A one-shot reasoning-effort override for the next `run()` call.
+        The caller resets it afterwards (pass None to clear it)."""
+        self._reasoning_effort = effort or None
 
     def unlock_skill(self, name: str) -> bool:
         catalog = self._skills
@@ -849,7 +856,12 @@ class AgentLoop:
         return str(getattr(self._llm, "model", "") or "")
 
     async def _call_llm(self, messages, *, tools=None, on_delta=None):
-        extra = {"model": self._model} if self._model else {}
+        extra: dict = {}
+        if self._model:
+            extra["model"] = self._model
+        effort = self._reasoning_effort or (self._config.reasoning_effort or None)
+        if effort:
+            extra["reasoning_effort"] = effort
         started = time.monotonic()
         failed = False
         result = None
@@ -942,23 +954,27 @@ class AgentLoop:
 
     async def _dispatch(self, result) -> None:
         self._state("calling_tool")
-        self._history.append(
-            {
-                "role": "assistant",
-                "content": result.text or None,
-                "tool_calls": [
-                    {
-                        "id": call.id,
-                        "type": "function",
-                        "function": {
-                            "name": call.name,
-                            "arguments": call.arguments_json,
-                        },
-                    }
-                    for call in result.tool_calls
-                ],
-            }
-        )
+        assistant_message: dict = {
+            "role": "assistant",
+            "content": result.text or None,
+            "tool_calls": [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments_json,
+                    },
+                }
+                for call in result.tool_calls
+            ],
+        }
+        # Some providers (e.g. Anthropic via OpenRouter) require these
+        # opaque reasoning blocks echoed back unmodified to continue
+        # reasoning across a tool call. Never interpreted here.
+        if result.reasoning_details:
+            assistant_message["reasoning_details"] = result.reasoning_details
+        self._history.append(assistant_message)
         reasoning = result.text or ""
         if self._concurrent_tools and len(result.tool_calls) > 1:
             outputs = await asyncio.gather(

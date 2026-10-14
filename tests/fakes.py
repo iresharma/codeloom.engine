@@ -31,15 +31,31 @@ class FakeStream:
 
 
 class FakeProvider:
-    def __init__(self, results=None, hang=None, deltas=None):
+    def __init__(
+        self,
+        results=None,
+        hang=None,
+        deltas=None,
+        list_models_result=None,
+        list_models_hang=None,
+        list_models_error=None,
+    ):
         self.model = "fake"
         self.results = list(results or [])
         self.hang = hang
         self.calls = 0
         self.deltas = deltas or []
+        self.call_kwargs: list[dict] = []
+        self.call_messages: list[list[dict]] = []
+        self.list_models_result = list_models_result
+        self.list_models_hang = list_models_hang
+        self.list_models_error = list_models_error
+        self.list_models_calls = 0
 
     async def complete(self, messages, tools=None, *, on_delta=None, **kwargs):
         self.calls += 1
+        self.call_kwargs.append(dict(kwargs))
+        self.call_messages.append(list(messages))
         if self.hang is not None:
             await self.hang.wait()
         if self.deltas and on_delta:
@@ -48,6 +64,14 @@ class FakeProvider:
         if self.results:
             return self.results.pop(0)
         return LLMResult(text="done", usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15, requests=1))
+
+    async def list_models(self, reasoning_only: bool = False):
+        self.list_models_calls += 1
+        if self.list_models_error is not None:
+            raise self.list_models_error
+        if self.list_models_hang is not None:
+            await self.list_models_hang.wait()
+        return list(self.list_models_result or [])
 
 
 class FakeApprover:
@@ -60,10 +84,11 @@ class FakeApprover:
         return self.answer
 
 
-def chunk(*, content=None, reasoning=None, tool_calls=None, usage=None, error=None, finish=None, model="fake", chunk_id=None):
+def chunk(*, content=None, reasoning=None, reasoning_details=None, tool_calls=None, usage=None, error=None, finish=None, model="fake", chunk_id=None):
     delta = SimpleNamespace(
         content=content,
         reasoning=reasoning,
+        reasoning_details=reasoning_details,
         tool_calls=tool_calls or [],
     )
     choice = SimpleNamespace(delta=delta, finish_reason=finish)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import os
 from collections.abc import Callable
@@ -10,6 +11,12 @@ from pathlib import Path
 from openrouter import OpenRouter
 
 from llm.provider import LLMError, LLMResult, ToolCall, Usage
+from protocol.snapshot import ModelRow
+
+try:
+    from openrouter.types import UNSET
+except ImportError:  # pragma: no cover - older SDK
+    UNSET = None  # type: ignore[assignment]
 
 try:
     from openrouter.utils.retries import BackoffStrategy, RetryConfig
@@ -31,6 +38,7 @@ __all__ = [
     "ToolCall",
     "Usage",
     "load_env_sh",
+    "model_to_row",
     "with_cache_breakpoints",
 ]
 
@@ -54,6 +62,29 @@ class OpenRouterLLM:
         model = os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL)
         return cls(api_key=api_key, model=model, config=config)
 
+    async def list_models(self, reasoning_only: bool = False) -> list:
+        """Thin wrapper over the SDK's models.list — returns raw SDK `Model`
+        objects. Caching/adaptation into protocol rows lives on the caller."""
+        token = self._api_key
+        authorization = (
+            token if token.lower().startswith("bearer ") else f"Bearer {token}"
+        )
+        models: list = []
+        page = await self._client.models.list_async(
+            supported_parameters="reasoning" if reasoning_only else None,
+            http_headers={"Authorization": authorization},
+        )
+        pages_seen = 0
+        while page is not None and pages_seen < 10:
+            pages_seen += 1
+            models.extend(page.result.data)
+            next_fn = page.next
+            if next_fn is None:
+                break
+            outcome = next_fn()
+            page = await outcome if inspect.isawaitable(outcome) else outcome
+        return models
+
     async def complete(
         self,
         messages: list[dict],
@@ -62,6 +93,7 @@ class OpenRouterLLM:
         on_delta: Callable[[str, str], None] | None = None,
         model: str | None = None,
         temperature: float | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResult:
         token = self._api_key
         authorization = (
@@ -84,6 +116,8 @@ class OpenRouterLLM:
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
         if cached_tools:
             kwargs["tools"] = cached_tools
         retries = _retry_config()
@@ -124,6 +158,41 @@ class OpenRouterLLM:
         if cost:
             usage.cost = cost
         return result
+
+
+def _unset_or(value, default=None):
+    """Treat the SDK's UNSET sentinel (field never sent by the API) the
+    same as an absent value, distinct from an explicit JSON null (None)."""
+    if UNSET is not None and value is UNSET:
+        return default
+    return value
+
+
+def model_to_row(model) -> ModelRow:
+    """Adapt an SDK `Model` into the protocol's `ModelRow`. Distinguishes
+    three states for reasoning support: unsupported (model.reasoning is
+    None), supported with no effort allowlist (supported_efforts is
+    explicitly None), and supported with a restricted allowlist (a concrete
+    list) — never collapsing "field omitted by the API" (UNSET) into either."""
+    model_id = getattr(model, "id", "") or ""
+    name = getattr(model, "name", "") or ""
+    reasoning = getattr(model, "reasoning", None)
+    if reasoning is None:
+        return ModelRow(id=model_id, name=name, supports_reasoning=False)
+    supported_efforts = _unset_or(getattr(reasoning, "supported_efforts", UNSET))
+    if supported_efforts is not None:
+        supported_efforts = [str(level) for level in supported_efforts if level]
+    default_effort = _unset_or(getattr(reasoning, "default_effort", UNSET))
+    return ModelRow(
+        id=model_id,
+        name=name,
+        supports_reasoning=True,
+        mandatory=bool(getattr(reasoning, "mandatory", False)),
+        default_effort=str(default_effort) if default_effort else None,
+        default_enabled=getattr(reasoning, "default_enabled", None),
+        supported_efforts=supported_efforts,
+        supports_max_tokens=bool(getattr(reasoning, "supports_max_tokens", False)),
+    )
 
 
 def load_env_sh(path: Path) -> None:
@@ -312,6 +381,22 @@ def _prefer_usage(current: Usage | None, incoming: Usage | None) -> Usage | None
     )
 
 
+def _reasoning_details_from(obj) -> list[dict] | None:
+    """Opaque OpenRouter reasoning_details blocks. Never interpreted — just
+    dumped to plain JSON-safe dicts so they round-trip back unmodified."""
+    raw = getattr(obj, "reasoning_details", None)
+    if not raw:
+        return None
+    blocks: list[dict] = []
+    for item in raw:
+        dump = getattr(item, "model_dump", None)
+        if callable(dump):
+            blocks.append(dump(mode="json", exclude_none=True))
+        elif isinstance(item, dict):
+            blocks.append(item)
+    return blocks or None
+
+
 def _result_from(response) -> LLMResult:
     choices = getattr(response, "choices", None)
     if not choices:
@@ -329,6 +414,7 @@ def _result_from(response) -> LLMResult:
         finish_reason=str(finish) if finish else None,
         model=getattr(response, "model", None),
         generation_id=getattr(response, "id", None) or None,
+        reasoning_details=_reasoning_details_from(message),
     )
 
 
@@ -369,6 +455,7 @@ def _tool_calls_from(message) -> list[ToolCall]:
 async def _result_from_stream(stream, on_delta, idle_s: float) -> LLMResult:
     text_parts: list[str] = []
     calls: dict[int, dict] = {}
+    reasoning_blocks: list[dict] = []
     usage = None
     finish_reason = None
     model = None
@@ -416,6 +503,15 @@ async def _result_from_stream(stream, on_delta, idle_s: float) -> LLMResult:
                     # Displayed to the client; not fed back into history.
                     if on_delta:
                         on_delta("reasoning", reasoning)
+                # Structured reasoning_details (unlike the plain-text summary
+                # above) ARE fed back into history — some providers require
+                # them verbatim on the next request to continue reasoning
+                # across a tool call. May arrive split across chunks or
+                # attached to only the first of several parallel tool calls;
+                # accumulate everything seen, in order.
+                details = _reasoning_details_from(delta)
+                if details:
+                    reasoning_blocks.extend(details)
                 for item in getattr(delta, "tool_calls", None) or []:
                     index = int(getattr(item, "index", 0) or 0)
                     slot = calls.setdefault(
@@ -450,6 +546,7 @@ async def _result_from_stream(stream, on_delta, idle_s: float) -> LLMResult:
             finish_reason=finish_reason,
             model=model,
             generation_id=generation_id,
+            reasoning_details=reasoning_blocks or None,
         )
     finally:
         if closer is not None:

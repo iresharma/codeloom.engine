@@ -1254,3 +1254,60 @@ def test_make_subagent_uses_turn_model(tmp_path):
     orch.use_model(None)
     child = orch._make_subagent(CODER, "def456", tmp_path, isolated=False)
     assert child._model == CODER.model
+
+
+def test_reasoning_effort_precedence_turn_override_beats_profile_beats_engine_default(
+    tmp_path,
+):
+    from dataclasses import replace
+
+    from agents.profile import discover_profiles
+    from agents.profiles.coder import PROFILE as CODER
+
+    config = EngineConfig(reasoning_effort="low")
+    orch = Orchestrator(
+        FakeProvider(),
+        all_tools=discover_tools(),
+        profiles=discover_profiles(),
+        workspace=tmp_path,
+        config=config,
+    )
+
+    # No profile pin, no turn override -> engine default.
+    child = orch._make_subagent(CODER, "a", tmp_path, isolated=False)
+    assert child._reasoning_effort == "low"
+
+    # Profile pin beats the engine default.
+    profiled = replace(CODER, reasoning_effort="high")
+    child = orch._make_subagent(profiled, "b", tmp_path, isolated=False)
+    assert child._reasoning_effort == "high"
+
+    # A turn-level override beats the profile pin.
+    orch.use_reasoning_effort("max")
+    child = orch._make_subagent(profiled, "c", tmp_path, isolated=False)
+    assert child._reasoning_effort == "max"
+
+    # Resetting the turn override falls back to the profile pin again.
+    orch.use_reasoning_effort(None)
+    child = orch._make_subagent(profiled, "d", tmp_path, isolated=False)
+    assert child._reasoning_effort == "high"
+
+
+def test_orchestrators_own_calls_fall_back_to_engine_default_reasoning_effort(tmp_path):
+    from agents.profile import discover_profiles
+
+    config = EngineConfig(reasoning_effort="medium")
+    provider = FakeProvider()
+    orch = Orchestrator(
+        provider,
+        all_tools=discover_tools(),
+        profiles=discover_profiles(),
+        workspace=tmp_path,
+        config=config,
+    )
+    asyncio.run(orch._call_llm([{"role": "user", "content": "hi"}]))
+    assert provider.call_kwargs[-1].get("reasoning_effort") == "medium"
+
+    orch.use_reasoning_effort("xhigh")
+    asyncio.run(orch._call_llm([{"role": "user", "content": "hi"}]))
+    assert provider.call_kwargs[-1].get("reasoning_effort") == "xhigh"
