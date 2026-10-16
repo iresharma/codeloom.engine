@@ -23,6 +23,10 @@ _which = shutil.which
 
 
 def run_gh(workspace: Path, args: list[str], *, timeout: float = 60) -> str:
+    from runtime.tools.research_gateway import request
+    remote = request("github", {"args": args})
+    if remote is not None:
+        return remote
     if not _which("gh"):
         return MISSING_GH
     result = exec_cmd(Path(workspace), ["gh", *args], timeout=timeout)

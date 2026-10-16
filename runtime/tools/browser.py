@@ -173,7 +173,11 @@ async def browser_screenshot(
         state = await _state_for(agent_id)
         if state is None:
             return ScreenshotResult(_missing())
+        # Each verifier owns its evidence, even when several share a checkout.
+        owner = "".join(c for c in (agent_id or "default") if c.isalnum() or c in "-_")
         folder = workspace / ".engine" / "debug"
+        if agent_id:
+            folder = folder / (owner or "default")
         folder.mkdir(parents=True, exist_ok=True)
         stem = Path(name).name or "shot.jpg"
         stem = Path(stem).stem or "shot"

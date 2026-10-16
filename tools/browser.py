@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from tools.base import ToolContext, ToolResult, tool
 from runtime.tools import browser as impl
 
@@ -52,6 +54,8 @@ async def browser_screenshot(
     result = await impl.browser_screenshot(
         ctx.workspace, name, full_page=full_page, agent_id=ctx.agent_id
     )
+    if os.environ.get("ENGINE_TOOL_IMAGE_MODE") == "artifact-only":
+        return result.text
     if result.image or result.wire:
         return ToolResult(
             text=result.text,

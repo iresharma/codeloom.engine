@@ -74,6 +74,10 @@ _GH_RESERVED = {
 
 
 def web_fetch(url: str, *, timeout: float = 20.0) -> str:
+    from runtime.tools.research_gateway import request
+    remote = request("fetch", {"url": url})
+    if remote is not None:
+        return remote
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return "error: url must be http or https"
@@ -153,6 +157,10 @@ def github_fetch_hint(url: str) -> str:
 
 
 def web_search(query: str, *, count: int = 5) -> str:
+    from runtime.tools.research_gateway import request
+    remote = request("search", {"query": query, "count": count})
+    if remote is not None:
+        return remote
     key = (os.environ.get("BRAVE_API_KEY") or "").strip()
     if not key:
         return (
